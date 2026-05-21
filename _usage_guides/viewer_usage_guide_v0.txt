@@ -1,0 +1,185 @@
+Viewer Usage Guide v0
+
+Goal
+- Generate an HTML viewer from a prepared dataset.
+- Reuse viewer assets when available.
+- Use the viewer for image inspection, figure browsing, subset overlays, and ROI annotation.
+
+
+Materials
+
+Minimum required
+- A prepared dataset triplet in one folder:
+  - `<stem>_df.csv`
+  - `<stem>_obs.csv`
+  - `<stem>_dfxy.csv`
+- Matching row index across all three files.
+- In `obs`:
+  - `slide_scene`
+- In `dfxy` or the viewer-resolved XY source:
+  - usable X/Y coordinates for cells
+
+Usually required for practical image viewing
+- A viewer assets/output folder.
+- Reusable viewer assets in that folder, or source images to build them from scratch.
+
+Optional but useful
+- Figures folder
+  - used to populate the figures panel
+  - may contain global figs, per-patient figs, per-subset figs, neighborhood figs, etc.
+- Segmentation masks / segmentation folder(s)
+  - used for outline overlays
+  - if missing or unmatched, the viewer can fall back to centroid-based overlays
+- `cellid` in `obs`
+  - optional
+  - if absent, the viewer can synthesize it from `slide_scene_cellid` or `obs.index` when needed
+
+Useful figure-organization conventions
+- A folder named after the active view value can be auto-matched.
+  - example: `pt-4021`
+- A folder named after the active subset value can be auto-matched.
+  - example: `3. epithelial` for `3 : epithelial`
+- Global / full-dataset figures are easiest to manage if they live in a dedicated folder.
+  - example: `all_data`
+
+
+Generation Procedure
+
+1. Load the prepared dataset in DAS / IFA.
+- Use the normal prepared-data load path.
+- Confirm the current stem, data folder, and shape look correct before generating the viewer.
+
+2. Choose `HTML visualization`.
+
+3. Answer the folder prompts.
+- `figures folder`
+  - point this at the figures root you want the viewer to search
+- `segmentation folders`
+  - provide the folder(s) containing segmentation masks if you want outline overlays
+  - blank / invalid means the viewer can still run, but may use centroid fallback
+- `viewer assets/output folder`
+  - choose the folder that should hold reusable viewer assets and new viewer runs
+
+4. If prompted about reusing JSON, prefer `no` unless you are sure the JSON matches the current dataset.
+- Reusing assets is normal.
+- Reusing old run JSON is optional and more fragile.
+- If in doubt, answer `no`.
+
+5. If no reusable assets are found, the viewer may enter manual asset creation.
+- This is the legacy/manual bootstrap path.
+- Supply source image paths or globs as prompted.
+- If asset creation completes, normal viewer generation should continue.
+
+6. Wait for the run to finish writing.
+- A new run folder will be created under:
+  - `<viewer_root>\viewer_runs\...`
+- The viewer HTML should open automatically.
+
+
+Viewer Interaction
+
+Main image viewer
+- Use the normal view controls to choose:
+  - group / value
+  - optional subset
+  - channel markers
+  - overlays
+- `(none)` in a marker slot means that color slot can be left empty.
+
+Figures
+- The figures panel now works from runtime figure entries rather than a single pre-baked bucket.
+- `auto display relevant figs`
+  - resets the figure view/subset filters to the current viewer selection
+- Additional figure filters can be used in parallel:
+  - keystring query
+  - source folder
+  - figure type
+
+ROI annotation
+- ROI is available only on cores where the viewer has the needed per-core ROI data.
+- Open ROI from a core that shows the ROI option.
+- In the ROI popup:
+  - choose or accept the target column
+  - choose or accept the label
+  - draw polygons
+  - click `submit polygons`
+  - click `save to mailbox`
+- The ROI popup saves by row index, not by visual guesswork.
+
+Applying ROI labels back to DAS / IFA
+- Saving in the ROI popup writes mailbox CSV files into the project mailbox folder.
+- The labels are applied back to live `obs` when DAS / IFA checks the mailbox before a later action runs.
+- In practice:
+  - save from ROI
+  - return to DAS / IFA
+  - run another normal action or menu path
+  - mailbox ingest should happen before that action runs
+
+
+Troubleshooting
+
+Viewer shows the wrong cores, or only the intersection of old and new cores
+- Most likely cause:
+  - old run JSON reuse or incompatible reusable assets
+- Try:
+  - answer `no` to JSON reuse
+  - keep asset reuse, but avoid old incompatible JSON structure
+  - confirm the chosen viewer assets folder actually covers the current `slide_scene` values
+
+Viewer says reusable assets are incomplete
+- The asset pool exists, but it does not cover all current scenes.
+- Current behavior may:
+  - build for the covered subset only
+  - or send you to manual asset creation if nothing compatible is found
+
+No ROI button on a core
+- Usually means that core did not get valid ROI payload data for the current run.
+- Common causes:
+  - wrong / stale reused run structure
+  - no active rows matched to that displayed core
+  - build mismatch between current `obs` and reusable assets
+
+ROI popup opens but save says `save unavailable`
+- The viewer did not receive a valid mailbox writer path for that run.
+- Regenerate the viewer from the normal DAS / IFA HTML path rather than opening an old unrelated run.
+
+ROI popup save says `Failed to fetch`
+- Most likely cause:
+  - stale older viewer run
+  - mailbox helper not reachable
+- Try:
+  - regenerate the viewer using the current code path
+  - confirm DAS / IFA is still running
+
+ROI labels seem to save but do not appear in `obs`
+- Check the DAS / IFA session log for:
+  - `checking mailbox: ...`
+  - `found mailbox file: yes`
+- Then trigger another normal action so mailbox ingest runs.
+- Remember:
+  - mailbox files are applied to live `obs`
+  - they do not automatically rewrite the saved triplet on disk unless you save data afterward
+
+Some cores show real outlines, others only centroids
+- Segmentation fallback is scene-specific.
+- Check:
+  - segmentation files exist for the relevant scenes
+  - scene matching is correct
+  - the current run has usable cell-label identity for overlay generation
+
+Figure panel misses patient-specific or subset-specific figures
+- Auto figure matching depends mostly on folder names.
+- Good patterns:
+  - `pt-4021`
+  - `3. epithelial`
+  - `all_data`
+- The viewer can tolerate punctuation differences like `:` vs `.`, but matching still depends on recognizable folder names.
+
+Viewer generation is slow on subset/overlay building
+- Large runs, many subsets, many figures, and segmentation overlays can all add time.
+- A build that is doing real ROI/subset work will be slower than a broken build that silently skipped those artifacts.
+
+Old working HTMLs should keep working
+- Changing generation code affects newly generated viewers.
+- Existing already-written run folders are static outputs unless you overwrite them.
+

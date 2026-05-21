@@ -1,0 +1,272 @@
+DS Usage Guide v2
+
+Goal
+- Use DAS as a user would, through the DS session files only.
+- Test through the DS architecture itself, not through direct dataframe inspection, hidden side channels, or other "fancy tricks," unless the DS stream is genuinely too ambiguous to proceed safely.
+- Prefer existing menus and prompts over code inspection whenever the DS stream is clear enough.
+- After figures are saved, prefer figure-adjacent summary files over image vision when interpreting what was plotted.
+
+Core Files
+- `ds_events.jsonl`
+  - read this continuously during operation
+  - prompts, output, debug, stage markers, and session status appear here
+- `ds_replies.jsonl`
+  - append one JSON line per answer
+  - always include the current `prompt_id`
+  - include an `index` field when practical; it is safer for deduplication but not strictly required
+- `ds_session.json`
+  - check whether the session is still `active` or already `completed`
+  - a clean scripted DS run may end as `completed`; that is not inherently a failure
+- `_ds_manifest.jsonl`
+  - save-time artifact pointers beside outputs
+  - use this to find saved figures and their `summary_path` when present
+- `<figure>.summary.txt`
+  - deterministic figure companion text
+  - use this first for figure understanding in the current DSA design
+- helper replay files such as `ifv2_repeat_context.txt` and `ifv2_color_categories.txt`
+  - IFV may write these into the data folder
+  - they are useful for replay/debugging but are not the primary saved artifact
+
+Session Handoff
+- After launch, confirm the session folder actually exists.
+- Do not assume the folder name is always exactly the requested `session-id`.
+- If the requested folder already exists, DS may allocate a suffixed folder such as:
+  - `<session-root>\<session-id>_01`
+  - `<session-root>\<session-id>_02`
+- Confirm these files exist before handing the run to DS/Codex:
+  - `ds_events.jsonl`
+  - `ds_replies.jsonl`
+  - `ds_session.json`
+- The most useful handoff to Codex is the exact created session folder path, not just the launch command.
+
+Launch Notes
+- Use clean launch forms without `--mode ds`.
+- `ds.py` in this checkout is already DS-only and rejects `--mode ds`.
+- Clean launch forms:
+  - from repo root:
+    - `python ds.py --session-root C:\path\to\ds_sessions --session-id smoke03`
+  - with an absolute script path:
+    - `python C:\path\to\DAS_v2\ds.py --session-root C:\path\to\ds_sessions --session-id smoke03`
+- Generic launch pattern with explicit data context:
+  - `python ds.py --data-folder "C:\path\to\data" --figure-folder "C:\path\to\figs" --stem example_stem --session-root C:\path\to\ds_sessions --session-id smoke03`
+- Example from one Windows/conda setup:
+  - `C:\Users\youm\anaconda3\Scripts\conda.exe run -n cycif python C:\Users\youm\Desktop\src\DAS_v2\ds.py --data-folder "D:\das test" --figure-folder "D:\das test\figs" --stem testing_1000_ptmas18 --session-root C:\src\DAS_DS_test\if_analysis_ds --session-id smoke03`
+- Reason:
+  - some Windows environments work more reliably through `conda run ...` than a direct env `python.exe` call
+  - on one local setup, `conda run -n cycif ...` loaded successfully where a direct env `python.exe` call failed at legacy `pygame` import
+- Avoid mixed or partial path forms like `python ./users/...` on Windows unless the current working directory really makes that path valid.
+- If a path contains spaces, quote that whole argument.
+- If using PowerShell wrappers such as `Start-Process`, preserve spaced arguments as single arguments.
+- Naive `Start-Process` usage can split `D:\das test`-style paths incorrectly and prevent session creation.
+- When using `conda run -n <env> python -c ...` for bounded inspection, keep the `-c` body on one line or use a tiny temp script.
+
+Prepared-Data Load Recipe
+- If you already know the triplet stem, pass all three at launch:
+  - `--data-folder`
+  - `--figure-folder`
+  - `--stem`
+- Then in the startup menu, choose:
+  - `2 : use: <stem>`
+- This is the narrowest successful path for prepared-data loading and avoids extra startup branching.
+- Success markers for a good load are:
+  - `Preloading stem <stem> from <folder>`
+  - `Starting legacy action: preload`
+  - three `loading..` lines for `_df.csv`, `_dfxy.csv`, and `_obs.csv`
+  - `Loaded current stem: ...`
+  - `Current data: stem=<stem> | folder=<folder> | shape=(...) | state=...`
+- After that, the DS session should be at the main menu and still `active`.
+
+How To Answer
+- Read the latest `prompt` event.
+- Use its `prompt_id` exactly.
+- Never reuse an old `prompt_id`.
+- Never reply twice to the same `prompt_id`.
+- Use `context_lines`, `context_text`, `prompt_kind`, and `stage_hint` to interpret the prompt.
+- Append a reply line like:
+  - `{"index":12,"prompt_id":"smoke01-p3","text":"2","source":"codex"}`
+
+Prompt Interpretation
+- `prompt_kind=menu`
+  - normally answer with the numeric index shown in the printed menu
+- `prompt_kind=yes_no`
+  - answer explicitly when possible, especially `y` when confirming
+  - blank may trigger the default, but only use blank intentionally
+- `prompt_kind=path`
+  - answer with the raw path string
+- `prompt_kind=column_picker`
+  - answer one numeric category index or `range(...)` at a time
+  - blank, `x`, or `q` usually means done
+- `prompt_kind=free_text`
+  - do not assume it really wants arbitrary prose
+  - some legacy prompts still expect numeric menu answers even when surfaced as free text
+- Observed examples of title-like prompts that still expect numeric answers:
+  - `category to evaluate neighborhood enrichment`
+  - `category to evaluate co-occurrence`
+  - in both cases, the required reply is the numeric index from the printed category menu immediately above
+
+Blank Replies And Non-Int Text
+- Many legacy menus use blank or non-integer input to mean "done," "return," or "use default."
+- Use blank only when the prompt or its surrounding menu clearly suggests that blank is meaningful.
+- Random non-integer text is not a safe substitute for blank.
+- In some places, random non-integer text will exit a menu.
+- In others, it may trigger a default.
+- In others, it may produce an unintended branch.
+- Safer rule:
+  - send the intended integer when a menu expects a numbered choice
+  - send a true blank only when the prompt or context explicitly supports blank/default behavior
+
+Operating Rules
+- Trust explicit loaded or saved summaries over inference from older prints.
+- Trust controller or save summaries and `_ds_manifest.jsonl` over prose when they exist.
+- If a figure was saved, look for:
+  - `summary_path` in the figure stub row, or
+  - the sibling `<figure>.summary.txt`
+- After load, save, plotting, or viewer-generation actions, do not assume silence means failure right away.
+- If the DS stream becomes ambiguous, prefer one bounded code lookup over guessing repeatedly.
+- For obs-only mutations, confirm through saved artifacts or state-specific output when possible.
+- The displayed df shape may not change even when a new obs column was added.
+
+How To Read Saved Figures
+- First find the saved figure path from `_ds_manifest.jsonl`.
+- Then open the sibling `.summary.txt` companion.
+- Read it in this order:
+  - `Summary`
+  - `How Made`
+  - `Orientation`
+  - `Facts`
+- Treat the companion text as deterministic figure explanation, not model-generated prose.
+
+What Figure Summaries Exist Now
+- Summary hooks are present now for:
+  - `boxplot` / violin
+  - `barplot`
+  - `error bar plot`
+  - `histogram`
+  - `volcano plot`
+  - `clustering evaluation`
+    - `silhouette score`
+    - `cluster score sweep`
+    - `elbow plot`
+    - `confusion plot`
+  - `bubble plot`
+  - `differential abundance`
+  - `neighborhood enrichment`
+  - `co-occurrence`
+  - `cluster heatmap`
+  - `correlation matrix`
+  - correlation heatmap variants
+  - `quantile plot`
+  - `scatterplot`
+  - `threshold sweep`
+- Live-verified recent artifacts exist for:
+  - `barplot`
+  - `error bar plot`
+  - `histogram`
+  - `volcano plot`
+  - `neighborhood enrichment`
+  - `co-occurrence`
+  - `cluster heatmap`
+- `bubble plot` and `differential abundance` do have summary code paths, but they are currently blocked by a DS build-path bug described below.
+- Embedding outputs are useful, but they are not currently the main summary-driven interpretation path.
+- Still weaker or deferred for DS-only interpretation:
+  - `sortedMap` / annotation-sorted heatmaps
+  - biomarker-sorted heatmaps
+  - some heuristic visual-only spatial outputs
+
+How To Use Summaries For Analysis
+- For barplots:
+  - use per-bin count and fraction lines to compare category composition directly
+- For volcano plots:
+  - use `top_enriched_hits` and `top_depleted_hits`
+  - compare `mean_in_target`, `mean_in_comparison`, and `target_minus_comparison`
+- For correlation matrices:
+  - use strongest positive and negative marker-pair lines
+  - use difference summaries to compare group-specific correlation changes
+- For cluster heatmaps:
+  - use row-level marker summaries, especially mean or z-scored marker lines per group
+- For histograms:
+  - use quantile lines per group when reasoning about manual thresholds
+- For threshold sweeps:
+  - use threshold range lines and mid-sweep group comparisons as quick orientation, not as a substitute for every visual judgment
+- For neighborhood enrichment:
+  - use the top enriched and depleted label-pair lines first
+- For co-occurrence:
+  - use the band-specific pair summaries to understand which relationships are strongest in each radius band
+- For differential abundance, once reachable:
+  - use `top_difference_lines` rather than eyeballing grouped bars alone
+
+Current Limits
+- Some legacy prompts still have hidden answer grammar.
+- Some DS prompts are not labeled in the most helpful way for simple models.
+- `bubble plot` is not currently reachable through the standard DS visualization build path.
+- `differential abundance` is not currently reachable through the standard DS visualization build path.
+- `cluster heatmap` dendrogram on and off currently appear to save to the same filenames, so one run may overwrite the other.
+- `clustering evaluation -> confusion plot` raw, row-normalized, and column-normalized outputs currently appear to save to the same filenames, so later modes may overwrite earlier ones.
+- Histogram and threshold summaries help, but they do not fully replace seeing every plot.
+- `sortedMap`-style heuristic visual outputs are still better for humans than for DS.
+
+Known Live IFV Prompt Behavior
+- In live IFV runs, the prompt order is:
+  - `save folder ... change? (y):`
+  - repeat context
+  - color categories
+  - `repeat last run? (y)`
+  - visualization menu
+- This save-folder confirmation appears even when a figure folder was already passed at launch.
+- `volcano plot` build-time prompts capture only the mode, not the target labels.
+- Target labels are resolved later at execution time from the current category and repeat context.
+
+Polling Guidance
+- If you have an event-driven broker, prefer file-change watching over fixed sleep loops.
+- If you are following manually, use short polling only when actively stepping through immediate prompts.
+- Use short polling, roughly 1-2 seconds, when a fresh `awaiting_*` prompt is already visible.
+- After replies that trigger load, save, plotting, or viewer generation, prefer long waits.
+- Practical manual rule for expensive steps:
+  - first check: wait at least 2-3 minutes
+  - if reusing fewer assets or rebuilding overlays or figures: wait much longer
+- Track the last seen `index` and read incrementally.
+- Avoid repeatedly tailing very large windows.
+
+Progress Prints Added
+- DS mode emits small debug markers when:
+  - a prompt is issued and DS starts waiting for a reply
+  - a reply is received
+  - a legacy action starts or returns
+  - project-viewer build enters:
+    - seed preparation
+    - subset option or overlay build
+    - figure discovery or HTML write
+- These are meant to distinguish:
+  - stuck waiting for input
+  - busy loading legacy data
+  - busy generating the viewer
+
+Feedback Review
+- Adopted:
+  - deterministic saved companions for many figures instead of relying only on raw print output
+  - `summary_path` support through `_ds_manifest.jsonl`
+  - better DS prompt metadata through `prompt_kind` and `stage_hint`
+  - debug markers that help distinguish waiting from active work
+- Partly adopted:
+  - structured artifact information exists at save time through `_ds_manifest.jsonl`, but not yet as richer dedicated DS event types
+  - many prompts are easier for DS than before, but some legacy wording still leaks through
+- Still deferred:
+  - machine-readable prompt schema such as `expected_type`, `allowed_tokens`, and `done_tokens`
+  - structured `plot_skipped` or `artifact_saved` DS events
+  - heartbeat or progress estimates for long-running analysis
+  - `recommended_poll_seconds` in DS events
+
+Best Practice
+- Keep the backend unchanged unless the DS run reveals a real user-facing problem.
+- When improving DAS for LLM use, prefer:
+  - clearer prompt wording
+  - concise action summaries
+  - deterministic figure companions
+  - compact structured hints
+- Prefer those improvements over inventing a new framework.
+- When in doubt, ground feedback in the actual DS run and its saved artifacts.
+
+Windows Operational Notes
+- Quote paths with spaces at the shell boundary, especially `--build-folder` and other data-folder arguments.
+- Append DS replies as UTF-8 JSONL without a BOM; PowerShell `Add-Content -Encoding UTF8` may add a BOM in older environments.
+- Future work: add a small Windows-safe helper for appending DS replies so agents do not hand-roll JSONL writes.

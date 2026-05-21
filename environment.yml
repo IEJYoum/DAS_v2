@@ -1,0 +1,31 @@
+name: das-v2
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - scikit-image
+  - pillow
+  - tifffile
+  - tqdm
+  - patsy
+  - openpyxl
+  - xlrd
+  - shapely
+  - pygame
+  - scanpy
+  - anndata
+  - pytorch
+  - cpuonly
+  - czifile
+  - pip
+  - pip:
+      # If deepcell fails on your platform, remove this line, create the
+      # environment, and install Mesmer dependencies separately later.
+      - deepcell

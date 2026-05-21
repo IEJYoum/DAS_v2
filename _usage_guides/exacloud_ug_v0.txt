@@ -1,0 +1,2 @@
+
+#salloc --time=12:00:00 --partition=cedar --mem=128G --account=cedar-condo
