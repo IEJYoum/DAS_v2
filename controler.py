@@ -209,7 +209,7 @@ def _run_session(
 ) -> SessionState:
     ds_close_reason = "completed"
     try:
-        io.iprint("New_DAS controller")
+        io.iprint("DAS_v2 controller")
         _first_run_base_folder_setup(state)
         _adopt_project_context(state, data_folder=state.data_folder, build_folder=state.build_folder, figure_folder=state.figure_folder)
         io.iprint(f"Project root: {state.project_root}")
@@ -499,7 +499,7 @@ def _write_config_file(path: str | Path, values: dict[str, str]) -> None:
     write_key_value_config(
         path,
         values,
-        header="# New_DAS project config",
+        header="# DAS_v2 project config",
     )
 
 

@@ -1,5 +1,5 @@
 """
-Lightweight HTML frontend for New_DAS interactive I/O.
+Lightweight HTML frontend for DAS_v2 interactive I/O.
 
 This module is designed to pair with `io_adapter.py`:
 - `ginput(screen, log, prompt)` waits for user input from a browser page.
@@ -55,7 +55,7 @@ class BrowserDisconnectedError(RuntimeError):
 class HtmlSession:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
-    title: str = "New_DAS Frontend"
+    title: str = "DAS_v2 Frontend"
     log: list[str] = field(default_factory=list)
     pending_prompt: Optional[str] = None
     pending_answer: Optional[str] = None
@@ -83,7 +83,7 @@ def start_server(
     *,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
-    title: str = "New_DAS Frontend",
+    title: str = "DAS_v2 Frontend",
     open_browser: bool = False,
 ) -> HtmlSession:
     """

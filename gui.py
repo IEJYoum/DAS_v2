@@ -1,5 +1,5 @@
 """
-Canonical launcher for New_DAS browser-backed runtime.
+Canonical launcher for DAS_v2 browser-backed runtime.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ def _configure_noninteractive_plot_backend() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Launch New_DAS in HTML GUI mode.",
+        description="Launch DAS_v2 in HTML GUI mode.",
     )
     parser.add_argument(
         "--data-folder",

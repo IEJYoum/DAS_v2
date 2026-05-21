@@ -227,7 +227,7 @@ def save_project_prompt_config(path: str, config: dict) -> None:
     values["save_debug_pngs"] = "y" if config.get("save_debug_pngs", False) else "n"
     values["run_feature_extraction"] = "y" if config.get("run_feature_extraction", False) else "n"
 
-    lines = ["# New_DAS project config"]
+    lines = ["# DAS_v2 project config"]
     for key, value in values.items():
         text = str(value).strip()
         if text != "":
