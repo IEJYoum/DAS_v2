@@ -60,6 +60,7 @@ if str(_IF_ANALYSIS_DIR) not in sys.path:
     sys.path.append(str(_IF_ANALYSIS_DIR))
 MAXEY_MATRIX_DIR = _IF_ANALYSIS_DIR / "maxey matrices"
 from Machine_Learning import torch_cluster as ml_tc
+from Machine_Learning import vector_celltyping as ml_vc
 
 SAVE = 'ask'
 SPATH = r'C:\Users\youm\Desktop\src\unsorted figs'
@@ -532,8 +533,8 @@ def batchCorrection(dfs,com=[],cat=''):
 def celltyping(dfs,com=[],cat=''):
     print('celltyping')
 
-    op = ['SD-type','add labels to existing biomarker phenotype','Maxey type','manual threshold phenotype']
-    fn = [autotype,labelPhenotype,maxeyType,manThresh]
+    op = ['SD-type','add labels to existing biomarker phenotype','Maxey type','vector/loss-weight celltyping','manual threshold phenotype']
+    fn = [autotype,labelPhenotype,maxeyType,vectorType,manThresh]
     dfs,com=menu(dfs,op,fn,com,cat)
     #print(com,'com out from mainMenu')
     return(dfs,com)
