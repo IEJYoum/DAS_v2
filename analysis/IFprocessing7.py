@@ -58,6 +58,7 @@ from shared_utils import (
 _IF_ANALYSIS_DIR = Path(__file__).resolve().parents[1]
 if str(_IF_ANALYSIS_DIR) not in sys.path:
     sys.path.append(str(_IF_ANALYSIS_DIR))
+MAXEY_MATRIX_DIR = _IF_ANALYSIS_DIR / "maxey matrices"
 from Machine_Learning import torch_cluster as ml_tc
 
 SAVE = 'ask'
@@ -67,12 +68,13 @@ CATN = ''
 PXSIZE = .325
 PROGRESS_ENABLED = False
 
-MANUALtHRESHOLDS = {'DAPI1':1000, 'nuclei':0,'CD45':2500,'aSMA':3000,'EGFR':2000,#'Ecad':1250,
-                    'GATA6':1250,'CC3':1500,'CK19':2000,'CD31':2000}
-MANUALtHRESHOLDS = {'CD31':1500,'Vim':2000,'aSMA':4500,'CD45':1000, 'CD68':3000,'CAV1':5500} #final for MB
-MANUALtHRESHOLDS = {'CD31':2000} #was originally blank for RS pre 9/25 #kept for KLF4
-MANUALtHRESHOLDS = {'CD31':2500,'CD45':3500}
-MANUALtHRESHOLDS = {}
+MANUALtHRESHOLDS = {
+    'CD31':0,
+    'CD45':0,
+    'Ecad':0,
+    'PanCK':0,
+    'CK19':0,
+}
 
 #DG{'CD45':2000,'CD31':2500} D:\WOO {'1: endothelial':2}
 
@@ -1364,13 +1366,20 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
     #Haven't been able to figure out why, key.sum() stays the same (whether there's a glitch or not, whether the glitch is from running on multiple cats or from the label already existingin the data- both conditions must be met for glitch)
     for tn in ['Primary Celltype: Matrix','Tumor Subtype: Matrix','Immune Subtype: Matrix','Tumor Functional: Matrix','Immune Functional: Matrix']: #this should fix it- helper function only cleans subset
         dfs[1][tn] = 'nan'
-    dfs = maxeyTypeH(dfs, below_thresh_key = btkey, bias = BIAS, threshold = PRIMARY_MT_THRESH, method = PRIMARY_MT_METHOD,log=log)
+    typed_dfs = maxeyTypeH(dfs, below_thresh_key = btkey, bias = BIAS, threshold = PRIMARY_MT_THRESH, method = PRIMARY_MT_METHOD,log=log)
+    if typed_dfs is None:
+        print('celltyping failed')
+        return(dfs,[])
+    dfs = typed_dfs
 
     mankey = dfs[1].loc[:,'Primary Celltype: Matrix'] == '3: epithelial'
     idfs,key = subset(dfs,typeName,['3: epithelial'])
     #print(mankey.sum(),key.sum,'mankey comparison')
     print(idfs[0].shape[0],'idf shape')
     idfs = maxeyTypeH(idfs, typeName = 'Tumor Subtype: Matrix', default = ' ', fileName = 'tumor_celltype.csv', singleType = True, below_thresh_key = btkey.loc[key,:],log=log)
+    if idfs is None:
+        print('celltyping failed')
+        return(dfs,[])
 
     #tumor functional annots added to/vs all celltypes
     dfs = recombine(dfs,idfs,key) #requires another recombine be added
@@ -1378,6 +1387,9 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
     idfs,key = subset(dfs,typeName,list(dfs[1].loc[:,typeName].unique())) #
     idfs = maxeyTypeH(idfs, typeName = 'Tumor Functional: Matrix', default = ' ', fileName = 'tumor_functional.csv',
                       singleType = False, below_thresh_key = btkey.loc[key,:], threshold = .5,log=log)
+    if idfs is None:
+        print('celltyping failed')
+        return(dfs,[])
     print(key.sum())
     dfs = recombine(dfs,idfs,key)
     print(key.sum())
@@ -1387,7 +1399,13 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
     idfs,key = subset(dfs,typeName,['2: immune'])
     idfs = maxeyTypeH(idfs, typeName = 'Immune Subtype: Matrix', default = ' ', fileName = 'immune_celltype.csv',method='rank',
                       threshold = .2, below_thresh_key = btkey.loc[key,:],log=log, singleType = True) #SINGLETYPE should be True for general use and default = 'unclassified'
+    if idfs is None:
+        print('celltyping failed')
+        return(dfs,[])
     idfs = maxeyTypeH(idfs,typeName = 'Immune Functional: Matrix', default = ' ', fileName = 'immune_functional.csv', singleType = False, below_thresh_key = btkey.loc[key,:],log=log)
+    if idfs is None:
+        print('celltyping failed')
+        return(dfs,[])
     print(idfs[1],'idfs1')
     print(idfs[1].columns)
 
@@ -1401,8 +1419,11 @@ def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName 
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     obs[typeName] = default #did this solve the issue from earlier???
     if df.shape[0] > 0:
-        fold = r'C:\Users\youm\Desktop\src\maxey matrices'
-        prim = pd.read_csv(fold+'/'+fileName,index_col=0)
+        matrix_path = MAXEY_MATRIX_DIR / fileName
+        if not matrix_path.exists():
+            print('warning: missing celltyping matrix:', matrix_path)
+            return(None)
+        prim = pd.read_csv(matrix_path,index_col=0)
         print(prim,'prim\n')
 
         prim = prim.fillna(0)
@@ -1428,8 +1449,9 @@ def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName 
         try:
             dm1 = pd.concat(dm.values(),axis=1)
         except ValueError:
-            print('no markers matching those in: ',fileName)
-            return(dfs)
+            print('warning: no study markers matched any markers in matrix:', fileName)
+            print('matching uses matrix marker names against study columns like marker_...')
+            return(None)
         dm1.columns = dm.keys()
         dm = dm1
         below_thresh_key = below_thresh_key.loc[:,used_cols]
