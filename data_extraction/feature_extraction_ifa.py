@@ -394,6 +394,7 @@ def _suggest_seg_root(images_root: str) -> str:
     images_root = os.path.normpath(str(images_root))
     parent = os.path.dirname(images_root)
     candidates = [
+        os.path.join(parent, "Segmentation_IY"),
         os.path.join(parent, "Segmentation"),
         os.path.join(parent, "segmentation"),
         os.path.join(parent, "CellposeSegmentation"),

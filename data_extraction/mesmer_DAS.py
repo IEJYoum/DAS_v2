@@ -106,26 +106,51 @@ def folder_has_image_files(fold):
     return False
 
 
+def folder_has_registeredimages_child(fold):
+    return os.path.isdir(fold + "/RegisteredImages")
+
+
+def folder_has_registered_scene_folders(fold):
+    if not os.path.isdir(fold):
+        return False
+    for subfold in sorted(os.listdir(fold)):
+        subpath = fold + "/" + subfold
+        if os.path.isdir(subpath) and folder_has_image_files(subpath):
+            return True
+    return False
+
+
+def folder_has_mesmer_inputs(fold):
+    return (
+        folder_has_image_files(fold)
+        or folder_has_registeredimages_child(fold)
+        or folder_has_registered_scene_folders(fold)
+        or len(list_tiff_subfolders(fold)) > 0
+    )
+
+
 def choose_folder():
     cwd = os.getcwd().replace("\\", "/")
-    if folder_has_image_files(cwd):
+    if folder_has_mesmer_inputs(cwd):
         while True:
-            fold = str(local_check_change(cwd, "folder with .czi or .tiff image files to run mesmer on")).strip()
+            fold = str(local_check_change(cwd, "folder with images or RegisteredImages to run mesmer on")).strip()
             if fold == "":
                 fold = cwd
-            if folder_has_image_files(fold):
+            if folder_has_mesmer_inputs(fold):
                 return fold.replace("\\", "/")
-            print("could not find .czi or .tiff files in folder")
+            print("could not find supported image inputs in folder")
     while True:
-        fold = input("folder with .czi or .tiff image files to run mesmer on:\n").strip()
+        fold = input("folder with images or RegisteredImages to run mesmer on:\n").strip()
         if fold == "":
             fold = cwd
-        if folder_has_image_files(fold):
+        if folder_has_mesmer_inputs(fold):
             return fold.replace("\\", "/")
-        print("could not find .czi or .tiff files in folder")
+        print("could not find supported image inputs in folder")
 
 
 def list_tiff_subfolders(root):
+    if not os.path.isdir(root):
+        return []
     out = []
     for subfold in sorted(os.listdir(root)):
         if os.path.isdir(root + "/" + subfold + "/TIFF"):
@@ -144,6 +169,105 @@ def list_multichannel_files(root):
         if len(parts) > 1 and "." in parts[1]:
             out.append(file)
     return out
+
+
+def list_registered_scene_folders(root, include_tokens=None, exclude_tokens=None):
+    out = []
+    include_tokens = [str(x).strip().lower() for x in (include_tokens or []) if str(x).strip() != ""]
+    exclude_tokens = [str(x).strip().lower() for x in (exclude_tokens or []) if str(x).strip() != ""]
+    for subfold in sorted(os.listdir(root)):
+        subpath = root + "/" + subfold
+        if not os.path.isdir(subpath):
+            continue
+        if not folder_has_image_files(subpath):
+            continue
+        low = subfold.lower()
+        if len(include_tokens) > 0 and not any(tok in low for tok in include_tokens):
+            continue
+        if any(tok in low for tok in exclude_tokens):
+            continue
+        out.append(subfold)
+    return out
+
+
+def parse_marker_chan(file):
+    try:
+        parts = str(file).split("_")
+        if len(parts) < 2:
+            return None, None
+        markers = parts[1].split(".")
+        m = re.search(r"_c(\d+)", str(file), re.IGNORECASE)
+        if m is None:
+            return None, None
+        chan = int(m.group(1))
+    except Exception:
+        return None, None
+    if chan - 2 < 0 or chan - 2 >= len(markers):
+        return None, None
+    marker = markers[chan - 2]
+    return marker, chan
+
+
+def parse_token_string(raw):
+    return [x.strip() for x in str(raw or "").replace(",", "+").replace("\n", "+").split("+") if x.strip() != ""]
+
+
+def resolve_registeredimages_root(root):
+    if os.path.isdir(root + "/RegisteredImages"):
+        return (root + "/RegisteredImages").replace("\\", "/"), root.replace("\\", "/")
+    if os.path.basename(root).lower() == "registeredimages" and os.path.isdir(root):
+        return root.replace("\\", "/"), os.path.dirname(root).replace("\\", "/")
+    if folder_has_registered_scene_folders(root):
+        return root.replace("\\", "/"), os.path.dirname(root).replace("\\", "/")
+    return None, None
+
+
+def save_segmentation_pair(save_root, slide_scene, cell_mask, nuc_mask):
+    os.makedirs(save_root, exist_ok=True)
+    save_cell = save_root + "/" + slide_scene + "_cell30_CellSegmentationBasins.tif"
+    save_nuc = save_root + "/" + slide_scene + "_nuc30_NucleiSegmentationBasins.tif"
+    imsave(save_cell, cell_mask)
+    imsave(save_nuc, nuc_mask)
+
+
+def registered_scene_marker_names(scene_path):
+    markers = []
+    for file in sorted(os.listdir(scene_path)):
+        low = file.lower()
+        if not (low.endswith(".tif") or low.endswith(".tiff")):
+            continue
+        marker, chan = parse_marker_chan(file)
+        if marker is None:
+            continue
+        if marker not in markers:
+            markers.append(marker)
+    return markers
+
+
+def list_registered_markers(root, scene_folders):
+    markers = []
+    for scene in scene_folders:
+        scene_path = root + "/" + scene
+        for marker in registered_scene_marker_names(scene_path):
+            if marker not in markers:
+                markers.append(marker)
+    return markers
+
+
+def find_registered_marker_file(scene_path, marker_name):
+    matches = []
+    for file in sorted(os.listdir(scene_path)):
+        low = file.lower()
+        if not (low.endswith(".tif") or low.endswith(".tiff")):
+            continue
+        marker, chan = parse_marker_chan(file)
+        if marker is None:
+            continue
+        if str(marker).lower() == str(marker_name).lower():
+            matches.append(file)
+    if len(matches) == 0:
+        return None
+    return matches[0]
 
 
 def parse_markers(file):
@@ -346,17 +470,62 @@ def run_multichannel(root, scene_groups, morph_markers, flair, model):
             print("\n\n", slide_scene, "\n", e, "\n\n")
 
 
+def run_registered_scene_folders(root, project_root, scene_folders, nuc_marker, morph_markers, model):
+    save_root = project_root + "/Segmentation_IY"
+    if not os.path.isdir(save_root):
+        os.mkdir(save_root)
+    print("saving masks in:", save_root)
+    for slide_scene in scene_folders:
+        scene_path = root + "/" + slide_scene
+        save_cell = save_root + "/" + slide_scene + "_cell30_CellSegmentationBasins.tif"
+        save_nuc = save_root + "/" + slide_scene + "_nuc30_NucleiSegmentationBasins.tif"
+        if os.path.isfile(save_cell) and os.path.isfile(save_nuc):
+            print("already done", slide_scene)
+            continue
+        nuc_file = find_registered_marker_file(scene_path, nuc_marker)
+        if nuc_file is None:
+            print("could not find nuclear marker for", slide_scene, ":", nuc_marker)
+            continue
+        print("\n\nscene:", slide_scene)
+        print("using nuclear marker:", nuc_marker, "->", nuc_file)
+        nuc_ch = normalize(imread(scene_path + "/" + nuc_file))
+        morph_ch = None
+        found_markers = []
+        for marker in morph_markers:
+            file = find_registered_marker_file(scene_path, marker)
+            if file is None:
+                continue
+            print("loading", file)
+            array = normalize(imread(scene_path + "/" + file))
+            if morph_ch is None:
+                morph_ch = array
+            else:
+                morph_ch = np.maximum(morph_ch, array)
+            found_markers.append(marker)
+        if morph_ch is None:
+            print("could not find cytoplasm marker files for", slide_scene)
+            continue
+        if len(found_markers) > 1:
+            print("taking max values of multiple channels to make cytoplasm channel")
+        print("cytoplasm markers found:", found_markers)
+        cell_mask_, nuc_mask_ = run_mesmer_pair(model, nuc_ch, morph_ch)
+        save_segmentation_pair(save_root, slide_scene, cell_mask_, nuc_mask_)
+
+
 def collect_inputs():
     root = choose_folder()
     tiff_subfolds = list_tiff_subfolders(root)
     multichannel_files = list_multichannel_files(root)
+    reg_root, project_root = resolve_registeredimages_root(root)
     modes = []
     if len(tiff_subfolds) > 0:
         modes.append("TIFF subfolders")
     if len(multichannel_files) > 0:
         modes.append("direct multichannel files")
+    if reg_root is not None:
+        modes.append("RegisteredImages subfolders")
     if len(modes) == 0:
-        raise Exception("could not find TIFF subfolders or direct multichannel files")
+        raise Exception("could not find supported image inputs")
     mode = modes[0]
     if len(modes) > 1:
         mode = pick_one(modes, "mode")
@@ -384,6 +553,31 @@ def collect_inputs():
             "subfolds": chosen,
             "dapi_pattern": pattern_from_tiff_file(dapi_file),
             "morph_patterns": [pattern_from_tiff_file(file) for file in morph_files],
+        }
+
+    if mode == "RegisteredImages subfolders":
+        include_tokens = parse_token_string(input("scene include keystring(s), + separated, blank for all:\n"))
+        exclude_tokens = parse_token_string(input("scene exclude keystring(s), + separated, blank for none:\n"))
+        scene_folders = list_registered_scene_folders(reg_root, include_tokens, exclude_tokens)
+        if len(scene_folders) == 0:
+            raise Exception("no matching scene folders found")
+        print("detected scene folders:")
+        for i, scene in enumerate(scene_folders):
+            print(i, ":", scene)
+        markers = list_registered_markers(reg_root, scene_folders)
+        if len(markers) == 0:
+            raise Exception("could not read marker names from scene folders")
+        nuc_marker = pick_one(markers, "pick nuclear marker")
+        morph_markers = pick_many(markers, "pick cytoplasm marker(s)")
+        if len(morph_markers) == 0:
+            raise Exception("no cytoplasm marker selected")
+        return {
+            "mode": mode,
+            "root": reg_root,
+            "project_root": project_root,
+            "scene_folders": scene_folders,
+            "nuc_marker": nuc_marker,
+            "morph_markers": morph_markers,
         }
 
     scene_groups = build_scene_groups(multichannel_files)
@@ -417,6 +611,15 @@ def main():
             settings["dapi_pattern"],
             settings["morph_patterns"],
             settings["flair"],
+            model,
+        )
+    elif settings["mode"] == "RegisteredImages subfolders":
+        run_registered_scene_folders(
+            settings["root"],
+            settings["project_root"],
+            settings["scene_folders"],
+            settings["nuc_marker"],
+            settings["morph_markers"],
             model,
         )
     else:
