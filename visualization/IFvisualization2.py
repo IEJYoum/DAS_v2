@@ -10,6 +10,7 @@ import pandas as pd
 import time
 import os
 import re
+import traceback
 import textwrap
 from pathlib import Path
 import matplotlib
@@ -141,6 +142,81 @@ def logInput(prompt):
 def _ifv_meta_sink():
     sink = globals().get("_new_das_meta")
     return sink if isinstance(sink, dict) else None
+
+
+def _snapshot_ifv_save_state():
+    sink = _ifv_meta_sink()
+    if sink is None:
+        return {
+            "path_count": 0,
+            "last_path": "",
+            "save_root": os.path.abspath(str(SPATH)),
+        }
+    paths = list(sink.get("ifv_saved_paths") or [])
+    return {
+        "path_count": int(sink.get("ifv_saved_path_count", len(paths))),
+        "last_path": str(sink.get("ifv_last_save_path") or ""),
+        "save_root": str(sink.get("ifv_save_root") or os.path.abspath(str(SPATH))),
+    }
+
+
+def _report_visualization_failure(action_label, cat, subcom, exc, save_state_before):
+    exc_type, _exc_obj, exc_tb = sys.exc_info()
+    save_state_after = _snapshot_ifv_save_state()
+    save_path_changed = (
+        save_state_after["path_count"] > save_state_before["path_count"]
+        or save_state_after["last_path"] != save_state_before["last_path"]
+    )
+    last_frame = None
+    try:
+        tb_items = traceback.extract_tb(exc_tb) if exc_tb is not None else []
+        if len(tb_items) > 0:
+            last_frame = tb_items[-1]
+    except Exception:
+        last_frame = None
+
+    print("VISUALIZATION FAILED")
+    print("action:", str(action_label))
+    print("category:", str(cat))
+    print("subcommand:", str(subcom))
+    print("exception:", type(exc).__name__ + ": " + str(exc))
+    if last_frame is not None:
+        print(
+            "error location:",
+            os.path.basename(str(last_frame.filename)),
+            "line",
+            int(last_frame.lineno),
+            "in",
+            str(last_frame.name),
+        )
+    print("save root:", str(save_state_after.get("save_root", "")))
+    print("batch:", str(BATCH))
+    if save_path_changed:
+        print("save status: a save target was prepared before the failure")
+        print("last recorded save path:", str(save_state_after.get("last_path", "")))
+        print("interpretation: the plot likely failed during or after plt.savefig while writing/overwriting the target")
+    else:
+        print("save status: no new save target was recorded before the failure")
+        print("interpretation: the plot likely failed before reaching plt.savefig")
+    if isinstance(exc, PermissionError):
+        print("hint: on Windows, overwrite can fail if the target image is open in another program")
+    print("traceback:")
+    for line in traceback.format_exc().rstrip().splitlines():
+        print(line)
+    sink = _ifv_meta_sink()
+    if sink is not None:
+        errors = list(sink.get("ifv_errors") or [])
+        errors.append({
+            "action": str(action_label),
+            "category": str(cat),
+            "subcommand": str(subcom),
+            "exception_type": type(exc).__name__,
+            "exception_text": str(exc),
+            "last_save_path": str(save_state_after.get("last_path", "")),
+            "save_path_changed": bool(save_path_changed),
+        })
+        sink["ifv_errors"] = errors
+    print("END VISUALIZATION FAILED")
 
 
 def _queue_ifv_summary(plot_type, summary_text="", how_made_text="", orientation_text="", facts=None):
@@ -955,16 +1031,13 @@ def menu(dfs,options,functions,com=[],cat=''):
                     if PROGRESS_ENABLED:
                         ifprog.tick_progress(f"Visualization | {options[ch]} | {cat}")
                 else:
+                    save_state_before = _snapshot_ifv_save_state()
                     try:
                         functions[ch](dfs,subcom,cat)
                         if PROGRESS_ENABLED:
                             ifprog.tick_progress(f"Visualization | {options[ch]} | {cat}")
                     except Exception as e:
-                        print(e)
-                        exc_type, exc_obj, exc_tb = sys.exc_info()
-                        #fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                        print(exc_type, exc_tb.tb_lineno) # fname
-                        print('could not excecute')
+                        _report_visualization_failure(options[ch], cat, subcom, e, save_state_before)
                         if freezeError:
                             logInput('hit any key to continue')
                             freezeError = 0
