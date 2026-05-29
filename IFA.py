@@ -1682,6 +1682,44 @@ def makeDtype(df,dtype=str):
     return(df)
 
 
+def _parse_split_selection(text, ncols):
+    text = str(text).strip()
+    if text == "" or text.lower() in ["q", "x", "done"]:
+        raise ValueError("done")
+
+    if text.startswith("range(") and text.endswith(")"):
+        body = text[len("range("):-1]
+        parts = [part.strip() for part in body.split(",") if part.strip() != ""]
+        if len(parts) == 1:
+            inds = [int(parts[0])]
+        elif len(parts) == 2:
+            inds = list(range(int(parts[0]), int(parts[1])))
+        elif len(parts) == 3:
+            inds = list(range(int(parts[0]), int(parts[1]), int(parts[2])))
+        else:
+            raise ValueError("invalid range syntax")
+    elif ":" in text and "," not in text:
+        parts = [part.strip() for part in text.split(":")]
+        if len(parts) not in [2, 3]:
+            raise ValueError("invalid slice syntax")
+        start = int(parts[0])
+        stop = int(parts[1])
+        if len(parts) == 3 and parts[2] != "":
+            step = int(parts[2])
+            inds = list(range(start, stop, step))
+        else:
+            inds = list(range(start, stop))
+    elif "," in text:
+        inds = [int(part.strip()) for part in text.split(",") if part.strip() != ""]
+    else:
+        inds = [int(text)]
+
+    for ind in inds:
+        if ind < 0 or ind >= ncols:
+            raise IndexError("column index out of range: " + str(ind))
+    return(inds)
+
+
 def splitDF(df,titleStr="new"):
     """Interactive column splitter: carve selected columns into a new dataframe and drop from source."""
     print(titleStr)
@@ -1691,27 +1729,17 @@ def splitDF(df,titleStr="new"):
     dropList = []
     while True:
         try:
-            print('it seems like using a range after getting here via reorg-all-obs causes df shape mismatch downstream')
             ch = logInput("column to split off into "+titleStr+": ")
-            try:
-                ch = int(ch)
-            except:
-                try:
-                    ch = eval(ch)
-                except:
-                    chl = ch.split(":")
-                    ch = range(int(chl[0]),int(chl[1]))
+            inds = _parse_split_selection(ch, df.shape[1])
         except ValueError:
             break
-        print(ch)
-        newDF.append(df.loc[:,pd.Series(df.columns).iloc[ch]])
-        nl =  df.columns[ch]
-        if type(nl) == str:
-            nl = [df.columns[ch]]
-        else:
-            nl = list(df.columns[ch])
-
-        dropList+=nl
+        except Exception as e:
+            print(e)
+            continue
+        print(inds)
+        cols = list(pd.Series(df.columns).iloc[inds])
+        newDF.append(df.iloc[:,inds].copy())
+        dropList += cols
     try:
         newDF = pd.concat(newDF,axis=1)
         df = tryDrop(df,dropList)
@@ -1730,6 +1758,25 @@ def tryDrop(df,dropList):
             #print(colName,'not in dataframe')
     return(df)
 
+def dropEqualDuplicateColumns(df):
+    """Drop later duplicate-name columns only when their values exactly match an earlier copy."""
+    keep_inds = []
+    seen = {}
+    dropped = []
+    for i, col in enumerate(df.columns):
+        if col not in seen:
+            seen[col] = i
+            keep_inds.append(i)
+            continue
+        prev_i = seen[col]
+        if df.iloc[:,prev_i].equals(df.iloc[:,i]):
+            dropped.append(str(col))
+            continue
+        keep_inds.append(i)
+    if len(dropped) > 0:
+        print("dropping duplicate columns with identical values:", sorted(list(set(dropped))))
+    return(df.iloc[:,keep_inds].copy())
+
 def sortDFs(DFs,names,goodStrs):
     """Merge imported source tables into one aligned dataframe based on filename key strings."""
 
@@ -1737,6 +1784,10 @@ def sortDFs(DFs,names,goodStrs):
     #print("integer index labels found")
     print("filenames",names)
     print(DFs[0].index[0],'sample index label')
+    if len(goodStrs) == 0:
+        print("no grouping strings supplied; combining selected files side-by-side by shared index")
+        DF = pd.concat(list(DFs),axis=1)
+        return(dropEqualDuplicateColumns(DF))
     cheee = 0
     if logInput("add file names to index? (y)") == 'y':
         if logInput("reset index as simple integers? (y)") == "y":
@@ -1758,7 +1809,7 @@ def sortDFs(DFs,names,goodStrs):
     switch = 0
     if len(goodStrs) == names.shape[0]:
         DF = pd.concat(list(DFs),axis=1)
-        return(DF)
+        return(dropEqualDuplicateColumns(DF))
     for ch in goodStrs:
         print("\n",ch)
         #key = names.str.contains(ch) #this is wrong sometimes- failed with s. and es.
@@ -1790,7 +1841,7 @@ def sortDFs(DFs,names,goodStrs):
             #DF = DF.merge(pd.concat(list(sDFs),axis=0),how="outer",left_index=True,right_index=True)
             print(DF.shape)
     print("DF Final:",DF.shape)
-    return(DF)
+    return(dropEqualDuplicateColumns(DF))
 
 
 

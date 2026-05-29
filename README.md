@@ -84,6 +84,27 @@ If you want to use an LLM / DS workflow:
 - [`_usage_guides/llm_handoff_guide_v0.md`](_usage_guides/llm_handoff_guide_v0.md)
 - [`_usage_guides/ds_usage_guide_v2.txt`](_usage_guides/ds_usage_guide_v2.txt)
 
+## Sample Prompt
+
+If you want to test DAS with an agent without writing a long custom prompt, start with something like this and replace the data path with your own folder:
+
+```text
+Use the DAS_v2 repo in this folder.
+
+Read:
+- _usage_guides/ds_usage_guide_v2.txt
+- _usage_guides/getting_started_v0.md
+
+My data is here:
+C:\path\to\my\data
+
+Please prepare the data through the normal DAS workflow and save a formatted triplet (_df.csv, _obs.csv, _dfxy.csv).
+
+Use the documented workflow rather than inventing a new one. If you need to choose a Python environment, first look for one that already has the required packages. If no suitable environment exists, stop and ask me before continuing.
+```
+
+This is meant as a starting point, not a rigid script. A stronger agent should be able to use the guides plus a dataset path and do the basic startup, import, and save flow with only minimal extra prompting.
+
 If you want to understand the HTML viewer:
 - [`_usage_guides/viewer_usage_guide_v0.txt`](_usage_guides/viewer_usage_guide_v0.txt)
 

@@ -1,6 +1,6 @@
 ,CD31,CD45,CD3,CD4,CD8,CD68,CD20,CD163,CD11,F480,panCK,pan-CK,CK19,CK5,CK7,CK17,CK8,CK14,Ecad,MUC1,Amy,TUBB,CD113,FAP,CTNNB,NeuN,YAP1,Myelin,HER2,EGFR,aSMA,Vim,ColI,CD90,MCM2,TUBB3,CTNNB1,p63,GATA6,PDL1,CC3
 1: endothelial,2,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
-2: immune,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+2: immune,,1,,1,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 3: epithelial,,,,,,,,,,,,,1,1,,,1,,5,,,,,,,,,,,,,,,,,,,,,,
 4: active fibroblast,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,1,1,,1,,,,,,,
 6: BMYO,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
