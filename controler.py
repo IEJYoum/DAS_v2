@@ -1509,7 +1509,18 @@ def startup_import_rna_data(state: SessionState) -> None:
 
 
 def startup_load_last(state: SessionState) -> None:
-    _run_legacy_load_last(state)
+    latest = find_latest_stem(state.data_folder)
+    if latest is None:
+        io.iprint("No saved triplet found in folder.")
+        return
+    io.iprint(f"Loading most recent save: {latest}")
+    load_by_stem_with_value(
+        state,
+        latest,
+        action_function="startup_load_last",
+        action_label="startup_load_latest_triplet",
+        summary_label="Loaded most recent save",
+    )
     if state.has_data():
         _adopt_project_context(state, data_folder=state.data_folder, build_folder=state.data_folder)
 
