@@ -138,3 +138,7 @@ This `README` is the front door:
 - where to go next
 
 The step-by-step setup and usage instructions live in the guides under `_usage_guides/`.
+
+## Legacy Slurm Alloc Commands
+salloc --time=12:00:00 --partition=cedar --mem=128G --account=cedar-condo
+srun --pty --time=1-0 --mem=64G --gres=gpu:1 --partition=gpu bash -i
