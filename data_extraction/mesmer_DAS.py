@@ -11,14 +11,42 @@ Created on Tue Apr 21 2026
 
 import os
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
-from czifile import imread as czi_imread
-from deepcell.applications import Mesmer
+from czifile import CziFile, imread as czi_imread
 from skimage.io import imread, imsave
 from skimage.measure import regionprops_table
 from skimage.segmentation import expand_labels
+
+DEEPCELL_TOKEN_FILE = Path(__file__).with_name("deepcell_access_token.txt")
+
+
+def get_mesmer_model():
+    token = os.environ.get("DEEPCELL_ACCESS_TOKEN", "").strip()
+    if token == "" and DEEPCELL_TOKEN_FILE.exists():
+        token = DEEPCELL_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token != "":
+            os.environ["DEEPCELL_ACCESS_TOKEN"] = token
+    from deepcell.applications import Mesmer
+    try:
+        return Mesmer()
+    except Exception as e:
+        msg = str(e)
+        if "DEEPCELL_ACCESS_TOKEN" not in msg and "access token" not in msg.lower():
+            raise
+        print("DeepCell access token not found.")
+        print("Paste your token and press enter.")
+        print("It will be saved to:")
+        print(DEEPCELL_TOKEN_FILE)
+        print("send blank to stop")
+        token = input("DeepCell access token:\n").strip()
+        if token == "":
+            raise Exception("DeepCell access token not provided")
+        DEEPCELL_TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
+        os.environ["DEEPCELL_ACCESS_TOKEN"] = token
+        return Mesmer()
 
 
 def refine_masks(mask_cell, mask_nuc, dilation_radius=3):
@@ -129,6 +157,24 @@ def folder_has_mesmer_inputs(fold):
     )
 
 
+def try_server_path_fix(fold):
+    fold = str(fold or "").strip()
+    if fold == "" or os.path.isdir(fold):
+        return fold
+    if not fold.startswith("\\\\"):
+        return fold
+    pieces = fold.replace("\\", "/").split("/")
+    pieces = [x for x in pieces if x.strip() != ""]
+    if len(pieces) < 2:
+        return fold
+    temppath = "/".join(["", "home", "groups"] + pieces[1:])
+    if os.path.isdir(temppath):
+        print("using server path:")
+        print(temppath)
+        return temppath
+    return fold
+
+
 def choose_folder():
     cwd = os.getcwd().replace("\\", "/")
     if folder_has_mesmer_inputs(cwd):
@@ -136,6 +182,7 @@ def choose_folder():
             fold = str(local_check_change(cwd, "folder with images or RegisteredImages to run mesmer on")).strip()
             if fold == "":
                 fold = cwd
+            fold = try_server_path_fix(fold)
             if folder_has_mesmer_inputs(fold):
                 return fold.replace("\\", "/")
             print("could not find supported image inputs in folder")
@@ -143,6 +190,7 @@ def choose_folder():
         fold = input("folder with images or RegisteredImages to run mesmer on:\n").strip()
         if fold == "":
             fold = cwd
+        fold = try_server_path_fix(fold)
         if folder_has_mesmer_inputs(fold):
             return fold.replace("\\", "/")
         print("could not find supported image inputs in folder")
@@ -168,6 +216,25 @@ def list_multichannel_files(root):
         parts = file.split("_")
         if len(parts) > 1 and "." in parts[1]:
             out.append(file)
+    return out
+
+
+def list_direct_image_files(root, include_tokens=None, exclude_tokens=None):
+    out = []
+    include_tokens = [str(x).strip().lower() for x in (include_tokens or []) if str(x).strip() != ""]
+    exclude_tokens = [str(x).strip().lower() for x in (exclude_tokens or []) if str(x).strip() != ""]
+    for file in sorted(os.listdir(root)):
+        path = root + "/" + file
+        if not os.path.isfile(path):
+            continue
+        low = file.lower()
+        if not (low.endswith(".czi") or low.endswith(".tif") or low.endswith(".tiff")):
+            continue
+        if len(include_tokens) > 0 and not any(tok in low for tok in include_tokens):
+            continue
+        if any(tok in low for tok in exclude_tokens):
+            continue
+        out.append(file)
     return out
 
 
@@ -277,6 +344,147 @@ def parse_markers(file):
     return [bi for bi in parts[1].split(".") if bi != ""]
 
 
+def standardize_stack(array):
+    array = np.asarray(array)
+    while array.ndim > 3 and 1 in array.shape:
+        array = np.squeeze(array)
+    if array.ndim == 2:
+        return array[None, :, :]
+    if array.ndim != 3:
+        raise ValueError("could not reduce image to CYX stack: " + str(array.shape))
+    if array.shape[0] <= 32:
+        return array
+    if array.shape[-1] <= 32:
+        return np.moveaxis(array, -1, 0)
+    if array.shape[1] <= 32:
+        return np.moveaxis(array, 1, 0)
+    raise ValueError("could not find channel axis in " + str(array.shape))
+
+
+def parse_czi_channel_names(metadata_text):
+    try:
+        root = ET.fromstring(metadata_text)
+    except Exception:
+        return []
+    out = []
+    for elem in root.iter():
+        tag = str(elem.tag).split("}")[-1]
+        if tag != "Channel":
+            continue
+        name = elem.attrib.get("Name")
+        if name is None:
+            name = elem.attrib.get("Id")
+        if name is None:
+            name = elem.findtext(".//ShortName")
+        if name is None:
+            name = elem.findtext(".//Name")
+        if name is None:
+            continue
+        out.append(str(name).strip())
+    dedup = []
+    for name in out:
+        if name != "" and name not in dedup:
+            dedup.append(name)
+    return dedup
+
+
+def marker_names_from_file(file, chan_n):
+    markers = parse_markers(file)
+    if len(markers) == chan_n:
+        return markers
+    if len(markers) + 1 == chan_n:
+        return ["DAPI"] + markers
+    return []
+
+
+def load_czi_stack(path, file):
+    chan_names = []
+    try:
+        czi = CziFile(path)
+        try:
+            raw_axes = czi.axes if isinstance(czi.axes, str) else "".join(czi.axes)
+            raw_array = np.asarray(czi.asarray())
+            try:
+                metadata_text = czi.metadata() if callable(czi.metadata) else czi.metadata
+                chan_names = parse_czi_channel_names(metadata_text)
+            except Exception:
+                chan_names = []
+        finally:
+            if hasattr(czi, "close"):
+                czi.close()
+    except Exception:
+        raw_axes = ""
+        raw_array = np.asarray(czi_imread(path))
+    if len(raw_axes) != raw_array.ndim:
+        stack = standardize_stack(raw_array)
+    else:
+        index = []
+        kept_axes = []
+        for ax, size in zip(raw_axes, raw_array.shape):
+            if ax in "CYX":
+                index.append(slice(None))
+                kept_axes.append(ax)
+            else:
+                index.append(0)
+        stack = np.asarray(raw_array[tuple(index)])
+        axes = "".join(kept_axes)
+        if axes == "YX":
+            stack = stack[None, :, :]
+        elif axes != "CYX":
+            if set(axes) != set("CYX") or len(axes) != 3:
+                raise ValueError("could not reduce CZI to CYX in " + path + ": " + str(raw_array.shape) + " " + str(raw_axes))
+            stack = np.transpose(stack, (axes.index("C"), axes.index("Y"), axes.index("X")))
+    if len(chan_names) == 0:
+        from_file = marker_names_from_file(file, stack.shape[0])
+        if len(from_file) == stack.shape[0]:
+            chan_names = from_file
+    return np.asarray(stack), chan_names
+
+
+def load_tiff_stack(path, file):
+    stack = standardize_stack(imread(path))
+    chan_names = marker_names_from_file(file, stack.shape[0])
+    return np.asarray(stack), chan_names
+
+
+def load_direct_stack(path, file):
+    if file.lower().endswith(".czi"):
+        return load_czi_stack(path, file)
+    return load_tiff_stack(path, file)
+
+
+def channel_option_labels(chan_n, chan_names):
+    out = []
+    for i in range(chan_n):
+        name = ""
+        if i < len(chan_names):
+            name = str(chan_names[i]).strip()
+        if name == "":
+            name = "channel " + str(i)
+        out.append("c" + str(i + 1) + " : " + name)
+    return out
+
+
+def build_mesmer_channels(stack, nuc_index, morph_indices):
+    if nuc_index < 0 or nuc_index >= stack.shape[0]:
+        raise ValueError("nuclear channel index out of range")
+    if len(morph_indices) == 0:
+        morph_indices = [nuc_index]
+    nuc_ch = normalize(stack[nuc_index, :, :])
+    morph_ch = None
+    for idx in morph_indices:
+        if idx < 0 or idx >= stack.shape[0]:
+            continue
+        array = normalize(stack[idx, :, :])
+        if morph_ch is None:
+            morph_ch = array
+        else:
+            morph_ch = np.maximum(morph_ch, array)
+    if morph_ch is None:
+        raise ValueError("no cytoplasm channel loaded")
+    return nuc_ch, morph_ch
+
+
 def extract_scene_token(file):
     stem = Path(file).stem
     m = re.search(r"(scene[_-]?[A-Za-z]?0*\d{1,3})", stem, re.IGNORECASE)
@@ -376,6 +584,9 @@ def run_tiff(root, subfolds, dapi_pattern, morph_patterns, flair, model):
                         morph_ch = np.maximum(morph_ch, array)
                     morph_n += 1
                     break
+        if morph_ch is None and dapi_ch is not None:
+            print("no cytoplasm file selected; using nuclear file for cytoplasm")
+            morph_ch = dapi_ch.copy()
         if dapi_ch is None or morph_ch is None:
             print("could not load dapi and cytoplasm files for", subfold)
             continue
@@ -455,6 +666,9 @@ def run_multichannel(root, scene_groups, morph_markers, flair, model):
             for marker in found_here:
                 if marker not in found_markers:
                     found_markers.append(marker)
+        if morph_ch is None and dapi_ch is not None:
+            print("no cytoplasm marker selected; using DAPI channel for cytoplasm")
+            morph_ch = dapi_ch.copy()
         morph_n = len(found_markers)
         if dapi_ch is None or morph_ch is None:
             print("could not load dapi and cytoplasm channels for", slide_scene)
@@ -468,6 +682,31 @@ def run_multichannel(root, scene_groups, morph_markers, flair, model):
             imsave(save_nuc, nuc_mask_)
         except Exception as e:
             print("\n\n", slide_scene, "\n", e, "\n\n")
+
+
+def run_direct_images(root, files, nuc_index, morph_indices, model):
+    save_root = root + "/Segmentation_IY"
+    if not os.path.isdir(save_root):
+        os.mkdir(save_root)
+    print("saving masks in:", save_root)
+    for file in files:
+        slide_scene = Path(file).stem
+        save_cell = save_root + "/" + slide_scene + "_cell30_CellSegmentationBasins.tif"
+        save_nuc = save_root + "/" + slide_scene + "_nuc30_NucleiSegmentationBasins.tif"
+        if os.path.isfile(save_cell) and os.path.isfile(save_nuc):
+            print("already done", slide_scene)
+            continue
+        print("\n\nfile:", file)
+        stack, chan_names = load_direct_stack(root + "/" + file, file)
+        print("stack shape:", stack.shape)
+        if len(chan_names) > 0:
+            print("channels:", chan_names)
+        try:
+            nuc_ch, morph_ch = build_mesmer_channels(stack, nuc_index, morph_indices)
+            cell_mask_, nuc_mask_ = run_mesmer_pair(model, nuc_ch, morph_ch)
+            save_segmentation_pair(save_root, slide_scene, cell_mask_, nuc_mask_)
+        except Exception as e:
+            print("\n\n", file, "\n", e, "\n\n")
 
 
 def run_registered_scene_folders(root, project_root, scene_folders, nuc_marker, morph_markers, model):
@@ -503,6 +742,9 @@ def run_registered_scene_folders(root, project_root, scene_folders, nuc_marker, 
                 morph_ch = np.maximum(morph_ch, array)
             found_markers.append(marker)
         if morph_ch is None:
+            print("no cytoplasm marker selected; using nuclear marker for cytoplasm")
+            morph_ch = nuc_ch.copy()
+        if morph_ch is None:
             print("could not find cytoplasm marker files for", slide_scene)
             continue
         if len(found_markers) > 1:
@@ -516,14 +758,17 @@ def collect_inputs():
     root = choose_folder()
     tiff_subfolds = list_tiff_subfolders(root)
     multichannel_files = list_multichannel_files(root)
+    direct_image_files = list_direct_image_files(root)
     reg_root, project_root = resolve_registeredimages_root(root)
     modes = []
     if len(tiff_subfolds) > 0:
         modes.append("TIFF subfolders")
-    if len(multichannel_files) > 0:
-        modes.append("direct multichannel files")
     if reg_root is not None:
         modes.append("RegisteredImages subfolders")
+    if len(direct_image_files) > 0:
+        modes.append("direct image files")
+    if len(multichannel_files) > 0:
+        modes.append("grouped multichannel files")
     if len(modes) == 0:
         raise Exception("could not find supported image inputs")
     mode = modes[0]
@@ -545,7 +790,7 @@ def collect_inputs():
         dapi_file = pick_one(sample_files, "pick DAPI example file")
         morph_files = pick_many(sample_files, "pick cytoplasm example file(s)")
         if len(morph_files) == 0:
-            raise Exception("no cytoplasm file selected")
+            morph_files = [dapi_file]
         return {
             "mode": mode,
             "root": root,
@@ -570,7 +815,7 @@ def collect_inputs():
         nuc_marker = pick_one(markers, "pick nuclear marker")
         morph_markers = pick_many(markers, "pick cytoplasm marker(s)")
         if len(morph_markers) == 0:
-            raise Exception("no cytoplasm marker selected")
+            morph_markers = [nuc_marker]
         return {
             "mode": mode,
             "root": reg_root,
@@ -578,6 +823,30 @@ def collect_inputs():
             "scene_folders": scene_folders,
             "nuc_marker": nuc_marker,
             "morph_markers": morph_markers,
+        }
+
+    if mode == "direct image files":
+        include_tokens = parse_token_string(input("file include keystring(s), + separated, blank for all:\n"))
+        exclude_tokens = parse_token_string(input("file exclude keystring(s), + separated, blank for none:\n"))
+        chosen_files = list_direct_image_files(root, include_tokens, exclude_tokens)
+        if len(chosen_files) == 0:
+            raise Exception("no matching image files found")
+        print("files to run:")
+        for i, file in enumerate(chosen_files):
+            print(i, ":", file)
+        sample_file = chosen_files[0]
+        stack, chan_names = load_direct_stack(root + "/" + sample_file, sample_file)
+        options = channel_option_labels(stack.shape[0], chan_names)
+        nuc_label = pick_one(options, "pick nuclear channel")
+        morph_labels = pick_many(options, "pick cytoplasm channel(s)")
+        if len(morph_labels) == 0:
+            morph_labels = [nuc_label]
+        return {
+            "mode": mode,
+            "root": root,
+            "files": chosen_files,
+            "nuc_index": options.index(nuc_label),
+            "morph_indices": [options.index(x) for x in morph_labels],
         }
 
     scene_groups = build_scene_groups(multichannel_files)
@@ -590,8 +859,6 @@ def collect_inputs():
             if bi not in markers:
                 markers.append(bi)
     morph_markers = pick_many(markers, "pick cytoplasm marker(s)")
-    if len(morph_markers) == 0:
-        raise Exception("no cytoplasm marker selected")
     return {
         "mode": mode,
         "root": root,
@@ -603,7 +870,7 @@ def collect_inputs():
 
 def main():
     settings = collect_inputs()
-    model = Mesmer()
+    model = get_mesmer_model()
     if settings["mode"] == "TIFF subfolders":
         run_tiff(
             settings["root"],
@@ -620,6 +887,14 @@ def main():
             settings["scene_folders"],
             settings["nuc_marker"],
             settings["morph_markers"],
+            model,
+        )
+    elif settings["mode"] == "direct image files":
+        run_direct_images(
+            settings["root"],
+            settings["files"],
+            settings["nuc_index"],
+            settings["morph_indices"],
             model,
         )
     else:
