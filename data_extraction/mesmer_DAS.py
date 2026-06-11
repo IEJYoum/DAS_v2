@@ -21,6 +21,26 @@ from skimage.measure import regionprops_table
 from skimage.segmentation import expand_labels
 
 DEEPCELL_TOKEN_FILE = Path(__file__).with_name("deepcell_access_token.txt")
+MESMER_DTYPE = "float32"  # try "uint16" next if needed
+VERBOSE = True
+
+
+def vprint(*args):
+    if VERBOSE:
+        print(*args)
+
+
+def array_gb(a):
+    return round(np.asarray(a).nbytes / (1024 ** 3), 2)
+
+
+def cast_mesmer_dtype(a):
+    kind = str(MESMER_DTYPE).strip().lower()
+    if kind == "float32":
+        return np.asarray(a, dtype=np.float32)
+    if kind == "uint16":
+        return np.asarray(a, dtype=np.uint16)
+    raise ValueError("unsupported MESMER_DTYPE: " + str(MESMER_DTYPE))
 
 
 def get_mesmer_model():
@@ -70,13 +90,13 @@ def refine_masks(mask_cell, mask_nuc, dilation_radius=3):
 
 
 def normalize(a, percentile=95):
-    print(np.amax(a), np.amin(a), "b4")
+    vprint(np.amax(a), np.amin(a), "b4")
     up = np.percentile(a, percentile)
     a = np.where(a < up, a, up)
     a = a / np.amax(a) * 5000
-    a = a.astype(int)
     a = np.where(a < 0, 0, a)
-    print(np.amax(a), np.amin(a), "aft")
+    a = cast_mesmer_dtype(a)
+    vprint(np.amax(a), np.amin(a), a.dtype, str(array_gb(a)) + " GB", "aft")
     return a
 
 
@@ -438,12 +458,16 @@ def load_czi_stack(path, file):
         from_file = marker_names_from_file(file, stack.shape[0])
         if len(from_file) == stack.shape[0]:
             chan_names = from_file
+    vprint("loaded czi:", file)
+    vprint("stack shape:", stack.shape, "dtype:", stack.dtype, str(array_gb(stack)) + " GB")
     return np.asarray(stack), chan_names
 
 
 def load_tiff_stack(path, file):
     stack = standardize_stack(imread(path))
     chan_names = marker_names_from_file(file, stack.shape[0])
+    vprint("loaded tiff:", file)
+    vprint("stack shape:", stack.shape, "dtype:", stack.dtype, str(array_gb(stack)) + " GB")
     return np.asarray(stack), chan_names
 
 
@@ -538,10 +562,16 @@ def pattern_from_tiff_file(file):
 
 
 def run_mesmer_pair(model, dapi_ch, morph_ch):
-    print(dapi_ch.shape, morph_ch.shape, "dapi and morph shape")
+    vprint(dapi_ch.shape, morph_ch.shape, "dapi and morph shape")
+    vprint("dapi dtype:", dapi_ch.dtype, str(array_gb(dapi_ch)) + " GB")
+    vprint("morph dtype:", morph_ch.dtype, str(array_gb(morph_ch)) + " GB")
     input_ = np.expand_dims(np.stack([dapi_ch, morph_ch], axis=-1), axis=0)
-    print(input_.shape, "input shape")
+    input_ = cast_mesmer_dtype(input_)
+    vprint(input_.shape, "input shape")
+    vprint("input dtype:", input_.dtype, str(array_gb(input_)) + " GB")
+    vprint("starting Mesmer predict")
     labeled_image = model.predict(input_, compartment="both", image_mpp=0.325, batch_size=1)
+    vprint("Mesmer predict finished")
     cell_mask, nuc_mask = labeled_image[0, :, :, 0], labeled_image[0, :, :, 1]
     return refine_masks(cell_mask, nuc_mask)
 
@@ -689,14 +719,14 @@ def run_direct_images(root, files, nuc_index, morph_indices, model):
     if not os.path.isdir(save_root):
         os.mkdir(save_root)
     print("saving masks in:", save_root)
-    for file in files:
+    for i, file in enumerate(files):
         slide_scene = Path(file).stem
         save_cell = save_root + "/" + slide_scene + "_cell30_CellSegmentationBasins.tif"
         save_nuc = save_root + "/" + slide_scene + "_nuc30_NucleiSegmentationBasins.tif"
         if os.path.isfile(save_cell) and os.path.isfile(save_nuc):
             print("already done", slide_scene)
             continue
-        print("\n\nfile:", file)
+        print("\n\nfile", i + 1, "of", len(files), ":", file)
         stack, chan_names = load_direct_stack(root + "/" + file, file)
         print("stack shape:", stack.shape)
         if len(chan_names) > 0:
@@ -835,6 +865,7 @@ def collect_inputs():
         for i, file in enumerate(chosen_files):
             print(i, ":", file)
         sample_file = chosen_files[0]
+        vprint("reading sample file to detect channels:", sample_file)
         stack, chan_names = load_direct_stack(root + "/" + sample_file, sample_file)
         options = channel_option_labels(stack.shape[0], chan_names)
         nuc_label = pick_one(options, "pick nuclear channel")
