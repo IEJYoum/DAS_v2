@@ -21,6 +21,28 @@ from skimage.measure import regionprops_table
 from skimage.segmentation import expand_labels
 
 DEEPCELL_TOKEN_FILE = Path(__file__).with_name("deepcell_access_token.txt")
+MESMER_DTYPE = "float32"  # try "uint16" next if needed
+VERBOSE = True
+TILE_SIZE = 8000  # set huge, e.g. 9999999999, to disable tiling
+TILE_HALO = 128
+
+
+def vprint(*args):
+    if VERBOSE:
+        print(*args)
+
+
+def array_gb(a):
+    return round(np.asarray(a).nbytes / (1024 ** 3), 2)
+
+
+def cast_mesmer_dtype(a):
+    kind = str(MESMER_DTYPE).strip().lower()
+    if kind == "float32":
+        return np.asarray(a, dtype=np.float32)
+    if kind == "uint16":
+        return np.asarray(a, dtype=np.uint16)
+    raise ValueError("unsupported MESMER_DTYPE: " + str(MESMER_DTYPE))
 
 
 def get_mesmer_model():
@@ -70,13 +92,13 @@ def refine_masks(mask_cell, mask_nuc, dilation_radius=3):
 
 
 def normalize(a, percentile=95):
-    print(np.amax(a), np.amin(a), "b4")
+    vprint(np.amax(a), np.amin(a), "b4")
     up = np.percentile(a, percentile)
     a = np.where(a < up, a, up)
     a = a / np.amax(a) * 5000
-    a = a.astype(int)
     a = np.where(a < 0, 0, a)
-    print(np.amax(a), np.amin(a), "aft")
+    a = cast_mesmer_dtype(a)
+    vprint(np.amax(a), np.amin(a), a.dtype, str(array_gb(a)) + " GB", "aft")
     return a
 
 
@@ -438,12 +460,16 @@ def load_czi_stack(path, file):
         from_file = marker_names_from_file(file, stack.shape[0])
         if len(from_file) == stack.shape[0]:
             chan_names = from_file
+    vprint("loaded czi:", file)
+    vprint("stack shape:", stack.shape, "dtype:", stack.dtype, str(array_gb(stack)) + " GB")
     return np.asarray(stack), chan_names
 
 
 def load_tiff_stack(path, file):
     stack = standardize_stack(imread(path))
     chan_names = marker_names_from_file(file, stack.shape[0])
+    vprint("loaded tiff:", file)
+    vprint("stack shape:", stack.shape, "dtype:", stack.dtype, str(array_gb(stack)) + " GB")
     return np.asarray(stack), chan_names
 
 
@@ -538,12 +564,63 @@ def pattern_from_tiff_file(file):
 
 
 def run_mesmer_pair(model, dapi_ch, morph_ch):
-    print(dapi_ch.shape, morph_ch.shape, "dapi and morph shape")
+    vprint(dapi_ch.shape, morph_ch.shape, "dapi and morph shape")
+    vprint("dapi dtype:", dapi_ch.dtype, str(array_gb(dapi_ch)) + " GB")
+    vprint("morph dtype:", morph_ch.dtype, str(array_gb(morph_ch)) + " GB")
     input_ = np.expand_dims(np.stack([dapi_ch, morph_ch], axis=-1), axis=0)
-    print(input_.shape, "input shape")
+    input_ = cast_mesmer_dtype(input_)
+    vprint(input_.shape, "input shape")
+    vprint("input dtype:", input_.dtype, str(array_gb(input_)) + " GB")
+    vprint("starting Mesmer predict")
     labeled_image = model.predict(input_, compartment="both", image_mpp=0.325, batch_size=1)
+    vprint("Mesmer predict finished")
     cell_mask, nuc_mask = labeled_image[0, :, :, 0], labeled_image[0, :, :, 1]
     return refine_masks(cell_mask, nuc_mask)
+
+
+def run_mesmer(model, dapi_ch, morph_ch):
+    h, w = dapi_ch.shape
+    if TILE_SIZE >= h and TILE_SIZE >= w:
+        return run_mesmer_pair(model, dapi_ch, morph_ch)
+    print("running tiled Mesmer:", str(TILE_SIZE) + " core,", str(TILE_HALO) + " halo")
+    cell_out = np.zeros((h, w), dtype=np.int32)
+    nuc_out = np.zeros((h, w), dtype=np.int32)
+    next_id = 0
+    y_starts = list(range(0, h, TILE_SIZE))
+    x_starts = list(range(0, w, TILE_SIZE))
+    tile_n = len(y_starts) * len(x_starts)
+    tile_i = 0
+    for y0 in y_starts:
+        y1 = min(y0 + TILE_SIZE, h)
+        for x0 in x_starts:
+            x1 = min(x0 + TILE_SIZE, w)
+            tile_i += 1
+            ey0 = max(0, y0 - TILE_HALO)
+            ey1 = min(h, y1 + TILE_HALO)
+            ex0 = max(0, x0 - TILE_HALO)
+            ex1 = min(w, x1 + TILE_HALO)
+            cy0 = y0 - ey0
+            cy1 = cy0 + (y1 - y0)
+            cx0 = x0 - ex0
+            cx1 = cx0 + (x1 - x0)
+            print("tile", tile_i, "of", tile_n, ":", y0, y1, x0, x1)
+            tile_cell, tile_nuc = run_mesmer_pair(model, dapi_ch[ey0:ey1, ex0:ex1], morph_ch[ey0:ey1, ex0:ex1])
+            stats = regionprops_table(tile_nuc, properties=["label", "centroid"])
+            kept_n = 0
+            cell_view = cell_out[ey0:ey1, ex0:ex1]
+            nuc_view = nuc_out[ey0:ey1, ex0:ex1]
+            for lab, cy, cx in zip(stats["label"], stats["centroid-0"], stats["centroid-1"]):
+                if cy < cy0 or cy >= cy1 or cx < cx0 or cx >= cx1:
+                    continue
+                next_id += 1
+                kept_n += 1
+                nuc_mask = tile_nuc == lab
+                cell_mask = tile_cell == lab
+                nuc_view[nuc_mask & (nuc_view == 0)] = next_id
+                cell_view[cell_mask & (cell_view == 0)] = next_id
+            vprint("kept", kept_n, "cells from tile")
+            del tile_cell, tile_nuc, stats, cell_view, nuc_view
+    return cell_out, nuc_out
 
 
 def file_matches_pattern(file, pattern):
@@ -592,7 +669,7 @@ def run_tiff(root, subfolds, dapi_pattern, morph_patterns, flair, model):
             continue
         if morph_n > 1:
             print("taking max values of multiple channels to make cytoplasm channel")
-        cell_mask_, nuc_mask_ = run_mesmer_pair(model, dapi_ch, morph_ch)
+        cell_mask_, nuc_mask_ = run_mesmer(model, dapi_ch, morph_ch)
         imsave(save_cell, cell_mask_)
         imsave(save_nuc, nuc_mask_)
 
@@ -677,7 +754,7 @@ def run_multichannel(root, scene_groups, morph_markers, flair, model):
             print("taking max values of multiple channels to make cytoplasm channel")
         print("cytoplasm markers found:", found_markers)
         try:
-            cell_mask_, nuc_mask_ = run_mesmer_pair(model, dapi_ch, morph_ch)
+            cell_mask_, nuc_mask_ = run_mesmer(model, dapi_ch, morph_ch)
             imsave(save_cell, cell_mask_)
             imsave(save_nuc, nuc_mask_)
         except Exception as e:
@@ -689,21 +766,21 @@ def run_direct_images(root, files, nuc_index, morph_indices, model):
     if not os.path.isdir(save_root):
         os.mkdir(save_root)
     print("saving masks in:", save_root)
-    for file in files:
+    for i, file in enumerate(files):
         slide_scene = Path(file).stem
         save_cell = save_root + "/" + slide_scene + "_cell30_CellSegmentationBasins.tif"
         save_nuc = save_root + "/" + slide_scene + "_nuc30_NucleiSegmentationBasins.tif"
         if os.path.isfile(save_cell) and os.path.isfile(save_nuc):
             print("already done", slide_scene)
             continue
-        print("\n\nfile:", file)
+        print("\n\nfile", i + 1, "of", len(files), ":", file)
         stack, chan_names = load_direct_stack(root + "/" + file, file)
         print("stack shape:", stack.shape)
         if len(chan_names) > 0:
             print("channels:", chan_names)
         try:
             nuc_ch, morph_ch = build_mesmer_channels(stack, nuc_index, morph_indices)
-            cell_mask_, nuc_mask_ = run_mesmer_pair(model, nuc_ch, morph_ch)
+            cell_mask_, nuc_mask_ = run_mesmer(model, nuc_ch, morph_ch)
             save_segmentation_pair(save_root, slide_scene, cell_mask_, nuc_mask_)
         except Exception as e:
             print("\n\n", file, "\n", e, "\n\n")
@@ -750,7 +827,7 @@ def run_registered_scene_folders(root, project_root, scene_folders, nuc_marker, 
         if len(found_markers) > 1:
             print("taking max values of multiple channels to make cytoplasm channel")
         print("cytoplasm markers found:", found_markers)
-        cell_mask_, nuc_mask_ = run_mesmer_pair(model, nuc_ch, morph_ch)
+        cell_mask_, nuc_mask_ = run_mesmer(model, nuc_ch, morph_ch)
         save_segmentation_pair(save_root, slide_scene, cell_mask_, nuc_mask_)
 
 
@@ -835,6 +912,7 @@ def collect_inputs():
         for i, file in enumerate(chosen_files):
             print(i, ":", file)
         sample_file = chosen_files[0]
+        vprint("reading sample file to detect channels:", sample_file)
         stack, chan_names = load_direct_stack(root + "/" + sample_file, sample_file)
         options = channel_option_labels(stack.shape[0], chan_names)
         nuc_label = pick_one(options, "pick nuclear channel")
