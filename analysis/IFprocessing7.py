@@ -1350,6 +1350,8 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
         print(dfs[0].shape,dfs[0].columns,'... cleaning')
         dfs,n = ifv.autoClean(dfs,['n'])
         print(dfs[0].shape,dfs[0].columns)
+    for col in [col for col in dfs[0].columns if '_' not in str(col)]:
+        dfs[0].rename(columns={col: str(col)+'_'}, inplace=True)
     chanT,log = com[1],com[2]
     if chanT == 'y':
         btkey = chanThresh(dfs[0].copy())
