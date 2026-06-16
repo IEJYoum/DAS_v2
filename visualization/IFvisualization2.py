@@ -69,18 +69,11 @@ from scipy.cluster.hierarchy import linkage, leaves_list
 _NEW_DAS_DIR = Path(__file__).resolve().parents[1] / "support"
 if str(_NEW_DAS_DIR) not in sys.path:
     sys.path.append(str(_NEW_DAS_DIR))
+from embedding_utils import compute_embedding, load_scanpy_stack, plot_embedding
 from shared_utils import checkChange as shared_check_change
 
 def _load_scanpy_stack(action_label="this action"):
-    try:
-        import anndata
-        import scanpy as sc
-        return(sc, anndata)
-    except Exception as exc:
-        print(action_label + " requires scanpy and anndata.")
-        print("Install them to use this option.")
-        print(type(exc).__name__, exc)
-        return(None, None)
+    return(load_scanpy_stack(action_label))
 
 
 
@@ -2217,9 +2210,6 @@ def biomSMH(df,obs,dfxy,ch,ch1s,uch1s,title = 'all cells'):
 
 def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
     global UMAP
-    sc, anndata = _load_scanpy_stack("Embedding visualization")
-    if sc is None:
-        return(dfs,com)
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     if len(com) == 0:
         print('0 : UMAP')
@@ -2243,37 +2233,44 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
     DONE.append(done_key)
     colors = CATS
 
-
     mpl.style.use('default')
-    #26obs = obs.astype(str)
-    df = df.astype(float)
-    obs = obs.astype(str)
-    print(df.index)
-    print(obs.index)
-    #if logInput("replace 'no' with np.nan in columns with no nan entry (to color gray) (y)") == 'y':
+    try:
+        df = df.astype(float)
+        obs = obs.astype(str)
+        print(df.index)
+        print(obs.index)
+        embedding = compute_embedding(df, mname, log_fn=print)
+    except Exception as exc:
+        print("[DAS embedding] failed to build", mname, "embedding.")
+        print("[DAS embedding]", type(exc).__name__, exc)
+        return(dfs,com)
 
-    adata = anndata.AnnData(df,obs = obs)
-    if mname == 'pca':
-        sc.tl.pca(adata)
-        pc1 = 'PC1'
-        pc2 = 'PC2'
-        try:
-            loads = np.asarray(adata.varm['PCs'])
-            if loads.shape[1] >= 2:
-                pc1 = 'PC1: '+str(df.columns[int(np.argmax(np.abs(loads[:,0])))])
-                pc2 = 'PC2: '+str(df.columns[int(np.argmax(np.abs(loads[:,1])))])
-        except:
-            pass
-    else:
-        sc.pp.neighbors(adata,use_rep='X')
-        if mname == 'tsne':
-            sc.tl.tsne(adata)
-        else:
-            sc.tl.umap(adata)
     plt.rcParams['figure.figsize'] = 8, 8
     print(colors,'colors')
 
+    def _category_palette(u_colors):
+        itm = []
+        clr = []
+        for j in range(len(u_colors)):
+            val = str(u_colors[j])
+            itm.append(val)
+            if val.isdigit():
+                if float(val) < 10:
+                    clr.append(allc.colors[int(val)])
+                else:
+                    clr.append(allc.colors[j % len(allc.colors)])
+            else:
+                try:
+                    clr.append(allc.colors[j])
+                except:
+                    print('PLACEHOLDER NOT ENOUGH COLORS ON EMBEDDING')
+                    clr.append('black')
+        return(dict(zip(itm,clr)))
+
     for color in colors:
+        if color not in obs.columns:
+            print("[DAS embedding] skipping missing obs color column:", color)
+            continue
         for ch in range(2):
             uColors = sorted(list(obs[color].unique()))
             print(uColors,'uColors')
@@ -2285,52 +2282,31 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
                     noshow = ['-','no','negative','nan','']
                     if uch in noshow:
                         continue
-                    itm = []
-                    clr = []
-                    for j in range(len(uColors)):
-                        itm.append(uColors[j])
-                        if i == j:
-                            clr.append("blue")
-                        else:
-                            clr.append("lightgray")
-                    cd = dict(zip(itm,clr))
-                    #fig,ax = plt.subplots()
-                    if mname == 'pca':
-                        sc.pl.pca(adata,color = color,palette=cd,show=False)
-                        plt.gca().set_xlabel(pc1)
-                        plt.gca().set_ylabel(pc2)
-                    elif mname == 'tsne':
-                        sc.pl.tsne(adata,color = color,palette=cd,show=False)
-                    else:
-                        sc.pl.umap(adata,color = color,palette=cd,show=False)
+                    cd = dict((str(u), "lightgray") for u in uColors)
+                    cd[str(uch)] = "blue"
+                    fig, ax = plot_embedding(
+                        embedding.coords,
+                        obs[color],
+                        palette=cd,
+                        title=color+'_'+uch,
+                        x_label=embedding.x_label,
+                        y_label=embedding.y_label,
+                    )
                     if SAVE:
                         plt.savefig(saveF(0,"embeddings/"+mname+"/"+color,color+'_'+uch),bbox_inches='tight')
                     plt.show()
 
             else:
                 print('plotting all!')
-                itm = []
-                clr = []
-                for j in range(len(uColors)):
-                    itm.append(uColors[j])
-                    if uColors[j].isdigit():
-                        if float(uColors[j]) < 10:
-                            clr.append(allc.colors[int(uColors[j])])
-                    else:
-                        try:
-                            clr.append(allc.colors[j])
-                        except:
-                            print('PLACEHOLDER NOT ENOUGH COLORS ON EMBEDDING')
-                            clr.append('black')
-                cd = dict(zip(itm,clr))
-                if mname == 'pca':
-                    sc.pl.pca(adata,color = color, palette=cd, na_color='lightgray',show=False)
-                    plt.gca().set_xlabel(pc1)
-                    plt.gca().set_ylabel(pc2)
-                elif mname == 'tsne':
-                    sc.pl.tsne(adata,color = color, palette=cd, na_color='lightgray',show=False)
-                else:
-                    sc.pl.umap(adata,color = color, palette=cd, na_color='lightgray',show=False)
+                cd = _category_palette(uColors)
+                fig, ax = plot_embedding(
+                    embedding.coords,
+                    obs[color],
+                    palette=cd,
+                    title=color+'_all',
+                    x_label=embedding.x_label,
+                    y_label=embedding.y_label,
+                )
                 if SAVE:
                     plt.savefig(saveF(0,"embeddings/"+mname+"/"+color,color+'_all'),bbox_inches='tight')
                 plt.show() #this was commented out yet everything worked... why...
@@ -2342,14 +2318,15 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
         '''
         if not os.path.isdir(SPATH+'/embeddings/'+mname+'/expression'):
             for biom in df.columns:
-                if mname == 'pca':
-                    sc.pl.pca(adata,color=biom,vmin=np.mean(df[biom])-np.std(df[biom]),vmax=np.mean(df[biom])+2*np.std(df[biom]),color_map='viridis', show=False)
-                    plt.gca().set_xlabel(pc1)
-                    plt.gca().set_ylabel(pc2)
-                elif mname == 'tsne':
-                    sc.pl.tsne(adata,color=biom,vmin=np.mean(df[biom])-np.std(df[biom]),vmax=np.mean(df[biom])+2*np.std(df[biom]),color_map='viridis', show=False)
-                else:
-                    sc.pl.umap(adata,color=biom,vmin=np.mean(df[biom])-np.std(df[biom]),vmax=np.mean(df[biom])+2*np.std(df[biom]),color_map='viridis', show=False) #color_map='Blues'
+                fig, ax = plot_embedding(
+                    embedding.coords,
+                    df[biom],
+                    continuous=True,
+                    title=str(biom),
+                    x_label=embedding.x_label,
+                    y_label=embedding.y_label,
+                    cmap='viridis',
+                )
                 if SAVE:
                     plt.savefig(saveF(0,"embeddings/"+mname+"/expression",biom),bbox_inches='tight')
                 plt.show()

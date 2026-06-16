@@ -28,6 +28,14 @@ conda env create -f environment.yml
 conda activate das-v2
 ```
 
+If you already tried an older setup and want a clean retry:
+
+```bash
+conda env remove -n das-v2
+conda env create -f environment.yml
+conda activate das-v2
+```
+
 4. Launch the browser GUI:
 
 ```bash
@@ -67,10 +75,13 @@ The included `environment.yml` aims to install the main runtime used by:
 - browser GUI
 - DS mode
 
+The environment file keeps the Conda solve intentionally small: Conda installs Python, pip, and CPU PyTorch; pip installs the regular Python package stack from wheels.
+
 Some optional paths may need extra care:
-- Mesmer segmentation depends on `deepcell`
+- Mesmer segmentation is optional and depends on `deepcell`; install with `python -m pip install deepcell`
 - registration / segmentation scripts use `czifile`
-- some clustering / embedding features use `scanpy` and `anndata`
+- UMAP / PCA / t-SNE embeddings use `umap-learn` / `scikit-learn` and do not require Scanpy
+- Leiden clustering and the legacy "scanpy visuals" path are optional; install with `python -m pip install "scanpy[leiden]"`
 - ROI selector paths use `pygame`
 
 If one optional feature is missing a package, other parts of DAS may still work.

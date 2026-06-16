@@ -11,6 +11,7 @@ Created on Tue Apr 21 2026
 
 import os
 import re
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from skimage.measure import regionprops_table
 from skimage.segmentation import expand_labels
 
 DEEPCELL_TOKEN_FILE = Path(__file__).with_name("deepcell_access_token.txt")
+DEEPCELL_INSTALL_COMMAND = "python -m pip install deepcell"
 MESMER_DTYPE = "float32"  # try "uint16" next if needed
 VERBOSE = True
 TILE_SIZE = 8000  # set huge, e.g. 9999999999, to disable tiling
@@ -30,6 +32,21 @@ TILE_HALO = 128
 def vprint(*args):
     if VERBOSE:
         print(*args)
+
+
+def load_mesmer_class():
+    print("[DAS optional dependency] Cell segmentation: importing DeepCell Mesmer...", flush=True)
+    try:
+        from deepcell.applications import Mesmer
+    except Exception as exc:
+        print("[DAS optional dependency] Cell segmentation requires optional package: deepcell.", flush=True)
+        print("[DAS optional dependency] It is not part of the base DAS install anymore.", flush=True)
+        print("[DAS optional dependency] Install into this Python with: " + DEEPCELL_INSTALL_COMMAND, flush=True)
+        print("[DAS optional dependency] Current Python: " + sys.executable, flush=True)
+        print("[DAS optional dependency] Import failed: " + type(exc).__name__ + ": " + str(exc), flush=True)
+        raise
+    print("[DAS optional dependency] DeepCell Mesmer import succeeded.", flush=True)
+    return Mesmer
 
 
 def array_gb(a):
@@ -45,13 +62,14 @@ def cast_mesmer_dtype(a):
     raise ValueError("unsupported MESMER_DTYPE: " + str(MESMER_DTYPE))
 
 
-def get_mesmer_model():
+def get_mesmer_model(Mesmer=None):
+    if Mesmer is None:
+        Mesmer = load_mesmer_class()
     token = os.environ.get("DEEPCELL_ACCESS_TOKEN", "").strip()
     if token == "" and DEEPCELL_TOKEN_FILE.exists():
         token = DEEPCELL_TOKEN_FILE.read_text(encoding="utf-8").strip()
         if token != "":
             os.environ["DEEPCELL_ACCESS_TOKEN"] = token
-    from deepcell.applications import Mesmer
     try:
         return Mesmer()
     except Exception as e:
@@ -947,8 +965,9 @@ def collect_inputs():
 
 
 def main():
+    Mesmer = load_mesmer_class()
     settings = collect_inputs()
-    model = get_mesmer_model()
+    model = get_mesmer_model(Mesmer)
     if settings["mode"] == "TIFF subfolders":
         run_tiff(
             settings["root"],

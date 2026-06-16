@@ -55,9 +55,19 @@ conda env create -f environment.yml
 conda activate das-v2
 ```
 
+This environment uses Conda for Python / CPU PyTorch and pip for most Python packages, which keeps Conda from spending a long time solving the full scientific stack.
+
 If Conda says the environment already exists, use:
 
 ```bash
+conda activate das-v2
+```
+
+If you previously tried an older setup and want a clean retry:
+
+```bash
+conda env remove -n das-v2
+conda env create -f environment.yml
 conda activate das-v2
 ```
 
@@ -150,9 +160,13 @@ Important:
 Some parts of DAS are optional and may require extra packages:
 
 - `deepcell`
-  - needed for Mesmer segmentation
+  - optional; needed only for Mesmer cell segmentation
+  - install with `python -m pip install deepcell`
+- `umap-learn`
+  - included in the base environment for UMAP embedding plots
 - `scanpy` and `anndata`
-  - needed for some Leiden / UMAP / embedding paths
+  - optional; needed only for Leiden clustering and legacy Scanpy visual summaries
+  - install with `python -m pip install "scanpy[leiden]"`
 - `pygame`
   - needed for ROI selector paths
 - `shapely`

@@ -33,6 +33,9 @@ for _path in _BOOTSTRAP_DIRS:
     if _text not in sys.path:
         sys.path.insert(0, _text)
 
+from optional_deps import warn_optional_dependency_status
+warn_optional_dependency_status()
+
 import IFprocessing7 as ifp
 import IFvisualization2 as ifv
 import cmifAnalysis50 as cm
@@ -54,7 +57,12 @@ _SPECTRAL_FLOW_IFA = None
 
 
 '''
-conda install -c conda-forge python=3.9 numpy pandas scipy matplotlib seaborn scikit-learn scikit-image pillow tifffile tqdm pygame scanpy anndata squidpy shapely
+environment.yml intentionally uses conda for Python / CPU PyTorch
+and pip for the regular Python package stack.
+optional Leiden / legacy scanpy visuals:
+python -m pip install "scanpy[leiden]"
+optional Mesmer segmentation:
+python -m pip install deepcell
 '''
 
 

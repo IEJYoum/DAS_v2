@@ -65,6 +65,7 @@ import colorsys
 _NEW_DAS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "support"))
 if _NEW_DAS_DIR not in sys.path:
     sys.path.append(_NEW_DAS_DIR)
+from embedding_utils import compute_embedding, load_scanpy_stack, plot_embedding
 from shared_utils import checkChange as shared_check_change
 
 DEVMODE = True
@@ -77,15 +78,7 @@ def _require_pygame():
 
 
 def _load_scanpy_stack(action_label="this action"):
-    try:
-        import anndata
-        import scanpy as sc
-        return(sc, anndata)
-    except Exception as exc:
-        print(action_label + " requires scanpy and anndata.")
-        print("Install them to use this option.")
-        print(type(exc).__name__, exc)
-        return(None, None)
+    return(load_scanpy_stack(action_label))
 
 mpl.style.use('default')
 
@@ -4697,15 +4690,18 @@ def scanpyv(df,obs,dfxy,cdf=None):
     return(df,obs,dfxy)
 
 def showUmap(df,obs,dfxy,cdf=None): #make it so there's an option to re-color without re-genning whole map
-    sc, anndata = _load_scanpy_stack("UMAP visualization")
-    if sc is None:
-        return(df,obs,dfxy)
     mpl.style.use('default')
     #26obs = obs.astype(str)
-    df = df.astype(float)
-    obs = obs.astype(str)
-    print(df.index)
-    print(obs.index)
+    try:
+        df = df.astype(float)
+        obs = obs.astype(str)
+        print(df.index)
+        print(obs.index)
+        embedding = compute_embedding(df, "umap", log_fn=print)
+    except Exception as exc:
+        print("[DAS embedding] failed to build UMAP embedding.")
+        print("[DAS embedding]", type(exc).__name__, exc)
+        return(df,obs,dfxy)
     if input("replace 'no' with np.nan in columns with no nan entry (to color gray) (y)") == 'y':
         for color in obs.columns:
             naStrs = ["no","No","Na","NA","NAN"]
@@ -4720,9 +4716,6 @@ def showUmap(df,obs,dfxy,cdf=None): #make it so there's an option to re-color wi
                 key1 = key0 != 0
                 obs.loc[key1,color] = np.nan
                 #print(obs.loc[:,color])
-    adata = anndata.AnnData(df,obs = obs)
-    sc.pp.neighbors(adata,use_rep='X')
-    sc.tl.umap(adata)
     plt.rcParams['figure.figsize'] = 8, 8
     while True:
         try:
@@ -4756,7 +4749,14 @@ def showUmap(df,obs,dfxy,cdf=None): #make it so there's an option to re-color wi
             print("umap color:",color)
             cd = dict(zip(itm,clr))
             if ch=="1":
-                sc.pl.umap(adata,color = color,palette=cd)#,na_color='lightgray'
+                plot_embedding(
+                    embedding.coords,
+                    obs[color],
+                    palette=cd,
+                    title="UMAP colored by "+str(color),
+                    x_label=embedding.x_label,
+                    y_label=embedding.y_label,
+                )
             elif ch == "2":
                 obs[color] = obs.loc[:,color].astype(str)
                 uColors = sorted(list(obs[color].unique()))
@@ -4770,10 +4770,25 @@ def showUmap(df,obs,dfxy,cdf=None): #make it so there's an option to re-color wi
                         else:
                             clr.append("lightgray")
                     cd = dict(zip(itm,clr))
-                    sc.pl.umap(adata,color = color,palette=cd)
+                    plot_embedding(
+                        embedding.coords,
+                        obs[color],
+                        palette=cd,
+                        title=str(color)+"_"+str(uColors[i]),
+                        x_label=embedding.x_label,
+                        y_label=embedding.y_label,
+                    )
+                    plt.show()
+                continue
 
             else:
-               sc.pl.umap(adata,color = color,na_color='lightgray',palette="Set1")
+               plot_embedding(
+                   embedding.coords,
+                   obs[color],
+                   title="UMAP colored by "+str(color),
+                   x_label=embedding.x_label,
+                   y_label=embedding.y_label,
+               )
             plt.show()
         except Exception as e:
             print(type(e),e)
@@ -4783,7 +4798,15 @@ def showUmap(df,obs,dfxy,cdf=None): #make it so there's an option to re-color wi
         pass
     elif ch[0] == "y" or ch[0] == "Y":
         for biom in df.columns:
-            sc.pl.umap(adata,color=biom,vmin=np.mean(df[biom])-np.std(df[biom]),vmax=np.mean(df[biom])+2*np.std(df[biom]),color_map='viridis')
+            plot_embedding(
+                embedding.coords,
+                df[biom],
+                continuous=True,
+                title=str(biom),
+                x_label=embedding.x_label,
+                y_label=embedding.y_label,
+                cmap='viridis',
+            )
             plt.show()
     return(df,obs,dfxy)
 

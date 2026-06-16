@@ -6,6 +6,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+from pathlib import Path
+
+
+_ROOT = Path(__file__).resolve().parent
+_SUPPORT_DIR = _ROOT / "support"
+if str(_SUPPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SUPPORT_DIR))
+from optional_deps import warn_optional_dependency_status
 
 
 def _configure_noninteractive_plot_backend() -> None:
@@ -61,10 +70,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    args = parse_args()
+    warn_optional_dependency_status()
     _configure_noninteractive_plot_backend()
     import controler
 
-    args = parse_args()
     controler.load_legacy_ifa5()
     controler.main_html(
         default_folder=args.data_folder,

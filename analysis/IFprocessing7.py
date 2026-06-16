@@ -55,6 +55,7 @@ from shared_utils import (
     load_project_config_values,
     save_project_config_updates,
 )
+from embedding_utils import load_scanpy_stack
 _IF_ANALYSIS_DIR = Path(__file__).resolve().parents[1]
 if str(_IF_ANALYSIS_DIR) not in sys.path:
     sys.path.append(str(_IF_ANALYSIS_DIR))
@@ -116,15 +117,7 @@ def _safe_token(text):
 
 
 def _load_scanpy_stack(action_label="this action"):
-    try:
-        import anndata
-        import scanpy as sc
-        return(sc, anndata)
-    except Exception as exc:
-        print(action_label + " requires scanpy and anndata.")
-        print("Install them to use this option.")
-        print(type(exc).__name__, exc)
-        return(None, None)
+    return(load_scanpy_stack(action_label))
 
 def logInput(prompt):
     inp = input(prompt)
