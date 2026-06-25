@@ -86,6 +86,10 @@ Some optional paths may need extra care:
 
 If one optional feature is missing a package, other parts of DAS may still work.
 
+At startup, DAS tries to import UMAP once so any UMAP import problem appears before a long analysis run. If that startup check hangs, set `DAS_SKIP_UMAP_PREFLIGHT=1` before launching DAS; UMAP will be unavailable for that session, but the rest of DAS can still run.
+
+For Mesmer / DeepCell segmentation, DAS checks for `deepcell` and a DeepCell access token when you choose the segmentation path, before asking for image inputs. If you want to configure it ahead of time, get a token from `https://users.deepcell.org/login/`, then either set `DEEPCELL_ACCESS_TOKEN` in your environment or paste the token into `data_extraction/deepcell_access_token.txt`. That token file is ignored by git. If you use Conda env vars, deactivate/reactivate the environment before trying segmentation again.
+
 ## Guides
 
 Start here:

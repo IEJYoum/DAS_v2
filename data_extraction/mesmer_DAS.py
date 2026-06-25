@@ -23,6 +23,7 @@ from skimage.segmentation import expand_labels
 
 DEEPCELL_TOKEN_FILE = Path(__file__).with_name("deepcell_access_token.txt")
 DEEPCELL_INSTALL_COMMAND = "python -m pip install deepcell"
+DEEPCELL_TOKEN_URL = "https://users.deepcell.org/login/"
 MESMER_DTYPE = "float32"  # try "uint16" next if needed
 VERBOSE = True
 TILE_SIZE = 8000  # set huge, e.g. 9999999999, to disable tiling
@@ -42,11 +43,31 @@ def load_mesmer_class():
         print("[DAS optional dependency] Cell segmentation requires optional package: deepcell.", flush=True)
         print("[DAS optional dependency] It is not part of the base DAS install anymore.", flush=True)
         print("[DAS optional dependency] Install into this Python with: " + DEEPCELL_INSTALL_COMMAND, flush=True)
+        print("[DAS optional dependency] Then restart/reactivate the environment and try segmentation again.", flush=True)
         print("[DAS optional dependency] Current Python: " + sys.executable, flush=True)
         print("[DAS optional dependency] Import failed: " + type(exc).__name__ + ": " + str(exc), flush=True)
         raise
     print("[DAS optional dependency] DeepCell Mesmer import succeeded.", flush=True)
     return Mesmer
+
+
+def ensure_deepcell_token():
+    token = os.environ.get("DEEPCELL_ACCESS_TOKEN", "").strip()
+    if token != "":
+        return token
+    if DEEPCELL_TOKEN_FILE.exists():
+        token = DEEPCELL_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token != "":
+            os.environ["DEEPCELL_ACCESS_TOKEN"] = token
+            return token
+    print("[DAS optional dependency] DeepCell access token is not configured.", flush=True)
+    print("[DAS optional dependency] Get a token here: " + DEEPCELL_TOKEN_URL, flush=True)
+    print("[DAS optional dependency] Safe local option: paste the token into this ignored file:", flush=True)
+    print("[DAS optional dependency] " + str(DEEPCELL_TOKEN_FILE), flush=True)
+    print("[DAS optional dependency] Conda env option:", flush=True)
+    print("[DAS optional dependency] conda env config vars set DEEPCELL_ACCESS_TOKEN=<token>", flush=True)
+    print("[DAS optional dependency] Then deactivate/reactivate the env, restart DAS, and try segmentation again.", flush=True)
+    raise RuntimeError("DeepCell access token is not configured")
 
 
 def array_gb(a):
@@ -65,28 +86,18 @@ def cast_mesmer_dtype(a):
 def get_mesmer_model(Mesmer=None):
     if Mesmer is None:
         Mesmer = load_mesmer_class()
-    token = os.environ.get("DEEPCELL_ACCESS_TOKEN", "").strip()
-    if token == "" and DEEPCELL_TOKEN_FILE.exists():
-        token = DEEPCELL_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token != "":
-            os.environ["DEEPCELL_ACCESS_TOKEN"] = token
+    ensure_deepcell_token()
     try:
         return Mesmer()
     except Exception as e:
         msg = str(e)
         if "DEEPCELL_ACCESS_TOKEN" not in msg and "access token" not in msg.lower():
             raise
-        print("DeepCell access token not found.")
-        print("Paste your token and press enter.")
-        print("It will be saved to:")
-        print(DEEPCELL_TOKEN_FILE)
-        print("send blank to stop")
-        token = input("DeepCell access token:\n").strip()
-        if token == "":
-            raise Exception("DeepCell access token not provided")
-        DEEPCELL_TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
-        os.environ["DEEPCELL_ACCESS_TOKEN"] = token
-        return Mesmer()
+        print("[DAS optional dependency] DeepCell did not accept the configured token.", flush=True)
+        print("[DAS optional dependency] Create or refresh a token at: " + DEEPCELL_TOKEN_URL, flush=True)
+        print("[DAS optional dependency] Then update " + str(DEEPCELL_TOKEN_FILE), flush=True)
+        print("[DAS optional dependency] or reset DEEPCELL_ACCESS_TOKEN, restart DAS, and try segmentation again.", flush=True)
+        raise
 
 
 def refine_masks(mask_cell, mask_nuc, dilation_radius=3):
@@ -965,9 +976,10 @@ def collect_inputs():
 
 
 def main():
+    ensure_deepcell_token()
     Mesmer = load_mesmer_class()
-    settings = collect_inputs()
     model = get_mesmer_model(Mesmer)
+    settings = collect_inputs()
     if settings["mode"] == "TIFF subfolders":
         run_tiff(
             settings["root"],

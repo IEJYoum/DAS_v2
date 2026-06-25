@@ -2233,12 +2233,18 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
     DONE.append(done_key)
     colors = CATS
 
+    def _embedding_detail(*parts):
+        text = " ".join(str(p) for p in parts)
+        stream = getattr(sys, "__stdout__", None) or sys.stdout
+        stream.write(text + "\n")
+        stream.flush()
+
     mpl.style.use('default')
     try:
         df = df.astype(float)
         obs = obs.astype(str)
-        print(df.index)
-        print(obs.index)
+        _embedding_detail("[DAS embedding detail] df index:", df.index)
+        _embedding_detail("[DAS embedding detail] obs index:", obs.index)
         embedding = compute_embedding(df, mname, log_fn=print)
     except Exception as exc:
         print("[DAS embedding] failed to build", mname, "embedding.")
@@ -2246,7 +2252,7 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
         return(dfs,com)
 
     plt.rcParams['figure.figsize'] = 8, 8
-    print(colors,'colors')
+    _embedding_detail("[DAS embedding detail] color columns:", colors)
 
     def _category_palette(u_colors):
         itm = []
@@ -2263,17 +2269,17 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
                 try:
                     clr.append(allc.colors[j])
                 except:
-                    print('PLACEHOLDER NOT ENOUGH COLORS ON EMBEDDING')
+                    _embedding_detail('[DAS embedding detail] PLACEHOLDER NOT ENOUGH COLORS ON EMBEDDING')
                     clr.append('black')
         return(dict(zip(itm,clr)))
 
     for color in colors:
         if color not in obs.columns:
-            print("[DAS embedding] skipping missing obs color column:", color)
+            _embedding_detail("[DAS embedding detail] skipping missing obs color column:", color)
             continue
         for ch in range(2):
             uColors = sorted(list(obs[color].unique()))
-            print(uColors,'uColors')
+            _embedding_detail("[DAS embedding detail]", color, "unique values:", uColors)
             if ch == 1:
                 obs[color] = obs.loc[:,color].astype(str)
 
@@ -2295,9 +2301,10 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
                     if SAVE:
                         plt.savefig(saveF(0,"embeddings/"+mname+"/"+color,color+'_'+uch),bbox_inches='tight')
                     plt.show()
+                    plt.close(fig)
 
             else:
-                print('plotting all!')
+                _embedding_detail('[DAS embedding detail] plotting all values for', color)
                 cd = _category_palette(uColors)
                 fig, ax = plot_embedding(
                     embedding.coords,
@@ -2310,6 +2317,7 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
                 if SAVE:
                     plt.savefig(saveF(0,"embeddings/"+mname+"/"+color,color+'_all'),bbox_inches='tight')
                 plt.show() #this was commented out yet everything worked... why...
+                plt.close(fig)
 
         '''
         except Exception as e:
@@ -2330,6 +2338,7 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
                 if SAVE:
                     plt.savefig(saveF(0,"embeddings/"+mname+"/expression",biom),bbox_inches='tight')
                 plt.show()
+                plt.close(fig)
     return([df,obs,dfxy],9)
 
 

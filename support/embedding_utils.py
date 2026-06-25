@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -11,6 +12,11 @@ import pandas as pd
 
 SCANPY_INSTALL_COMMAND = 'python -m pip install "scanpy[leiden]"'
 UMAP_INSTALL_COMMAND = "python -m pip install umap-learn"
+UMAP_SKIP_ENV = "DAS_SKIP_UMAP_PREFLIGHT"
+UMAP_CLASS = None
+UMAP_IMPORT_ERROR = None
+UMAP_IMPORT_ATTEMPTED = False
+UMAP_IMPORT_SKIPPED = False
 
 
 @dataclass
@@ -28,6 +34,12 @@ def _log(log_fn: Callable[..., Any] | None, text: str) -> None:
         log_fn(text, flush=True)
     except TypeError:
         log_fn(text)
+
+
+def _terminal_log(text: str) -> None:
+    stream = getattr(sys, "__stdout__", None) or sys.stdout
+    stream.write(str(text) + "\n")
+    stream.flush()
 
 
 def _elapsed(start: float) -> str:
@@ -56,11 +68,38 @@ def load_scanpy_stack(action_label: str = "this action"):
     return sc, anndata
 
 
+def check_umap_available(log_fn: Callable[..., Any] | None = print) -> bool:
+    global UMAP_CLASS, UMAP_IMPORT_ERROR, UMAP_IMPORT_ATTEMPTED, UMAP_IMPORT_SKIPPED
+    if UMAP_IMPORT_ATTEMPTED:
+        return UMAP_CLASS is not None
+
+    UMAP_IMPORT_ATTEMPTED = True
+    if str(os.environ.get(UMAP_SKIP_ENV, "")).strip().lower() in {"1", "true", "yes", "y"}:
+        UMAP_IMPORT_SKIPPED = True
+        _log(log_fn, "[DAS setup] skipping optional UMAP import because " + UMAP_SKIP_ENV + " is set.")
+        return False
+
+    start = time.perf_counter()
+    _log(log_fn, "[DAS setup] checking optional UMAP import...")
+    try:
+        from umap import UMAP
+    except Exception as exc:
+        UMAP_IMPORT_ERROR = exc
+        _log(log_fn, "[DAS setup] UMAP unavailable: " + type(exc).__name__ + ": " + str(exc))
+        _log(log_fn, "[DAS setup] PCA and t-SNE can still run.")
+        return False
+
+    UMAP_CLASS = UMAP
+    _log(log_fn, "[DAS setup] UMAP available after " + _elapsed(start) + ".")
+    return True
+
+
 def compute_embedding(
     df: pd.DataFrame,
     mode: str = "umap",
     *,
     log_fn: Callable[..., Any] | None = print,
+    detail_log_fn: Callable[[str], Any] | None = _terminal_log,
     random_state: int = 0,
 ) -> EmbeddingResult:
     mode = str(mode).strip().lower()
@@ -68,24 +107,27 @@ def compute_embedding(
         raise ValueError("unknown embedding mode: " + str(mode))
 
     start = time.perf_counter()
-    _log(log_fn, f"[DAS embedding] preparing numeric matrix for {mode.upper()}...")
+    _log(log_fn, f"[DAS embedding] starting {mode.upper()} embedding...")
+    _log(detail_log_fn, f"[DAS embedding detail] preparing numeric matrix for {mode.upper()}...")
     data = pd.DataFrame(df).astype(float)
     matrix = data.to_numpy(dtype=float, copy=True)
     n_cells, n_features = matrix.shape
-    _log(log_fn, f"[DAS embedding] matrix shape: {n_cells} cells x {n_features} features")
+    _log(detail_log_fn, f"[DAS embedding detail] matrix shape: {n_cells} cells x {n_features} features")
 
+    _log(detail_log_fn, "[DAS embedding detail] checking matrix size and finite values...")
     if n_cells < 2:
         raise ValueError("embedding needs at least 2 rows")
     if n_features < 1:
         raise ValueError("embedding needs at least 1 feature column")
     if not np.isfinite(matrix).all():
         raise ValueError("embedding input contains NaN or infinite values")
+    _log(detail_log_fn, f"[DAS embedding detail] matrix checks passed after {_elapsed(start)}.")
 
     if mode == "pca":
-        return _compute_pca(matrix, list(data.columns), start, log_fn, random_state)
+        return _compute_pca(matrix, list(data.columns), start, log_fn, detail_log_fn, random_state)
     if mode == "tsne":
-        return _compute_tsne(matrix, start, log_fn, random_state)
-    return _compute_umap(matrix, start, log_fn, random_state)
+        return _compute_tsne(matrix, start, log_fn, detail_log_fn, random_state)
+    return _compute_umap(matrix, start, log_fn, detail_log_fn, random_state)
 
 
 def _compute_pca(
@@ -93,13 +135,14 @@ def _compute_pca(
     columns: list[Any],
     start: float,
     log_fn: Callable[..., Any] | None,
+    detail_log_fn: Callable[[str], Any] | None,
     random_state: int,
 ) -> EmbeddingResult:
-    _log(log_fn, "[DAS embedding] importing sklearn PCA...")
+    _log(detail_log_fn, "[DAS embedding detail] importing sklearn PCA...")
     from sklearn.decomposition import PCA
 
     n_components = min(2, matrix.shape[0], matrix.shape[1])
-    _log(log_fn, f"[DAS embedding] running PCA with {n_components} component(s)...")
+    _log(detail_log_fn, f"[DAS embedding detail] running PCA with {n_components} component(s)...")
     pca = PCA(n_components=n_components, random_state=random_state)
     coords = pca.fit_transform(matrix)
     if coords.shape[1] == 1:
@@ -116,7 +159,8 @@ def _compute_pca(
     except Exception:
         pass
 
-    _log(log_fn, f"[DAS embedding] PCA finished in {_elapsed(start)}.")
+    _log(detail_log_fn, f"[DAS embedding detail] PCA finished in {_elapsed(start)}.")
+    _log(log_fn, f"[DAS embedding] PCA finished.")
     return EmbeddingResult("pca", coords, x_label, y_label)
 
 
@@ -124,19 +168,21 @@ def _compute_tsne(
     matrix: np.ndarray,
     start: float,
     log_fn: Callable[..., Any] | None,
+    detail_log_fn: Callable[[str], Any] | None,
     random_state: int,
 ) -> EmbeddingResult:
-    _log(log_fn, "[DAS embedding] importing sklearn TSNE...")
+    _log(detail_log_fn, "[DAS embedding detail] importing sklearn TSNE...")
     from sklearn.manifold import TSNE
 
     n_cells = matrix.shape[0]
     perplexity = min(30, max(1, (n_cells - 1) // 3))
     if perplexity >= n_cells:
         perplexity = max(1, n_cells - 1)
-    _log(log_fn, f"[DAS embedding] running t-SNE with perplexity={perplexity}...")
+    _log(detail_log_fn, f"[DAS embedding detail] running t-SNE with perplexity={perplexity}...")
     tsne = TSNE(n_components=2, perplexity=perplexity, init="pca", random_state=random_state)
     coords = tsne.fit_transform(matrix)
-    _log(log_fn, f"[DAS embedding] t-SNE finished in {_elapsed(start)}.")
+    _log(detail_log_fn, f"[DAS embedding detail] t-SNE finished in {_elapsed(start)}.")
+    _log(log_fn, "[DAS embedding] t-SNE finished.")
     return EmbeddingResult("tsne", coords, "tSNE1", "tSNE2")
 
 
@@ -144,25 +190,30 @@ def _compute_umap(
     matrix: np.ndarray,
     start: float,
     log_fn: Callable[..., Any] | None,
+    detail_log_fn: Callable[[str], Any] | None,
     random_state: int,
 ) -> EmbeddingResult:
-    _log(log_fn, "[DAS embedding] importing umap-learn...")
-    try:
-        from umap import UMAP
-    except Exception as exc:
+    _log(detail_log_fn, "[DAS embedding detail] checking cached UMAP import...")
+    if not check_umap_available(log_fn=detail_log_fn):
         _log(log_fn, "[DAS embedding] UMAP needs optional package umap-learn.")
-        _log(log_fn, f"[DAS embedding] Install into this Python with: {UMAP_INSTALL_COMMAND}")
-        _log(log_fn, f"[DAS embedding] Current Python: {sys.executable}")
-        raise ImportError("umap-learn is required for UMAP embedding") from exc
+        if UMAP_IMPORT_SKIPPED:
+            _log(log_fn, "[DAS embedding] UMAP preflight was skipped by " + UMAP_SKIP_ENV + ".")
+            _log(detail_log_fn, "[DAS embedding detail] unset " + UMAP_SKIP_ENV + " and restart DAS to enable UMAP.")
+        elif UMAP_IMPORT_ERROR is not None:
+            _log(detail_log_fn, "[DAS embedding detail] UMAP import error: " + type(UMAP_IMPORT_ERROR).__name__ + ": " + str(UMAP_IMPORT_ERROR))
+        _log(detail_log_fn, f"[DAS embedding detail] Install into this Python with: {UMAP_INSTALL_COMMAND}")
+        _log(detail_log_fn, f"[DAS embedding detail] Current Python: {sys.executable}")
+        raise ImportError("umap-learn is required for UMAP embedding")
 
     n_cells = matrix.shape[0]
     if n_cells < 3:
         raise ValueError("UMAP needs at least 3 rows; use PCA for very small data")
     n_neighbors = min(15, max(2, n_cells - 1))
-    _log(log_fn, f"[DAS embedding] running UMAP with n_neighbors={n_neighbors}...")
-    reducer = UMAP(n_components=2, n_neighbors=n_neighbors, random_state=random_state)
+    _log(detail_log_fn, f"[DAS embedding detail] running UMAP with n_neighbors={n_neighbors}...")
+    reducer = UMAP_CLASS(n_components=2, n_neighbors=n_neighbors, random_state=random_state)
     coords = reducer.fit_transform(matrix)
-    _log(log_fn, f"[DAS embedding] UMAP finished in {_elapsed(start)}.")
+    _log(detail_log_fn, f"[DAS embedding detail] UMAP finished in {_elapsed(start)}.")
+    _log(log_fn, "[DAS embedding] UMAP finished.")
     return EmbeddingResult("umap", coords, "UMAP1", "UMAP2")
 
 

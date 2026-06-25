@@ -76,7 +76,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    from embedding_utils import check_umap_available
+
     warn_optional_dependency_status()
+    check_umap_available()
     _configure_noninteractive_plot_backend()
     import controler
 

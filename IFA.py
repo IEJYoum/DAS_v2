@@ -34,7 +34,9 @@ for _path in _BOOTSTRAP_DIRS:
         sys.path.insert(0, _text)
 
 from optional_deps import warn_optional_dependency_status
+from embedding_utils import check_umap_available
 warn_optional_dependency_status()
+check_umap_available()
 
 import IFprocessing7 as ifp
 import IFvisualization2 as ifv
