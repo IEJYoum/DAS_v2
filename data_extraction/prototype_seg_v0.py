@@ -40,7 +40,11 @@ class NucleusSegNet(nn.Module):
             nn.ReLU(),
         )
 
-        self.final = nn.Sequential(
+        self.final_nucleus = nn.Sequential(
+            nn.Conv2d(16, 1, 1),
+            nn.Sigmoid(),
+        )
+        self.final_boundary = nn.Sequential(
             nn.Conv2d(16, 1, 1),
             nn.Sigmoid(),
         )
@@ -57,4 +61,4 @@ class NucleusSegNet(nn.Module):
         x = self.dec2(x + e2)
         x = nn.functional.interpolate(x, size=e1.shape[-2:], mode="bilinear", align_corners=False)
         x = self.dec3(x + e1)
-        return self.final(x)
+        return self.final_nucleus(x), self.final_boundary(x)
