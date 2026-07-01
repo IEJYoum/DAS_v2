@@ -12,6 +12,7 @@ import tifffile as tiff
 from PIL import Image
 from skimage.transform import AffineTransform, warp
 
+import export_registered_rgb_from_run
 import make_registered_multichannel_ome
 import make_registration_overlay_pngs
 from svs_to_single_channel_tiffs import list_svs_files, pick_channel
@@ -95,6 +96,7 @@ MAKE_OVERLAY_PNGS = True
 # Multichannel OME is useful QC but memory-heavy because it combines all channels.
 # Set False to preserve the per-channel full-resolution OME outputs and skip the stack.
 MAKE_MULTICHANNEL_OME = True
+MAKE_REGISTERED_RGB_OME = True
 
 
 def ome_metadata(axes, pixel_size_um, channel_names=None):
@@ -1534,6 +1536,7 @@ def save_config_txt(output_dir, paths, fixed_path, pixel_size_um, run_started, s
     lines.append("memory_retry_wait_seconds\t" + str(MEMORY_RETRY_WAIT_SECONDS))
     lines.append("make_overlay_pngs\t" + str(MAKE_OVERLAY_PNGS))
     lines.append("make_multichannel_ome\t" + str(MAKE_MULTICHANNEL_OME))
+    lines.append("make_registered_rgb_ome\t" + str(MAKE_REGISTERED_RGB_OME))
     lines.append("")
     lines.append("runtime_step_totals")
     lines.append("step\tseconds")
@@ -1903,6 +1906,12 @@ def main():
         step_start = time.time()
         make_registered_multichannel_ome.main(output_dir, pixel_size_um)
         add_timing(timings, output_dir, run_started, start_seconds, "running", "multichannel_ome", "all", step_start)
+
+    if MAKE_REGISTERED_RGB_OME:
+        print("making registered RGB ome-tiffs")
+        step_start = time.time()
+        export_registered_rgb_from_run.main(output_dir)
+        add_timing(timings, output_dir, run_started, start_seconds, "running", "registered_rgb_ome", "all", step_start)
 
     step_start = time.time()
     save_config_txt(output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "complete", timings)
