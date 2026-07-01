@@ -9,13 +9,16 @@ from pathlib import Path
 
 import numpy as np
 import tifffile as tiff
+from PIL import Image
 from skimage.transform import AffineTransform, warp
 
+import make_registered_multichannel_ome
+import make_registration_overlay_pngs
 from svs_to_single_channel_tiffs import list_svs_files, pick_channel
 
 
-INPUT_DIR = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\TestData\smaller")
-FIXED_FILE_CONTAINS = "Ki67"
+INPUT_DIR = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\TestData\29-002")
+FIXED_FILE_CONTAINS = "CD3."
 OUTPUT_SUBDIR = "RegisteredImages"
 CHANNEL = "gray"
 # Affects only final OME writes, not registration. "raw_channel" writes CHANNEL.
@@ -1581,8 +1584,6 @@ def k_png_path_for(output_dir, source_path):
 
 
 def save_mask_png(output_dir, source_path, image):
-    from PIL import Image
-
     mask_dir = output_dir / MASK_PNG_SUBDIR
     mask_dir.mkdir(parents=True, exist_ok=True)
     small = image[::MASK_PNG_DOWNSAMPLE, ::MASK_PNG_DOWNSAMPLE]
@@ -1595,8 +1596,6 @@ def save_mask_png(output_dir, source_path, image):
 
 
 def save_k_png(output_dir, source_path, k_image):
-    from PIL import Image
-
     k_dir = output_dir / K_PNG_SUBDIR
     k_dir.mkdir(parents=True, exist_ok=True)
     small = k_image[::MASK_PNG_DOWNSAMPLE, ::MASK_PNG_DOWNSAMPLE].astype(np.float32)
@@ -1892,16 +1891,14 @@ def main():
         add_timing(timings, output_dir, run_started, start_seconds, "running", "save_registered_ome", record["path"].name, step_start)
 
     if MAKE_OVERLAY_PNGS:
-        import make_registration_overlay_pngs
-
+        make_registration_overlay_pngs.FIXED_FILE_CONTAINS = FIXED_FILE_CONTAINS
         print("making overlay pngs")
         step_start = time.time()
         make_registration_overlay_pngs.main(output_dir)
         add_timing(timings, output_dir, run_started, start_seconds, "running", "overlay_pngs", "all", step_start)
 
     if MAKE_MULTICHANNEL_OME:
-        import make_registered_multichannel_ome
-
+        make_registered_multichannel_ome.FIXED_FILE_CONTAINS = FIXED_FILE_CONTAINS
         print("making multichannel ome-tiff")
         step_start = time.time()
         make_registered_multichannel_ome.main(output_dir, pixel_size_um)

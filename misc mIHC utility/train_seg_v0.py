@@ -16,11 +16,13 @@ import torch
 from prototype_seg_v0 import NucleusSegNet
 
 
-RUN_MODE = "train"  # "train" or "test"
+RUN_MODE = "test"  # "train" or "test"
+RM_0 = RUN_MODE
+CYCLE = True
 CORES = ["D1","D2","D3","D4","D5"]#["A5","A6","A7","A8","A9","B1","B2","B3","B4","B5","C1","C2","C3"]  # List of cores to process
 CORE = None#"A04"  # Change to "A04", "A05", etc.
 CONFIDENCE_THRESHOLD = 0.50
-ASSIGN_THRESHOLD = 0.7         # combined surface threshold for cell foreground
+ASSIGN_THRESHOLD = 0.3         # combined surface threshold for cell foreground
 ASSIGN_MAX_SINGLE_AREA = 1500  # pixels; regions larger than this get watershed-split
 BOUNDARY_AGREEMENT_KNOB = 0  # 0 = disabled; drops cells whose mean perimeter boundary_prob is below this
 INTERIOR_BOUNDARY_KNOB = 0  # 0 = disabled; drops cells where interior boundary_prob exceeds perimeter by more than this
@@ -587,11 +589,12 @@ def main():
 if __name__ == "__main__":    
     i = 0
     for core in CORES:
-        RUN_MODE = "test"
+        RUN_MODE = RM_0
         CORE = core
-        if i % 2 == 1:
-            #RUN_MODE = "test"
-            pass
+        if CYCLE:
+            if i % 2 == 1:
+                #RUN_MODE = "test"
+                pass
         i += 1
 
         main()
