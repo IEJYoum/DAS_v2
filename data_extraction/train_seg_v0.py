@@ -26,6 +26,7 @@ ASSIGN_THRESHOLD = 0.1         # combined surface threshold for cell foreground
 ASSIGN_MAX_SINGLE_AREA = 1500  # pixels; regions larger than this get watershed-split
 BOUNDARY_AGREEMENT_KNOB = 0  # 0 = disabled; drops cells whose mean perimeter boundary_prob is below this
 INTERIOR_BOUNDARY_KNOB = 0  # 0 = disabled; drops cells where interior boundary_prob exceeds perimeter by more than this
+MIN_NUCLEUS_AREA = 50  # pixels; 0 = disabled; drops instances smaller than this
 EPOCHS = 50
 LEARNING_RATE = 1e-3
 LOSS_MODE = "weighted_bce"  # "bce", "weighted_bce", or "dice"
@@ -345,7 +346,7 @@ def filter_by_boundary_agreement(labeled, boundary_prediction):
     Returns a copy of labeled with dropped cells zeroed out.
     Surviving cell labels are not renumbered.
     """
-    if BOUNDARY_AGREEMENT_KNOB <= 0 and INTERIOR_BOUNDARY_KNOB <= 0:
+    if BOUNDARY_AGREEMENT_KNOB <= 0 and INTERIOR_BOUNDARY_KNOB <= 0 and MIN_NUCLEUS_AREA <= 0:
         return labeled
 
     perimeter_mask = find_boundaries(labeled, mode="inner")
@@ -353,6 +354,11 @@ def filter_by_boundary_agreement(labeled, boundary_prediction):
 
     for prop in regionprops(labeled):
         cell_mask = labeled == prop.label
+
+        if MIN_NUCLEUS_AREA > 0 and prop.area < MIN_NUCLEUS_AREA:
+            result[cell_mask] = 0
+            continue
+
         cell_perimeter = perimeter_mask & cell_mask
         if not cell_perimeter.any():
             continue

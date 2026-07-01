@@ -21,6 +21,7 @@ from svs_to_single_channel_tiffs import list_svs_files, pick_channel
 INPUT_DIR = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\TestData\29-002")
 FIXED_FILE_CONTAINS = "CD3."
 OUTPUT_SUBDIR = "RegisteredImages"
+OUTPUT_DIR = None
 CHANNEL = "gray"
 # Affects only final OME writes, not registration. "raw_channel" writes CHANNEL.
 # "red_stain_only" reads RGB SVS pixels, inverts white background to black,
@@ -1324,6 +1325,41 @@ def next_output_dir(root):
         index = index + 1
 
 
+def has_svs_files(input_dir):
+    return any(path.is_file() and path.suffix.lower() == ".svs" for path in input_dir.iterdir())
+
+
+def slide_input_dirs(input_dir):
+    if has_svs_files(input_dir):
+        return [input_dir]
+
+    slides = []
+    for path in sorted(input_dir.iterdir()):
+        if path.is_dir() and has_svs_files(path):
+            slides.append(path)
+
+    if len(slides) == 0:
+        raise FileNotFoundError("no .svs files found in " + str(input_dir) + " or its immediate subfolders")
+    return slides
+
+
+def next_slide_output_dir(output_root, slide_name):
+    output_root.mkdir(parents=True, exist_ok=True)
+    prefix = "Registered_" + slide_name
+    index = 1
+    while True:
+        candidate = output_root / (prefix + "_" + str(index).zfill(2))
+        if not candidate.exists():
+            return candidate
+        index = index + 1
+
+
+def output_dir_for_slide(slide_dir, output_root):
+    if output_root is None:
+        return next_output_dir(slide_dir)
+    return next_slide_output_dir(output_root, slide_dir.name)
+
+
 def save_debug_txt(output_dir, rows):
     columns = [
         "role",
@@ -1464,7 +1500,7 @@ def svs_header(path):
         }
 
 
-def save_config_txt(output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, status, timings):
+def save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, status, timings):
     total_bytes = sum(path.stat().st_size for path in paths)
     totals = {}
     for row in timings:
@@ -1478,7 +1514,7 @@ def save_config_txt(output_dir, paths, fixed_path, pixel_size_um, run_started, s
     lines.append("run_started\t" + run_started.isoformat(timespec="seconds"))
     lines.append("run_updated\t" + datetime.now().astimezone().isoformat(timespec="seconds"))
     lines.append("runtime_seconds\t" + "{:.1f}".format(time.time() - start_seconds))
-    lines.append("input_dir\t" + str(INPUT_DIR))
+    lines.append("input_dir\t" + str(input_dir))
     lines.append("output_dir\t" + str(output_dir))
     lines.append("n_slides\t" + str(len(paths)))
     lines.append("total_input_bytes\t" + str(total_bytes))
@@ -1612,24 +1648,25 @@ def save_k_png(output_dir, source_path, k_image):
     Image.fromarray((small * 255).astype(np.uint8)).save(output_path)
 
 
-def main():
+def run_one_slide(input_dir, output_dir):
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
     run_started = datetime.now().astimezone()
     start_seconds = time.time()
-    output_dir = next_output_dir(INPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
     timings = []
 
     step_start = time.time()
-    paths = list_svs_files(INPUT_DIR)
+    paths = list_svs_files(input_dir)
     fixed_path = choose_fixed_file(paths)
     pixel_size_um = read_svs_pixel_size_um(fixed_path)
     add_timing(timings, output_dir, run_started, start_seconds, "running", "discover_inputs", "all", step_start)
 
     step_start = time.time()
-    save_config_txt(output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "running", timings)
+    save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "running", timings)
     add_timing(timings, output_dir, run_started, start_seconds, "running", "save_config_txt", "running", step_start)
 
-    print("input:", INPUT_DIR)
+    print("input:", input_dir)
     print("fixed:", fixed_path.name)
     print("output:", output_dir)
     print("pixel size um:", pixel_size_um)
@@ -1914,10 +1951,32 @@ def main():
         add_timing(timings, output_dir, run_started, start_seconds, "running", "registered_rgb_ome", "all", step_start)
 
     step_start = time.time()
-    save_config_txt(output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "complete", timings)
+    save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "complete", timings)
     add_timing(timings, output_dir, run_started, start_seconds, "complete", "save_config_txt", "complete", step_start)
-    save_config_txt(output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "complete", timings)
+    save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "complete", timings)
     print("done")
+
+
+def main(input_dir=None, output_dir=None):
+    if input_dir is None:
+        input_root = Path(INPUT_DIR)
+    else:
+        input_root = Path(input_dir)
+
+    if output_dir is None:
+        output_root = OUTPUT_DIR
+    else:
+        output_root = output_dir
+    if output_root is not None:
+        output_root = Path(output_root)
+
+    slides = slide_input_dirs(input_root)
+    print("slide folders:", len(slides))
+    for slide_dir in slides:
+        slide_output_dir = output_dir_for_slide(slide_dir, output_root)
+        print("slide:", slide_dir.name)
+        print("slide output:", slide_output_dir)
+        run_one_slide(slide_dir, slide_output_dir)
 
 
 if __name__ == "__main__":
