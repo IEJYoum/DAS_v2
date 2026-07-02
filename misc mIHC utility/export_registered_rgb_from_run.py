@@ -2,6 +2,7 @@
 
 import ast
 import math
+import stat
 import time
 from pathlib import Path
 
@@ -17,6 +18,52 @@ READ_RETRY_COUNT = 10
 READ_RETRY_WAIT_SECONDS = 300
 WRITE_RETRY_COUNT = 10
 WRITE_RETRY_WAIT_SECONDS = 300
+_TRANSIENT_ERRNOS = {5, 22, 116}  # EIO, EINVAL (some NFS), ESTALE
+IO_RETRY_COUNT = 10
+IO_RETRY_WAIT_SECONDS = 30
+
+
+def _retry_io(op, path, fn):
+    for attempt in range(IO_RETRY_COUNT + 1):
+        try:
+            return fn()
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= IO_RETRY_COUNT:
+                raise
+            print(
+                "IO error:", op, str(path),
+                "errno=" + str(exc.errno) + ",",
+                "attempt " + str(attempt + 1) + "/" + str(IO_RETRY_COUNT) + ",",
+                "retrying in", IO_RETRY_WAIT_SECONDS, "s",
+            )
+            time.sleep(IO_RETRY_WAIT_SECONDS)
+    raise RuntimeError("unreachable IO retry state")
+
+
+def _stat(path):
+    return _retry_io("stat", path, lambda: path.stat())
+
+
+def _exists(path):
+    try:
+        _stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _is_file(path):
+    try:
+        return stat.S_ISREG(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _is_dir(path):
+    try:
+        return stat.S_ISDIR(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def ome_metadata(pixel_size_um):
@@ -94,23 +141,25 @@ def write_rgb_ome(path, image, pixel_size_um):
         try:
             write_rgb_ome_once(path, image, pixel_size_um)
             return
-        except OSError:
-            if attempt >= WRITE_RETRY_COUNT:
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= WRITE_RETRY_COUNT:
                 raise
             print(
-                "write failed, likely network drive issue; retrying in",
+                "write failed errno=" + str(exc.errno) + ", likely network drive issue; retrying in",
                 WRITE_RETRY_WAIT_SECONDS,
                 "seconds. attempt",
                 attempt + 1,
                 "of",
                 WRITE_RETRY_COUNT,
+                str(path),
             )
             time.sleep(WRITE_RETRY_WAIT_SECONDS)
 
 
 def read_config(path):
+    text = _retry_io("read_text", path, lambda: path.read_text(encoding="utf-8"))
     config = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if "\t" in line:
             key, value = line.split("\t", 1)
             config[key] = value
@@ -122,7 +171,7 @@ def read_config(path):
 
 
 def parse_canvas_txt(path):
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _retry_io("read_text", path, lambda: path.read_text(encoding="utf-8")).splitlines()
     data = {}
     records = []
     in_table = False
@@ -314,16 +363,17 @@ def read_svs_rgb(path):
     for attempt in range(READ_RETRY_COUNT + 1):
         try:
             return read_svs_rgb_once(path)
-        except OSError:
-            if attempt >= READ_RETRY_COUNT:
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= READ_RETRY_COUNT:
                 raise
             print(
-                "read failed, likely network drive issue; retrying in",
+                "read failed errno=" + str(exc.errno) + ", likely network drive issue; retrying in",
                 READ_RETRY_WAIT_SECONDS,
                 "seconds. attempt",
                 attempt + 1,
                 "of",
                 READ_RETRY_COUNT,
+                str(path),
             )
             time.sleep(READ_RETRY_WAIT_SECONDS)
 
@@ -333,12 +383,14 @@ def output_name(record):
 
 
 def existing_rgb_ome_is_ok(path):
-    if not path.exists():
+    if not _exists(path):
         return False
     try:
-        with tiff.TiffFile(path) as tif:
-            series = tif.series[0]
-            return len(series.shape) == 3 and series.shape[-1] == 3
+        def _check():
+            with tiff.TiffFile(path) as tif:
+                series = tif.series[0]
+                return len(series.shape) == 3 and series.shape[-1] == 3
+        return _retry_io("tifffile_check", path, _check)
     except Exception:
         return False
 
@@ -351,7 +403,7 @@ def main(registered_dir):
     pixel_size_um = float(config["pixel_size_um"])
     reference_shape = records[0]["image_shape"]
     output_dir = registered_dir / OUTPUT_SUBDIR
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _retry_io("mkdir", output_dir, lambda: output_dir.mkdir(parents=True, exist_ok=True))
 
     print("registered run:", registered_dir)
     print("input SVS dir:", input_dir)
@@ -364,7 +416,7 @@ def main(registered_dir):
             print("skipping existing RGB OME:", output_path.name)
             continue
         svs_path = input_dir / record["file"]
-        if not svs_path.exists():
+        if not _exists(svs_path):
             raise FileNotFoundError("missing source SVS: " + str(svs_path))
         rgb = read_svs_rgb(svs_path)
         registered_rgb = apply_transform_to_rgb_canvas(rgb, record, canvas_shape, reference_shape, offset_y, offset_x)

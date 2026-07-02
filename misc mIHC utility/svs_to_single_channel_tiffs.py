@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import stat
+import time
 from pathlib import Path
 
 import imagecodecs  # noqa: F401 - imported up front so JPEG SVS support fails fast.
@@ -16,6 +18,52 @@ OUTPUT_DIR = INPUT_DIR / "single_channel_tiffs"
 OME_TILE = (1024, 1024)
 PYRAMID_MIN_SIZE = 1024
 DEFAULT_PIXEL_SIZE_UM = 0.5022
+IO_RETRY_COUNT = 10
+IO_RETRY_WAIT_SECONDS = 30
+_TRANSIENT_ERRNOS = {5, 22, 116}  # EIO, EINVAL (some NFS), ESTALE
+
+
+def _retry_io(op: str, path, fn):
+    for attempt in range(IO_RETRY_COUNT + 1):
+        try:
+            return fn()
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= IO_RETRY_COUNT:
+                raise
+            print(
+                "IO error:", op, str(path),
+                "errno=" + str(exc.errno) + ",",
+                "attempt " + str(attempt + 1) + "/" + str(IO_RETRY_COUNT) + ",",
+                "retrying in", IO_RETRY_WAIT_SECONDS, "s",
+            )
+            time.sleep(IO_RETRY_WAIT_SECONDS)
+    raise RuntimeError("unreachable IO retry state")
+
+
+def _stat(path):
+    return _retry_io("stat", path, lambda: path.stat())
+
+
+def _exists(path):
+    try:
+        _stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _is_file(path):
+    try:
+        return stat.S_ISREG(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _is_dir(path):
+    try:
+        return stat.S_ISDIR(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def ome_metadata(axes: str, pixel_size_um: float) -> dict:
@@ -64,45 +112,48 @@ def downsample_2x_mean(image: np.ndarray) -> np.ndarray:
 
 def write_ome_tiff(path: Path, image: np.ndarray, pixel_size_um: float) -> None:
     levels = pyramid_levels(image)
-    with tiff.TiffWriter(path, bigtiff=True, ome=True) as writer:
-        writer.write(
-            image,
-            photometric="minisblack",
-            tile=OME_TILE,
-            metadata=ome_metadata("YX", pixel_size_um),
-            resolution=ome_resolution(pixel_size_um, 0),
-            resolutionunit="CENTIMETER",
-            subifds=len(levels),
-        )
-        for level_index, level in enumerate(levels, start=1):
+    def _write():
+        with tiff.TiffWriter(path, bigtiff=True, ome=True) as writer:
             writer.write(
-                level,
+                image,
                 photometric="minisblack",
                 tile=OME_TILE,
-                subfiletype=1,
-                resolution=ome_resolution(pixel_size_um, level_index),
+                metadata=ome_metadata("YX", pixel_size_um),
+                resolution=ome_resolution(pixel_size_um, 0),
                 resolutionunit="CENTIMETER",
-                metadata=None,
+                subifds=len(levels),
             )
+            for level_index, level in enumerate(levels, start=1):
+                writer.write(
+                    level,
+                    photometric="minisblack",
+                    tile=OME_TILE,
+                    subfiletype=1,
+                    resolution=ome_resolution(pixel_size_um, level_index),
+                    resolutionunit="CENTIMETER",
+                    metadata=None,
+                )
+    _retry_io("write_ome_tiff", path, _write)
 
 
 def list_svs_files(input_dir: Path) -> list[Path]:
-    return sorted(path for path in input_dir.iterdir() if path.is_file() and path.suffix.lower() == ".svs")
+    entries = _retry_io("iterdir", input_dir, lambda: list(input_dir.iterdir()))
+    return sorted(path for path in entries if _is_file(path) and path.suffix.lower() == ".svs")
 
 
 def describe_folder(input_dir: Path) -> str:
     lines = [
         f"input_dir={input_dir}",
         f"absolute={input_dir.absolute()}",
-        f"exists={input_dir.exists()}",
-        f"is_dir={input_dir.is_dir()}",
+        f"exists={_exists(input_dir)}",
+        f"is_dir={_is_dir(input_dir)}",
     ]
 
-    if input_dir.is_dir():
-        entries = sorted(input_dir.iterdir(), key=lambda path: path.name.lower())
+    if _is_dir(input_dir):
+        entries = sorted(_retry_io("iterdir", input_dir, lambda: list(input_dir.iterdir())), key=lambda path: path.name.lower())
         lines.append(f"entry_count={len(entries)}")
         for path in entries[:25]:
-            kind = "dir" if path.is_dir() else "file"
+            kind = "dir" if _is_dir(path) else "file"
             lines.append(f"  {kind}: {path.name}")
 
     return "\n".join(lines)
@@ -147,8 +198,10 @@ def pick_channel(image: np.ndarray, channel: str) -> np.ndarray:
 
 
 def read_svs_pixel_size_um(path: Path) -> float:
-    with tiff.TiffFile(path) as tif:
-        description = tif.pages[0].description or ""
+    def _read():
+        with tiff.TiffFile(path) as tif:
+            return tif.pages[0].description or ""
+    description = _retry_io("read_svs_pixel_size_um", path, _read)
     match = re.search(r"(?:^|\|)MPP\s*=\s*([^|]+)", description)
     if match is None:
         raise ValueError(f"Could not find MPP in SVS metadata for {path}")
@@ -156,14 +209,15 @@ def read_svs_pixel_size_um(path: Path) -> float:
 
 
 def convert_svs(path: Path, output_path: Path, channel: str) -> None:
-    with tiff.TiffFile(path) as tif:
-        page = tif.pages[0]
-        print(
-            f"Full-resolution page: shape={page.shape}, dtype={page.dtype}, "
-            f"compression={page.compression.name}"
-        )
-        image = page.asarray()
-
+    def _read():
+        with tiff.TiffFile(path) as tif:
+            page = tif.pages[0]
+            print(
+                f"Full-resolution page: shape={page.shape}, dtype={page.dtype}, "
+                f"compression={page.compression.name}"
+            )
+            return page.asarray()
+    image = _retry_io("convert_svs_read", path, _read)
     single_channel = pick_channel(image, channel)
     pixel_size_um = read_svs_pixel_size_um(path)
     write_ome_tiff(output_path, single_channel, pixel_size_um)
@@ -176,11 +230,11 @@ def convert_file(
     overwrite: bool,
 ) -> Path:
     output_path = output_dir / f"{path.stem}_{channel}.ome.tiff"
-    if output_path.exists() and not overwrite:
+    if _exists(output_path) and not overwrite:
         print(f"Skipping existing file: {output_path}")
         return output_path
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _retry_io("mkdir", output_dir, lambda: output_dir.mkdir(parents=True, exist_ok=True))
 
     print(f"Converting {path}")
     convert_svs(path, output_path, channel)

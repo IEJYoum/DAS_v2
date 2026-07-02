@@ -1,5 +1,6 @@
 """Combine registered single-channel OME-TIFFs into one multichannel OME-TIFF."""
 
+import stat
 import time
 from pathlib import Path
 
@@ -17,6 +18,52 @@ SAVE_RETRY_COUNT = 10
 SAVE_RETRY_WAIT_SECONDS = 300
 READ_RETRY_COUNT = 10
 READ_RETRY_WAIT_SECONDS = 300
+_TRANSIENT_ERRNOS = {5, 22, 116}  # EIO, EINVAL (some NFS), ESTALE
+IO_RETRY_COUNT = 10
+IO_RETRY_WAIT_SECONDS = 30
+
+
+def _retry_io(op, path, fn):
+    for attempt in range(IO_RETRY_COUNT + 1):
+        try:
+            return fn()
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= IO_RETRY_COUNT:
+                raise
+            print(
+                "IO error:", op, str(path),
+                "errno=" + str(exc.errno) + ",",
+                "attempt " + str(attempt + 1) + "/" + str(IO_RETRY_COUNT) + ",",
+                "retrying in", IO_RETRY_WAIT_SECONDS, "s",
+            )
+            time.sleep(IO_RETRY_WAIT_SECONDS)
+    raise RuntimeError("unreachable IO retry state")
+
+
+def _stat(path):
+    return _retry_io("stat", path, lambda: path.stat())
+
+
+def _exists(path):
+    try:
+        _stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _is_file(path):
+    try:
+        return stat.S_ISREG(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _is_dir(path):
+    try:
+        return stat.S_ISDIR(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def ome_metadata(axes, pixel_size_um, names):
@@ -37,18 +84,16 @@ def ome_resolution(pixel_size_um, level=0):
 
 def latest_registered_dir():
     parent = REGISTERED_DIR.parent
-    folders = []
-    for path in parent.iterdir():
-        if path.is_dir() and path.name.startswith(REGISTERED_DIR.name):
-            folders.append(path)
+    entries = _retry_io("iterdir", parent, lambda: list(parent.iterdir()))
+    folders = [path for path in entries if _is_dir(path) and path.name.startswith(REGISTERED_DIR.name)]
     if len(folders) == 0:
         return REGISTERED_DIR
-    return sorted(folders, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+    return sorted(folders, key=lambda p: _retry_io("stat_mtime", p, lambda q=p: q.stat().st_mtime), reverse=True)[0]
 
 
 def is_registered_ome(path, output_path):
     name = path.name.lower()
-    if not path.is_file():
+    if not _is_file(path):
         return False
     if path.name == output_path.name:
         return False
@@ -56,7 +101,8 @@ def is_registered_ome(path, output_path):
 
 
 def list_registered_ome_tiffs(folder, output_path):
-    paths = sorted(path for path in folder.iterdir() if is_registered_ome(path, output_path))
+    entries = _retry_io("iterdir", folder, lambda: list(folder.iterdir()))
+    paths = sorted(path for path in entries if is_registered_ome(path, output_path))
     fixed = []
     moving = []
     for path in paths:
@@ -92,16 +138,17 @@ def read_single_channel(path):
     for attempt in range(READ_RETRY_COUNT + 1):
         try:
             return read_single_channel_once(path)
-        except OSError:
-            if attempt >= READ_RETRY_COUNT:
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= READ_RETRY_COUNT:
                 raise
             print(
-                "read failed, likely network drive issue; retrying in",
+                "read failed errno=" + str(exc.errno) + ", likely network drive issue; retrying in",
                 READ_RETRY_WAIT_SECONDS,
                 "seconds. attempt",
                 attempt + 1,
                 "of",
                 READ_RETRY_COUNT,
+                str(path),
             )
             time.sleep(READ_RETRY_WAIT_SECONDS)
 
@@ -190,9 +237,9 @@ def write_multichannel_ome_once(path, stack, names, pixel_size_um):
 
 
 def delete_partial_output(path):
-    if path.exists():
+    if _exists(path):
         print("deleting old/incomplete output:", path)
-        path.unlink()
+        _retry_io("unlink", path, lambda: path.unlink())
 
 
 def write_multichannel_ome(path, stack, names, pixel_size_um):
@@ -201,16 +248,17 @@ def write_multichannel_ome(path, stack, names, pixel_size_um):
             delete_partial_output(path)
             write_multichannel_ome_once(path, stack, names, pixel_size_um)
             return
-        except OSError:
-            if attempt >= SAVE_RETRY_COUNT:
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= SAVE_RETRY_COUNT:
                 raise
             print(
-                "save failed, likely network drive issue; retrying in",
+                "save failed errno=" + str(exc.errno) + ", likely network drive issue; retrying in",
                 SAVE_RETRY_WAIT_SECONDS,
                 "seconds. attempt",
                 attempt + 1,
                 "of",
                 SAVE_RETRY_COUNT,
+                str(path),
             )
             time.sleep(SAVE_RETRY_WAIT_SECONDS)
 

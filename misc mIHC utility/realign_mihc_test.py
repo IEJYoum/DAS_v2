@@ -3,6 +3,7 @@
 import gc
 import math
 import re
+import stat
 import time
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +94,9 @@ MASK_PNG_SUBDIR = "mask_pngs"
 K_PNG_SUBDIR = "k_channel_pngs"
 MEMORY_RETRIES = 2
 MEMORY_RETRY_WAIT_SECONDS = 30
+IO_RETRY_COUNT = 10
+IO_RETRY_WAIT_SECONDS = 30
+_TRANSIENT_ERRNOS = {5, 22, 116}  # EIO, EINVAL (some NFS), ESTALE
 MAKE_OVERLAY_PNGS = True
 # Multichannel OME is useful QC but memory-heavy because it combines all channels.
 # Set False to preserve the per-channel full-resolution OME outputs and skip the stack.
@@ -120,26 +124,28 @@ def ome_resolution(pixel_size_um, level=0):
 
 def write_ome_tiff(path, image, pixel_size_um):
     levels = pyramid_levels(image)
-    with tiff.TiffWriter(path, bigtiff=True, ome=True) as writer:
-        writer.write(
-            image,
-            photometric="minisblack",
-            tile=OME_TILE,
-            metadata=ome_metadata("YX", pixel_size_um),
-            resolution=ome_resolution(pixel_size_um, 0),
-            resolutionunit="CENTIMETER",
-            subifds=len(levels),
-        )
-        for level_index, level in enumerate(levels, start=1):
+    def _write():
+        with tiff.TiffWriter(path, bigtiff=True, ome=True) as writer:
             writer.write(
-                level,
+                image,
                 photometric="minisblack",
                 tile=OME_TILE,
-                subfiletype=1,
-                resolution=ome_resolution(pixel_size_um, level_index),
+                metadata=ome_metadata("YX", pixel_size_um),
+                resolution=ome_resolution(pixel_size_um, 0),
                 resolutionunit="CENTIMETER",
-                metadata=None,
+                subifds=len(levels),
             )
+            for level_index, level in enumerate(levels, start=1):
+                writer.write(
+                    level,
+                    photometric="minisblack",
+                    tile=OME_TILE,
+                    subfiletype=1,
+                    resolution=ome_resolution(pixel_size_um, level_index),
+                    resolutionunit="CENTIMETER",
+                    metadata=None,
+                )
+    _retry_io("write_ome_tiff", path, _write)
 
 
 def pyramid_levels(image):
@@ -208,8 +214,10 @@ def choose_fixed_file(paths):
 
 
 def read_svs_pixel_size_um(path):
-    with tiff.TiffFile(path) as tif:
-        description = tif.pages[0].description or ""
+    def _read():
+        with tiff.TiffFile(path) as tif:
+            return tif.pages[0].description or ""
+    description = _retry_io("read_svs_pixel_size_um", path, _read)
     match = re.search(r"(?:^|\|)MPP\s*=\s*([^|]+)", description)
     if match is None:
         raise ValueError("could not find MPP in SVS metadata for " + str(path))
@@ -271,10 +279,12 @@ def output_fill_value(image):
 
 def read_svs_registration_image(path):
     print("reading SVS registration:", path.name)
-    with tiff.TiffFile(path) as tif:
-        page = tif.pages[0]
-        print("  page shape:", page.shape, "dtype:", page.dtype, "compression:", page.compression.name)
-        image = page.asarray()
+    def _read():
+        with tiff.TiffFile(path) as tif:
+            page = tif.pages[0]
+            print("  page shape:", page.shape, "dtype:", page.dtype, "compression:", page.compression.name)
+            return page.asarray()
+    image = _retry_io("read_svs_registration_image", path, _read)
 
     if REGISTRATION_CHANNEL == "k":
         registration_image = rgb_to_k_channel(image)
@@ -289,8 +299,10 @@ def read_svs_registration_image(path):
 
 def read_svs_output_image(path):
     print("reading SVS output:", path.name)
-    with tiff.TiffFile(path) as tif:
-        image = tif.pages[0].asarray()
+    def _read():
+        with tiff.TiffFile(path) as tif:
+            return tif.pages[0].asarray()
+    image = _retry_io("read_svs_output_image", path, _read)
     output_image = output_channel_from_rgb(image)
     del image
     print("  output shape:", output_image.shape, "dtype:", output_image.dtype)
@@ -314,6 +326,51 @@ def run_with_memory_retries(label, work):
             )
             time.sleep(MEMORY_RETRY_WAIT_SECONDS)
     raise RuntimeError("unreachable memory retry state")
+
+
+def _retry_io(op, path, fn):
+    """Retry fn() on transient network OSErrors (EIO/EINVAL/ESTALE).
+    Re-raises immediately on non-transient errors or after IO_RETRY_COUNT retries."""
+    for attempt in range(IO_RETRY_COUNT + 1):
+        try:
+            return fn()
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= IO_RETRY_COUNT:
+                raise
+            print(
+                "IO error:", op, str(path),
+                "errno=" + str(exc.errno) + ",",
+                "attempt " + str(attempt + 1) + "/" + str(IO_RETRY_COUNT) + ",",
+                "retrying in", IO_RETRY_WAIT_SECONDS, "s",
+            )
+            time.sleep(IO_RETRY_WAIT_SECONDS)
+    raise RuntimeError("unreachable IO retry state")
+
+
+def _stat(path):
+    return _retry_io("stat", path, lambda: path.stat())
+
+
+def _exists(path):
+    try:
+        _stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _is_file(path):
+    try:
+        return stat.S_ISREG(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _is_dir(path):
+    try:
+        return stat.S_ISDIR(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def save_output_record_ome(record, reference_shape, canvas_shape, offset_y, offset_x, pixel_size_um):
@@ -1315,27 +1372,29 @@ def output_path_for(output_dir, input_path, fixed_path):
 
 def next_output_dir(root):
     base = root / OUTPUT_SUBDIR
-    if not base.exists():
+    if not _exists(base):
         return base
     index = 1
     while True:
         candidate = root / (OUTPUT_SUBDIR + "_" + str(index).zfill(2))
-        if not candidate.exists():
+        if not _exists(candidate):
             return candidate
         index = index + 1
 
 
 def has_svs_files(input_dir):
-    return any(path.is_file() and path.suffix.lower() == ".svs" for path in input_dir.iterdir())
+    entries = _retry_io("iterdir", input_dir, lambda: list(input_dir.iterdir()))
+    return any(_is_file(path) and path.suffix.lower() == ".svs" for path in entries)
 
 
 def slide_input_dirs(input_dir):
     if has_svs_files(input_dir):
         return [input_dir]
 
+    entries = _retry_io("iterdir", input_dir, lambda: sorted(input_dir.iterdir()))
     slides = []
-    for path in sorted(input_dir.iterdir()):
-        if path.is_dir() and has_svs_files(path):
+    for path in entries:
+        if _is_dir(path) and has_svs_files(path):
             slides.append(path)
 
     if len(slides) == 0:
@@ -1344,12 +1403,12 @@ def slide_input_dirs(input_dir):
 
 
 def next_slide_output_dir(output_root, slide_name):
-    output_root.mkdir(parents=True, exist_ok=True)
+    _retry_io("mkdir", output_root, lambda: output_root.mkdir(parents=True, exist_ok=True))
     prefix = "Registered_" + slide_name
     index = 1
     while True:
         candidate = output_root / (prefix + "_" + str(index).zfill(2))
-        if not candidate.exists():
+        if not _exists(candidate):
             return candidate
         index = index + 1
 
@@ -1407,7 +1466,9 @@ def save_debug_txt(output_dir, rows):
             else:
                 values.append(value.ljust(widths[column]))
         lines.append(" ".join(values))
-    (output_dir / DEBUG_TXT_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _debug_path = output_dir / DEBUG_TXT_NAME
+    _retry_io("write_text", _debug_path,
+              lambda: _debug_path.write_text("\n".join(lines) + "\n", encoding="utf-8"))
 
 
 def save_canvas_txt(output_dir, canvas_shape, offset_y, offset_x, records):
@@ -1436,7 +1497,9 @@ def save_canvas_txt(output_dir, canvas_shape, offset_y, offset_x, records):
             + "\t"
             + str(record["image_scale"])
         )
-    (output_dir / CANVAS_TXT_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _canvas_path = output_dir / CANVAS_TXT_NAME
+    _retry_io("write_text", _canvas_path,
+              lambda: _canvas_path.write_text("\n".join(lines) + "\n", encoding="utf-8"))
 
 
 def add_timing(timings, output_dir, run_started, start_seconds, status, step, file_name, step_start):
@@ -1482,7 +1545,9 @@ def save_timing_txt(output_dir, timings, run_started, start_seconds, status):
             + "\t"
             + "{:.1f}".format(row["elapsed_seconds"])
         )
-    (output_dir / TIMING_TXT_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _timing_path = output_dir / TIMING_TXT_NAME
+    _retry_io("write_text", _timing_path,
+              lambda: _timing_path.write_text("\n".join(lines) + "\n", encoding="utf-8"))
 
 
 def bytes_to_gb(byte_count):
@@ -1490,18 +1555,20 @@ def bytes_to_gb(byte_count):
 
 
 def svs_header(path):
-    with tiff.TiffFile(path) as tif:
-        page = tif.pages[0]
-        return {
-            "shape": str(page.shape),
-            "dtype": str(page.dtype),
-            "compression": page.compression.name,
-            "is_tiled": str(page.is_tiled),
-        }
+    def _read():
+        with tiff.TiffFile(path) as tif:
+            page = tif.pages[0]
+            return {
+                "shape": str(page.shape),
+                "dtype": str(page.dtype),
+                "compression": page.compression.name,
+                "is_tiled": str(page.is_tiled),
+            }
+    return _retry_io("svs_header", path, _read)
 
 
 def save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, status, timings):
-    total_bytes = sum(path.stat().st_size for path in paths)
+    total_bytes = sum(_stat(path).st_size for path in paths)
     totals = {}
     for row in timings:
         step = row["step"]
@@ -1596,12 +1663,13 @@ def save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run
     lines.append("file\tbytes\tgb\tshape\tdtype\tcompression\tis_tiled")
     for path in paths:
         header = svs_header(path)
+        st_size = _stat(path).st_size
         lines.append(
             path.name
             + "\t"
-            + str(path.stat().st_size)
+            + str(st_size)
             + "\t"
-            + bytes_to_gb(path.stat().st_size)
+            + bytes_to_gb(st_size)
             + "\t"
             + header["shape"]
             + "\t"
@@ -1611,7 +1679,9 @@ def save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run
             + "\t"
             + header["is_tiled"]
         )
-    (output_dir / CONFIG_TXT_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _config_path = output_dir / CONFIG_TXT_NAME
+    _retry_io("write_text", _config_path,
+              lambda: _config_path.write_text("\n".join(lines) + "\n", encoding="utf-8"))
 
 
 def mask_png_path_for(output_dir, source_path):
@@ -1624,19 +1694,19 @@ def k_png_path_for(output_dir, source_path):
 
 def save_mask_png(output_dir, source_path, image):
     mask_dir = output_dir / MASK_PNG_SUBDIR
-    mask_dir.mkdir(parents=True, exist_ok=True)
+    _retry_io("mkdir", mask_dir, lambda: mask_dir.mkdir(parents=True, exist_ok=True))
     small = image[::MASK_PNG_DOWNSAMPLE, ::MASK_PNG_DOWNSAMPLE]
     signal = registration_signal(small)
     threshold = np.percentile(signal, FOREGROUND_PERCENTILE)
     mask = (signal > threshold).astype(np.uint8) * 255
     output_path = mask_png_path_for(output_dir, source_path)
     print("  writing mask png:", output_path)
-    Image.fromarray(mask).save(output_path)
+    _retry_io("Image.save", output_path, lambda: Image.fromarray(mask).save(output_path))
 
 
 def save_k_png(output_dir, source_path, k_image):
     k_dir = output_dir / K_PNG_SUBDIR
-    k_dir.mkdir(parents=True, exist_ok=True)
+    _retry_io("mkdir", k_dir, lambda: k_dir.mkdir(parents=True, exist_ok=True))
     small = k_image[::MASK_PNG_DOWNSAMPLE, ::MASK_PNG_DOWNSAMPLE].astype(np.float32)
     high = np.percentile(small, 99)
     if high <= 0:
@@ -1645,7 +1715,8 @@ def save_k_png(output_dir, source_path, k_image):
     small = small / high
     output_path = k_png_path_for(output_dir, source_path)
     print("  writing k png:", output_path)
-    Image.fromarray((small * 255).astype(np.uint8)).save(output_path)
+    _png = (small * 255).astype(np.uint8)
+    _retry_io("Image.save", output_path, lambda: Image.fromarray(_png).save(output_path))
 
 
 def run_one_slide(input_dir, output_dir):
@@ -1653,7 +1724,7 @@ def run_one_slide(input_dir, output_dir):
     output_dir = Path(output_dir)
     run_started = datetime.now().astimezone()
     start_seconds = time.time()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _retry_io("mkdir", output_dir, lambda: output_dir.mkdir(parents=True, exist_ok=True))
     timings = []
 
     step_start = time.time()

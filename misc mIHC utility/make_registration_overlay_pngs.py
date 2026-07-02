@@ -1,5 +1,7 @@
 """Make small PNG overlays to inspect registered images."""
 
+import stat
+import time
 from pathlib import Path
 
 import numpy as np
@@ -14,29 +16,73 @@ FIXED_FILE_CONTAINS = "Ki67"
 PNG_DOWNSAMPLE = 8
 OUTPUT_SUBDIR = "overlay_pngs"
 MULTICHANNEL_OME_NAME = "registered_multichannel.ome.tiff"
+IO_RETRY_COUNT = 10
+IO_RETRY_WAIT_SECONDS = 30
+_TRANSIENT_ERRNOS = {5, 22, 116}  # EIO, EINVAL (some NFS), ESTALE
+
+
+def _retry_io(op, path, fn):
+    for attempt in range(IO_RETRY_COUNT + 1):
+        try:
+            return fn()
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_ERRNOS or attempt >= IO_RETRY_COUNT:
+                raise
+            print(
+                "IO error:", op, str(path),
+                "errno=" + str(exc.errno) + ",",
+                "attempt " + str(attempt + 1) + "/" + str(IO_RETRY_COUNT) + ",",
+                "retrying in", IO_RETRY_WAIT_SECONDS, "s",
+            )
+            time.sleep(IO_RETRY_WAIT_SECONDS)
+    raise RuntimeError("unreachable IO retry state")
+
+
+def _stat(path):
+    return _retry_io("stat", path, lambda: path.stat())
+
+
+def _exists(path):
+    try:
+        _stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _is_file(path):
+    try:
+        return stat.S_ISREG(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _is_dir(path):
+    try:
+        return stat.S_ISDIR(_stat(path).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def latest_registered_dir():
     parent = REGISTERED_DIR.parent
-    folders = []
-    for path in parent.iterdir():
-        if path.is_dir() and path.name.startswith(REGISTERED_DIR.name):
-            folders.append(path)
+    entries = _retry_io("iterdir", parent, lambda: list(parent.iterdir()))
+    folders = [path for path in entries if _is_dir(path) and path.name.startswith(REGISTERED_DIR.name)]
     if len(folders) == 0:
         return REGISTERED_DIR
-    return sorted(folders, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+    return sorted(folders, key=lambda p: _retry_io("stat_mtime", p, lambda q=p: q.stat().st_mtime), reverse=True)[0]
 
 
 def is_tiff(path):
     name = path.name.lower()
     if name == MULTICHANNEL_OME_NAME:
         return False
-    return path.is_file() and (name.endswith(".tif") or name.endswith(".tiff"))
+    return _is_file(path) and (name.endswith(".tif") or name.endswith(".tiff"))
 
 
 def list_registered_tiffs(folder):
     paths = []
-    for path in folder.iterdir():
+    for path in _retry_io("iterdir", folder, lambda: list(folder.iterdir())):
         if is_tiff(path):
             paths.append(path)
 
@@ -64,11 +110,13 @@ def choose_fixed(paths):
 
 def read_downsample(path):
     print("  reading pyramid preview:", path.name)
-    with tiff.TiffFile(path) as tif:
-        series = tif.series[0]
-        level_index, level_downsample = choose_pyramid_level(series)
-        level = series.levels[level_index]
-        image = level.asarray()
+    def _read():
+        with tiff.TiffFile(path) as tif:
+            series = tif.series[0]
+            level_index, level_downsample = choose_pyramid_level(series)
+            level = series.levels[level_index]
+            return level.asarray(), level_index, level_downsample
+    image, level_index, level_downsample = _retry_io("read_downsample", path, _read)
 
     image = np.squeeze(image)
     if image.ndim != 2:
@@ -137,7 +185,7 @@ def main(registered_dir=None):
     registered_dir = Path(registered_dir)
 
     output_dir = registered_dir / OUTPUT_SUBDIR
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _retry_io("mkdir", output_dir, lambda: output_dir.mkdir(parents=True, exist_ok=True))
 
     paths = list_registered_tiffs(registered_dir)
     fixed_path = choose_fixed(paths)
@@ -157,7 +205,7 @@ def main(registered_dir=None):
         rgb = overlay_rgb(fixed, moving)
         output_path = output_dir / png_name_for(path)
         print("  writing:", output_path.name)
-        Image.fromarray(rgb).save(output_path)
+        _retry_io("Image.save", output_path, lambda op=output_path: Image.fromarray(rgb).save(op))
 
     print("done")
 
