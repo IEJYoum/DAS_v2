@@ -1551,7 +1551,23 @@ def save_timing_txt(output_dir, timings, run_started, start_seconds, status):
 
 
 def bytes_to_gb(byte_count):
+    if byte_count < 0:
+        return "N/A"
     return "{:.3f}".format(byte_count / (1024.0 ** 3))
+
+
+def _stat_size_or_neg1(path):
+    """Return file size in bytes, or -1 if stat fails. Used only for informational config logging.
+    Intentionally does NOT use _retry_io — file sizes are non-critical metadata and a slow
+    multi-minute retry loop here would block the entire pipeline for a CIFS blip."""
+    try:
+        return path.stat().st_size
+    except OSError as exc:
+        print(
+            "warning: stat failed for config log, path=" + str(path),
+            "errno=" + str(exc.errno) + ", recording -1 for file size",
+        )
+        return -1
 
 
 def svs_header(path):
@@ -1568,7 +1584,8 @@ def svs_header(path):
 
 
 def save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, status, timings):
-    total_bytes = sum(_stat(path).st_size for path in paths)
+    _path_sizes = [_stat_size_or_neg1(path) for path in paths]
+    total_bytes = sum(s for s in _path_sizes if s >= 0)
     totals = {}
     for row in timings:
         step = row["step"]
@@ -1661,9 +1678,8 @@ def save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run
     lines.append("")
     lines.append("input_files")
     lines.append("file\tbytes\tgb\tshape\tdtype\tcompression\tis_tiled")
-    for path in paths:
+    for path, st_size in zip(paths, _path_sizes):
         header = svs_header(path)
-        st_size = _stat(path).st_size
         lines.append(
             path.name
             + "\t"
