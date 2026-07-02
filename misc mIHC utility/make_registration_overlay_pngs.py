@@ -55,7 +55,7 @@ def choose_fixed(paths):
     matches = []
     for path in paths:
         name = path.name.lower()
-        if FIXED_FILE_CONTAINS.lower() in name and "_fixed" in name:
+        if "_fixed" in name:
             matches.append(path)
     if len(matches) != 1:
         raise ValueError("expected exactly one fixed image, found " + str(len(matches)))

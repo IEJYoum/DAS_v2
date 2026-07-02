@@ -61,7 +61,7 @@ def list_registered_ome_tiffs(folder, output_path):
     moving = []
     for path in paths:
         name = path.name.lower()
-        if FIXED_FILE_CONTAINS.lower() in name and "_fixed" in name:
+        if "_fixed" in name:
             fixed.append(path)
         else:
             moving.append(path)
