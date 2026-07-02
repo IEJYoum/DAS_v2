@@ -5,6 +5,7 @@ import math
 import re
 import stat
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,7 @@ INPUT_DIR = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\TestData\29-002")
 FIXED_FILE_CONTAINS = "CD3."
 OUTPUT_SUBDIR = "RegisteredImages"
 OUTPUT_DIR = None
+SKIP_COMPLETED_SLIDES = False
 CHANNEL = "gray"
 # Affects only final OME writes, not registration. "raw_channel" writes CHANNEL.
 # "red_stain_only" reads RGB SVS pixels, inverts white background to black,
@@ -32,12 +34,12 @@ FINAL_OUTPUT_MODE = "red_stain_only"
 REGISTRATION_CHANNEL = "k"
 K_CHANNEL_MODE = "common_inverted_rgb_min"
 INVERT_REGISTRATION_INTENSITY = False
-FOREGROUND_PERCENTILE = 70
+FOREGROUND_PERCENTILE = 60
 HIGH_CLIP_PERCENTILE = 80
-CONSIDER_GRADIENT = False
+CONSIDER_GRADIENT = True
 DOWNWEIGHT_GRADIENT = True
 CONSIDER_MSE = True
-CONSIDER_CORRELATION = False
+CONSIDER_CORRELATION = True
 
 FIT_SCALES = [100, 30, 10, 3, 1]
 INITIAL_SEARCH_RADIUS_FULL_PIXELS = 10000
@@ -50,7 +52,7 @@ SCALE_FIT_SCALES = [100, 50, 20]
 SCALE_SCORE_SCALE = 20
 LOSS_DEBUG_SCALE = 4
 CONSIDER_ROTATION = False
-CONSIDER_SHEAR = True
+CONSIDER_SHEAR = False
 TRANSLATION_AFTER_AFFINE = True
 CONSIDER_SUBPIXEL_TRANSLATION = True
 AFFINE_FIT_SCALE = 1
@@ -86,6 +88,7 @@ DEBUG_TXT_NAME = "registration_debug_shifts.txt"
 CONFIG_TXT_NAME = "config.txt"
 TIMING_TXT_NAME = "runtime_debug.txt"
 CANVAS_TXT_NAME = "output_canvas.txt"
+WARNING_TXT_NAME = "registration_warning_log.txt"
 OME_TILE = (1024, 1024)
 PYRAMID_MIN_SIZE = 1024
 DEFAULT_PIXEL_SIZE_UM = 0.5022
@@ -373,6 +376,44 @@ def _is_dir(path):
         return False
 
 
+def append_warning_txt(output_dir, title, lines):
+    if output_dir is None:
+        return
+    output_dir = Path(output_dir)
+    _retry_io("mkdir", output_dir, lambda: output_dir.mkdir(parents=True, exist_ok=True))
+    warning_path = output_dir / WARNING_TXT_NAME
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    block = ["", "warning\t" + title, "time\t" + stamp] + lines
+
+    def _write():
+        old = ""
+        if _exists(warning_path):
+            old = warning_path.read_text(encoding="utf-8")
+        if old != "" and not old.endswith("\n"):
+            old = old + "\n"
+        warning_path.write_text(old + "\n".join(block).lstrip("\n") + "\n", encoding="utf-8")
+
+    _retry_io("write_warning_txt", warning_path, _write)
+
+
+def sample_percentile_lines(sample_signal):
+    flat = np.asarray(sample_signal).ravel()
+    values = np.percentile(flat, [0, 50, 70, 80, 90, 95, 99, 100])
+    return [
+        "sample_shape\t" + str(sample_signal.shape),
+        "sample_dtype\t" + str(sample_signal.dtype),
+        "sample_unique_count\t" + str(int(np.unique(flat).size)),
+        "sample_min\t" + str(float(values[0])),
+        "sample_median\t" + str(float(values[1])),
+        "sample_p70\t" + str(float(values[2])),
+        "sample_p80\t" + str(float(values[3])),
+        "sample_p90\t" + str(float(values[4])),
+        "sample_p95\t" + str(float(values[5])),
+        "sample_p99\t" + str(float(values[6])),
+        "sample_max\t" + str(float(values[7])),
+    ]
+
+
 def save_output_record_ome(record, reference_shape, canvas_shape, offset_y, offset_x, pixel_size_um):
     output_image = read_svs_output_image(record["path"])
     fill_value = output_fill_value(output_image)
@@ -448,7 +489,9 @@ def blend_gradient(score, step_index):
     return ((intensity_weight * score) + (gradient_weight * gradient)) / total_weight
 
 
-def make_stage(image, scale, label, step_index, do_print=True):
+def make_stage(image, scale, label, step_index, do_print=True, warning_dir=None, context="", report_scale=None):
+    if report_scale is None:
+        report_scale = scale
     stage_image = downsample_for_registration(image, scale)
     stride = score_stride(stage_image.shape)
     sample = stage_image[::stride, ::stride]
@@ -456,9 +499,41 @@ def make_stage(image, scale, label, step_index, do_print=True):
     floor = float(np.percentile(sample_signal, FOREGROUND_PERCENTILE))
     high = float(np.percentile(sample_signal, HIGH_CLIP_PERCENTILE))
     if high <= floor:
-        raise ValueError("foreground floor is not below high clip for " + label)
+        original_high = high
+        high = floor + 1.0
+        append_warning_txt(
+            warning_dir,
+            "foreground high fallback",
+            [
+                "context\t" + str(context),
+                "label\t" + str(label),
+                "scale\t" + str(report_scale),
+                "stage_shape\t" + str(stage_image.shape),
+                "stride\t" + str(stride),
+                "foreground_percentile\t" + str(FOREGROUND_PERCENTILE),
+                "high_clip_percentile\t" + str(HIGH_CLIP_PERCENTILE),
+                "floor\t" + str(floor),
+                "original_high\t" + str(original_high),
+                "fallback\tused high = floor + 1.0",
+                "fallback_high\t" + str(high),
+            ] + sample_percentile_lines(sample_signal),
+        )
     signal_count = int((sample_signal > floor).sum())
     if signal_count == 0:
+        append_warning_txt(
+            warning_dir,
+            "foreground mask empty",
+            [
+                "context\t" + str(context),
+                "label\t" + str(label),
+                "scale\t" + str(report_scale),
+                "stage_shape\t" + str(stage_image.shape),
+                "stride\t" + str(stride),
+                "floor\t" + str(floor),
+                "high\t" + str(high),
+                "fallback\tstage cannot be scored; no pixels are above the foreground floor",
+            ] + sample_percentile_lines(sample_signal),
+        )
         raise ValueError("foreground mask is empty for " + label)
 
     stage = {
@@ -624,18 +699,19 @@ def progress_line(tested, total, start_time):
     print("    tested " + str(tested) + "/" + str(total) + " shifts (" + "{:.1f}".format(pct) + "%, " + "{:.1f}".format(elapsed) + "s)")
 
 
-def make_scaled_moving_stage(moving_image, fixed_shape, scale, image_scale, label, step_index):
+def make_scaled_moving_stage(moving_image, fixed_shape, scale, image_scale, label, step_index, warning_dir=None, context=""):
     stage_image = downsample_for_registration(moving_image, scale)
     if image_scale != 1.0:
         stage_image = transform_image(stage_image, 0, 0, 0, 0, 0, 0, fixed_shape, image_scale=image_scale)
-        return make_stage(stage_image, 1, label, step_index)
-    return make_stage(stage_image, 1, label, step_index)
+        return make_stage(stage_image, 1, label, step_index, warning_dir=warning_dir, context=context, report_scale=scale)
+    return make_stage(stage_image, 1, label, step_index, warning_dir=warning_dir, context=context, report_scale=scale)
 
 
-def fit_translation_scaled(fixed_image, moving_image, image_scale):
+def fit_translation_scaled(fixed_image, moving_image, image_scale, warning_dir=None, context=""):
     best_full_dy = 0
     best_full_dx = 0
     previous_scale = None
+    used_scale = False
 
     print("  fixed full shape:", fixed_image.shape)
     print("  moving full shape:", moving_image.shape)
@@ -645,8 +721,32 @@ def fit_translation_scaled(fixed_image, moving_image, image_scale):
         scale_start = time.time()
         print("  scale", scale)
 
-        fixed = make_stage(fixed_image, scale, "fixed", step_index)
-        moving = make_scaled_moving_stage(moving_image, fixed["shape"], scale, image_scale, "moving", step_index)
+        try:
+            fixed = make_stage(fixed_image, scale, "fixed", step_index, warning_dir=warning_dir, context=context)
+            moving = make_scaled_moving_stage(
+                moving_image,
+                fixed["shape"],
+                scale,
+                image_scale,
+                "moving",
+                step_index,
+                warning_dir=warning_dir,
+                context=context,
+            )
+        except ValueError as exc:
+            print("    skipped: stage setup failed:", exc)
+            append_warning_txt(
+                warning_dir,
+                "translation scale skipped",
+                [
+                    "context\t" + str(context),
+                    "scale\t" + str(scale),
+                    "exception_type\t" + type(exc).__name__,
+                    "exception\t" + str(exc),
+                    "fallback\tskipped this pyramid scale",
+                ],
+            )
+            continue
 
         if min(fixed["shape"]) < 8 or min(moving["shape"]) < 8:
             print("    skipped: stage too small")
@@ -695,7 +795,19 @@ def fit_translation_scaled(fixed_image, moving_image, image_scale):
         best_full_dy = int(best_dy * scale)
         best_full_dx = int(best_dx * scale)
         previous_scale = scale
+        used_scale = True
         print("    best scale-px:", (best_dy, best_dx), "full-px:", (best_full_dy, best_full_dx), "score:", best_score)
+
+    if not used_scale:
+        append_warning_txt(
+            warning_dir,
+            "translation failed",
+            [
+                "context\t" + str(context),
+                "fallback\tno usable pyramid scales; raising error for slide-level guard",
+            ],
+        )
+        raise ValueError("no usable translation scales for " + str(context))
 
     return best_full_dy, best_full_dx
 
@@ -1413,6 +1525,64 @@ def next_slide_output_dir(output_root, slide_name):
         index = index + 1
 
 
+def slide_key(name):
+    text = str(name).strip().lower()
+    for separator in ["-", "_"]:
+        if separator in text:
+            left, right = text.split(separator, 1)
+            if left.isdigit():
+                return str(int(left)) + separator + right
+    return text
+
+
+def registered_folder_matches_slide(folder_name, slide_name):
+    prefix = "Registered_"
+    if not folder_name.startswith(prefix):
+        return False
+
+    body = folder_name[len(prefix):]
+    keys = {slide_key(body)}
+    match = re.match(r"(.+)_\d+$", body)
+    if match is not None:
+        keys.add(slide_key(match.group(1)))
+    return slide_key(slide_name) in keys
+
+
+def completed_output_has_registered_rgb(output_dir):
+    timing_path = output_dir / TIMING_TXT_NAME
+    if not _exists(timing_path):
+        return False
+    text = _retry_io("read_text", timing_path, lambda: timing_path.read_text(encoding="utf-8"))
+    return "registered_rgb_ome" in text
+
+
+def completed_output_for_slide(slide_dir, output_root):
+    if output_root is None:
+        parent = Path(slide_dir)
+        if not _exists(parent):
+            return None
+        entries = _retry_io("iterdir", parent, lambda: list(parent.iterdir()))
+        candidates = [
+            path for path in entries
+            if _is_dir(path) and (path.name == OUTPUT_SUBDIR or path.name.startswith(OUTPUT_SUBDIR + "_"))
+        ]
+    else:
+        parent = Path(output_root)
+        if not _exists(parent):
+            return None
+        entries = _retry_io("iterdir", parent, lambda: list(parent.iterdir()))
+        candidates = [
+            path for path in entries
+            if _is_dir(path) and registered_folder_matches_slide(path.name, Path(slide_dir).name)
+        ]
+
+    candidates = sorted(candidates, key=lambda path: _stat(path).st_mtime, reverse=True)
+    for candidate in candidates:
+        if completed_output_has_registered_rgb(candidate):
+            return candidate
+    return None
+
+
 def output_dir_for_slide(slide_dir, output_root):
     if output_root is None:
         return next_output_dir(slide_dir)
@@ -1833,7 +2003,13 @@ def run_one_slide(input_dir, output_dir):
         add_timing(timings, output_dir, run_started, start_seconds, "running", "scale", moving_path.name, step_start)
 
         step_start = time.time()
-        full_dy, full_dx = fit_translation_scaled(fixed_registration_image, moving_registration_image, image_scale)
+        full_dy, full_dx = fit_translation_scaled(
+            fixed_registration_image,
+            moving_registration_image,
+            image_scale,
+            warning_dir=output_dir,
+            context=moving_path.name,
+        )
         add_timing(timings, output_dir, run_started, start_seconds, "running", "translation", moving_path.name, step_start)
         print("  final shift full-px:", (full_dy, full_dx))
         translation_dy = full_dy
@@ -2060,10 +2236,38 @@ def main(input_dir=None, output_dir=None):
     slides = slide_input_dirs(input_root)
     print("slide folders:", len(slides))
     for slide_dir in slides:
-        slide_output_dir = output_dir_for_slide(slide_dir, output_root)
-        print("slide:", slide_dir.name)
-        print("slide output:", slide_output_dir)
-        run_one_slide(slide_dir, slide_output_dir)
+        slide_output_dir = None
+        try:
+            if SKIP_COMPLETED_SLIDES:
+                completed_dir = completed_output_for_slide(slide_dir, output_root)
+                if completed_dir is not None:
+                    print("slide:", slide_dir.name)
+                    print("  skipping completed slide:", completed_dir)
+                    continue
+            slide_output_dir = output_dir_for_slide(slide_dir, output_root)
+            print("slide:", slide_dir.name)
+            print("slide output:", slide_output_dir)
+            run_one_slide(slide_dir, slide_output_dir)
+        except Exception as exc:
+            if slide_output_dir is None:
+                if output_root is None:
+                    slide_output_dir = Path(slide_dir) / (OUTPUT_SUBDIR + "_FAILED")
+                else:
+                    slide_output_dir = Path(output_root) / ("Registered_" + slide_dir.name + "_FAILED")
+            print("slide failed:", slide_dir.name, type(exc).__name__, str(exc))
+            print("  continuing batch; see", slide_output_dir / WARNING_TXT_NAME)
+            append_warning_txt(
+                slide_output_dir,
+                "slide failed",
+                [
+                    "slide\t" + slide_dir.name,
+                    "input_dir\t" + str(slide_dir),
+                    "output_dir\t" + str(slide_output_dir),
+                    "exception_type\t" + type(exc).__name__,
+                    "exception\t" + str(exc),
+                    "fallback\tbatch guard caught exception and continued to next slide",
+                ] + ["traceback\t" + line for line in traceback.format_exc().splitlines()],
+            )
 
 
 if __name__ == "__main__":

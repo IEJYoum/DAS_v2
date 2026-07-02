@@ -1,25 +1,52 @@
 from pathlib import Path
-import re
 
 import numpy as np
 import pandas as pd
 import tifffile as tiff
 
-ROOT = Path(r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides")
+ROOT = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\D8_Panel_StudySlides\Slides")
 CHECK = ROOT / "Registration_Check"
-NONREG_XLSX = CHECK / "d10_nonreg_triage.xlsx"
-LOSS_XLSX = CHECK / "d10_registration_check_losses.xlsx"
-PAT = re.compile(r"^(?P<prefix>nonreg|regck|NUCLEIck)_KB_AG_KPC_(?P<slide>[A-Z0-9]+)_D10_(?P<cycle>C\d\dR\d)_(?P<protein>.+)_ROI(?P<roi>\d+)$")
+NONREG_XLSX = CHECK / "nonreg_triage.xlsx"
+LOSS_XLSX = CHECK / "registration_check_losses.xlsx"
 FOREGROUND_PERCENTILE = 70
 HIGH_CLIP_PERCENTILE = 80
+IMAGE_EXTS = {".tif", ".tiff"}
+COLUMNS = ["prefix", "project", "slide", "panel", "cycle", "protein", "roi", "name", "path"]
+LOSS_COLUMNS = COLUMNS + [
+    "loss_vs_he", "overlap_vs_he", "loss_vs_h2b", "overlap_vs_h2b",
+    "loss_vs_hem", "overlap_vs_hem", "best_anchor", "best_loss",
+    "worst_loss", "loss_spread", "caught_nonreg_match",
+]
 
 
 def parse(path):
-    row = PAT.match(path.stem).groupdict()
-    row["roi"] = int(row["roi"])
-    row["name"] = path.name
-    row["path"] = str(path)
-    return row
+    parts = path.stem.split("_")
+    return {
+        "prefix": parts[0] if len(parts) >= 1 else "",
+        "project": "_".join(parts[1:-5]) if len(parts) >= 6 else "",
+        "slide": parts[-5] if len(parts) >= 5 else "",
+        "panel": parts[-4] if len(parts) >= 4 else "",
+        "cycle": parts[-3] if len(parts) >= 3 else "",
+        "protein": parts[-2] if len(parts) >= 2 else "",
+        "roi": int(parts[-1][3:]) if parts and parts[-1].startswith("ROI") and parts[-1][3:].isdigit() else -1,
+        "name": path.name,
+        "path": str(path),
+    }
+
+
+def parse_many(paths):
+    return pd.DataFrame([parse(p) for p in paths], columns=COLUMNS)
+
+
+def anchor_label(row):
+    protein = row["protein"].upper()
+    if protein == "HE":
+        return "he"
+    if protein == "HEM" or row["prefix"] == "NUCLEIck":
+        return "hem"
+    if "H2B" in protein:
+        return "h2b"
+    return ""
 
 
 def rgb_to_k_channel(image):
@@ -55,26 +82,35 @@ def loss(path_a, path_b, cache):
 
 
 def main():
-    nonreg = pd.DataFrame(parse(p) for p in ROOT.rglob("nonreg_*.tif")).sort_values(["slide", "roi", "protein", "cycle"]).reset_index(drop=True)
+    nonreg_paths = [
+        p for p in ROOT.rglob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS and "nonreg" in p.stem.lower()
+    ]
+    nonreg = parse_many(nonreg_paths).sort_values(["slide", "roi", "protein", "cycle"]).reset_index(drop=True)
     nonreg.to_excel(NONREG_XLSX, index=False)
     caught = {(r.slide, int(r.roi), r.cycle, r.protein) for r in nonreg.itertuples()}
-    reg = [parse(p) for p in CHECK.glob("*.tif")]
+    reg_paths = [p for p in CHECK.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+    reg = [parse(p) for p in reg_paths]
     groups = {}
     cache = {}
     for row in reg:
-        groups.setdefault((row["slide"], row["roi"]), {})[row["protein"]] = row["path"]
+        group = groups.setdefault((row["slide"], row["roi"]), {"paths": {}, "anchors": {}})
+        group["paths"][row["protein"]] = row["path"]
+        label = anchor_label(row)
+        if label and label not in group["anchors"]:
+            group["anchors"][label] = row["path"]
     rows = []
     for row in reg:
         group = groups[(row["slide"], row["roi"])]
         losses = {}
-        for anchor in ("HE", "H2B", "HEM"):
-            key = anchor.lower()
-            if anchor not in group:
+        for key in ("he", "h2b", "hem"):
+            anchor_path = group["anchors"].get(key)
+            if anchor_path is None:
                 losses[f"loss_vs_{key}"], losses[f"overlap_vs_{key}"] = np.nan, np.nan
-            elif row["protein"] == anchor:
+            elif row["path"] == anchor_path:
                 losses[f"loss_vs_{key}"], losses[f"overlap_vs_{key}"] = 0.0, 1.0
             else:
-                losses[f"loss_vs_{key}"], losses[f"overlap_vs_{key}"] = loss(row["path"], group[anchor], cache)
+                losses[f"loss_vs_{key}"], losses[f"overlap_vs_{key}"] = loss(row["path"], anchor_path, cache)
         finite = {k[8:].upper(): v for k, v in losses.items() if k.startswith("loss_vs_") and np.isfinite(v)}
         row.update(losses)
         row["best_anchor"] = min(finite, key=finite.get) if finite else ""
@@ -83,7 +119,8 @@ def main():
         row["loss_spread"] = row["worst_loss"] - row["best_loss"] if finite else np.nan
         row["caught_nonreg_match"] = (row["slide"], row["roi"], row["cycle"], row["protein"]) in caught
         rows.append(row)
-    pd.DataFrame(rows).sort_values(["slide", "roi", "protein", "cycle"]).to_excel(LOSS_XLSX, index=False)
+    out = pd.DataFrame(rows, columns=LOSS_COLUMNS) if rows else pd.DataFrame(columns=LOSS_COLUMNS)
+    out.sort_values(["slide", "roi", "protein", "cycle"]).to_excel(LOSS_XLSX, index=False)
     print(NONREG_XLSX)
     print(LOSS_XLSX)
 
