@@ -21,10 +21,10 @@ from svs_to_single_channel_tiffs import list_svs_files, pick_channel
 
 
 INPUT_DIR = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\TestData\29-002")
-FIXED_FILE_CONTAINS = "CD3."
+FIXED_FILE_CONTAINS = "CD3."#'NucA'#
 OUTPUT_SUBDIR = "RegisteredImages"
 OUTPUT_DIR = None
-SKIP_COMPLETED_SLIDES = False
+SKIP_COMPLETED_SLIDES = True
 CHANNEL = "gray"
 # Affects only final OME writes, not registration. "raw_channel" writes CHANNEL.
 # "red_stain_only" reads RGB SVS pixels, inverts white background to black,
@@ -632,7 +632,7 @@ def mse_loss(fixed_values, moving_values):
     return float(np.mean(diff * diff))
 
 
-def score_shift(fixed, moving, dy, dx):
+def score_shift(fixed, moving, dy, dx, warning_dir=None, context="", scale=None):
     slices = get_overlap_slices(fixed["shape"], moving["shape"], dy, dx)
     fy0, fy1, fx0, fx1, my0, my1, mx0, mx1 = slices
     if fy1 <= fy0 or fx1 <= fx0:
@@ -661,12 +661,54 @@ def score_shift(fixed, moving, dy, dx):
     fixed_values = fixed_score[overlap]
     moving_values = moving_score[overlap]
     losses = []
+    corr_fallback = False
+    fixed_var = None
+    moving_var = None
     if CONSIDER_CORRELATION:
-        losses.append(correlation_loss(fixed_values, moving_values))
+        try:
+            losses.append(correlation_loss(fixed_values, moving_values))
+        except ValueError:
+            fixed_centered = fixed_values - np.mean(fixed_values)
+            moving_centered = moving_values - np.mean(moving_values)
+            fixed_var = float(np.sum(fixed_centered * fixed_centered))
+            moving_var = float(np.sum(moving_centered * moving_centered))
+            if CONSIDER_MSE:
+                corr_fallback = True
+            else:
+                append_warning_txt(
+                    warning_dir,
+                    "correlation denominator zero",
+                    [
+                        "context\t" + str(context),
+                        "scale\t" + str(scale),
+                        "dy\t" + str(dy),
+                        "dx\t" + str(dx),
+                        "overlap_n\t" + str(overlap_n),
+                        "fixed_var\t" + str(fixed_var),
+                        "moving_var\t" + str(moving_var),
+                        "fallback\tcandidate skipped",
+                    ],
+                )
+                return np.inf, overlap_n
     if CONSIDER_MSE:
         losses.append(mse_loss(fixed_values, moving_values))
     if len(losses) == 0:
         raise ValueError("no scoring loss enabled")
+    if corr_fallback:
+        append_warning_txt(
+            warning_dir,
+            "correlation denominator zero",
+            [
+                "context\t" + str(context),
+                "scale\t" + str(scale),
+                "dy\t" + str(dy),
+                "dx\t" + str(dx),
+                "overlap_n\t" + str(overlap_n),
+                "fixed_var\t" + str(fixed_var),
+                "moving_var\t" + str(moving_var),
+                "fallback\tMSE-only",
+            ],
+        )
     overlap_frac = overlap_n / float(max(1, min(fixed["signal_count"], moving["signal_count"])))
     score = float(np.mean(losses) + OVERLAP_WEIGHT * (1.0 - overlap_frac))
     return score, overlap_n
@@ -783,7 +825,15 @@ def fit_translation_scaled(fixed_image, moving_image, image_scale, warning_dir=N
         for dy in dy_values:
             for dx in dx_values:
                 tested = tested + 1
-                score, overlap = score_shift(fixed, moving, dy, dx)
+                score, overlap = score_shift(
+                    fixed,
+                    moving,
+                    dy,
+                    dx,
+                    warning_dir=warning_dir,
+                    context=context,
+                    scale=scale,
+                )
                 if best_score is None or score < best_score or (score == best_score and overlap > best_overlap):
                     best_score = score
                     best_overlap = overlap
