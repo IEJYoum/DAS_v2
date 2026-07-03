@@ -489,13 +489,34 @@ def blend_gradient(score, step_index):
     return ((intensity_weight * score) + (gradient_weight * gradient)) / total_weight
 
 
-def make_stage(image, scale, label, step_index, do_print=True, warning_dir=None, context="", report_scale=None):
+def stage_sample_signal(image, sample_scale, stride):
+    sample_step = max(1, int(sample_scale)) * max(1, int(stride))
+    sample = image[::sample_step, ::sample_step]
+    return registration_signal(sample)
+
+
+def make_stage(
+    image,
+    scale,
+    label,
+    step_index,
+    do_print=True,
+    warning_dir=None,
+    context="",
+    report_scale=None,
+    sample_image=None,
+    sample_scale=None,
+):
     if report_scale is None:
         report_scale = scale
     stage_image = downsample_for_registration(image, scale)
     stride = score_stride(stage_image.shape)
-    sample = stage_image[::stride, ::stride]
-    sample_signal = registration_signal(sample)
+    if sample_image is None:
+        sample_signal = registration_signal(stage_image[::stride, ::stride])
+    else:
+        if sample_scale is None:
+            sample_scale = scale
+        sample_signal = stage_sample_signal(sample_image, sample_scale, stride)
     floor = float(np.percentile(sample_signal, FOREGROUND_PERCENTILE))
     high = float(np.percentile(sample_signal, HIGH_CLIP_PERCENTILE))
     if high <= floor:
@@ -617,12 +638,21 @@ def stable_score_slices(fy0, fy1, fx0, fx1, dy, dx, stride):
     return fixed_y0, fixed_y1, fixed_x0, fixed_x1, moving_y0, moving_y1, moving_x0, moving_x1, n_y, n_x
 
 
+class _ZeroCorrDenom(ValueError):
+    def __init__(self, fixed_var, moving_var):
+        super().__init__("correlation denominator is zero")
+        self.fixed_var = float(fixed_var)
+        self.moving_var = float(moving_var)
+
+
 def correlation_loss(fixed_values, moving_values):
     fixed_centered = fixed_values - np.mean(fixed_values)
     moving_centered = moving_values - np.mean(moving_values)
-    denom = np.sqrt(np.sum(fixed_centered * fixed_centered) * np.sum(moving_centered * moving_centered))
+    fixed_var = np.sum(fixed_centered * fixed_centered)
+    moving_var = np.sum(moving_centered * moving_centered)
+    denom = np.sqrt(fixed_var * moving_var)
     if denom == 0:
-        raise ValueError("correlation denominator is zero")
+        raise _ZeroCorrDenom(fixed_var, moving_var)
     corr = float(np.sum(fixed_centered * moving_centered) / denom)
     return 1.0 - corr
 
@@ -667,11 +697,9 @@ def score_shift(fixed, moving, dy, dx, warning_dir=None, context="", scale=None)
     if CONSIDER_CORRELATION:
         try:
             losses.append(correlation_loss(fixed_values, moving_values))
-        except ValueError:
-            fixed_centered = fixed_values - np.mean(fixed_values)
-            moving_centered = moving_values - np.mean(moving_values)
-            fixed_var = float(np.sum(fixed_centered * fixed_centered))
-            moving_var = float(np.sum(moving_centered * moving_centered))
+        except _ZeroCorrDenom as exc:
+            fixed_var = exc.fixed_var
+            moving_var = exc.moving_var
             if CONSIDER_MSE:
                 corr_fallback = True
             else:
@@ -745,8 +773,17 @@ def make_scaled_moving_stage(moving_image, fixed_shape, scale, image_scale, labe
     stage_image = downsample_for_registration(moving_image, scale)
     if image_scale != 1.0:
         stage_image = transform_image(stage_image, 0, 0, 0, 0, 0, 0, fixed_shape, image_scale=image_scale)
-        return make_stage(stage_image, 1, label, step_index, warning_dir=warning_dir, context=context, report_scale=scale)
-    return make_stage(stage_image, 1, label, step_index, warning_dir=warning_dir, context=context, report_scale=scale)
+    return make_stage(
+        stage_image,
+        1,
+        label,
+        step_index,
+        warning_dir=warning_dir,
+        context=context,
+        report_scale=scale,
+        sample_image=moving_image,
+        sample_scale=scale,
+    )
 
 
 def fit_translation_scaled(fixed_image, moving_image, image_scale, warning_dir=None, context=""):
@@ -918,10 +955,52 @@ def bilinear_sample(image, y, x):
     return (top * (1.0 - wy)) + (bottom * wy)
 
 
-def score_transform_sparse(fixed_image, moving_image, dy, dx, rotation_deg, shear_x_deg, shear_y_deg, image_scale):
+def score_transform_sparse(
+    fixed_image,
+    moving_image,
+    dy,
+    dx,
+    rotation_deg,
+    shear_x_deg,
+    shear_y_deg,
+    image_scale,
+    warning_dir=None,
+    context="",
+    scale=None,
+    fixed_sample_image=None,
+    moving_sample_image=None,
+):
     step_index = len(FIT_SCALES) - 1
-    fixed_stage = make_stage(fixed_image, 1, "transform fixed", step_index, do_print=False)
-    moving_stage = make_stage(moving_image, 1, "transform moving", step_index, do_print=False)
+    if scale is None:
+        scale = 1
+    if fixed_sample_image is None:
+        fixed_sample_image = fixed_image
+    if moving_sample_image is None:
+        moving_sample_image = moving_image
+    fixed_stage = make_stage(
+        fixed_image,
+        1,
+        "transform fixed",
+        step_index,
+        do_print=False,
+        warning_dir=warning_dir,
+        context=context,
+        report_scale=scale,
+        sample_image=fixed_sample_image,
+        sample_scale=scale,
+    )
+    moving_stage = make_stage(
+        moving_image,
+        1,
+        "transform moving",
+        step_index,
+        do_print=False,
+        warning_dir=warning_dir,
+        context=context,
+        report_scale=scale,
+        sample_image=moving_sample_image,
+        sample_scale=scale,
+    )
     stride = max(int(fixed_stage["stride"]), int(moving_stage["stride"]))
 
     y_values = np.arange(0, fixed_image.shape[0], stride, dtype=np.float64)
@@ -973,24 +1052,86 @@ def score_transform_sparse(fixed_image, moving_image, dy, dx, rotation_deg, shea
     fixed_values = fixed_score[overlap]
     moving_values = moving_score[overlap]
     losses = []
+    corr_fallback = False
+    fixed_var = None
+    moving_var = None
     if CONSIDER_CORRELATION:
-        losses.append(correlation_loss(fixed_values, moving_values))
+        try:
+            losses.append(correlation_loss(fixed_values, moving_values))
+        except _ZeroCorrDenom as exc:
+            fixed_var = exc.fixed_var
+            moving_var = exc.moving_var
+            if CONSIDER_MSE:
+                corr_fallback = True
+            else:
+                append_warning_txt(
+                    warning_dir,
+                    "correlation denominator zero",
+                    [
+                        "context\t" + str(context),
+                        "scale\t" + str(scale),
+                        "dy\t" + str(dy),
+                        "dx\t" + str(dx),
+                        "overlap_n\t" + str(overlap_n),
+                        "fixed_var\t" + str(fixed_var),
+                        "moving_var\t" + str(moving_var),
+                        "fallback\tcandidate skipped",
+                    ],
+                )
+                return np.inf, overlap_n
     if CONSIDER_MSE:
         losses.append(mse_loss(fixed_values, moving_values))
     if len(losses) == 0:
         raise ValueError("no scoring loss enabled")
+    if corr_fallback:
+        append_warning_txt(
+            warning_dir,
+            "correlation denominator zero",
+            [
+                "context\t" + str(context),
+                "scale\t" + str(scale),
+                "dy\t" + str(dy),
+                "dx\t" + str(dx),
+                "overlap_n\t" + str(overlap_n),
+                "fixed_var\t" + str(fixed_var),
+                "moving_var\t" + str(moving_var),
+                "fallback\tMSE-only",
+            ],
+        )
     overlap_frac = overlap_n / float(max(1, min(fixed_stage["signal_count"], moving_stage["signal_count"])))
     score = float(np.mean(losses) + OVERLAP_WEIGHT * (1.0 - overlap_frac))
     return score, overlap_n
 
 
-def loss_for_transform_at_scale(fixed_image, moving_image, dy, dx, rotation_deg, shear_x_deg, shear_y_deg, image_scale, stage_scale):
+def loss_for_transform_at_scale(
+    fixed_image,
+    moving_image,
+    dy,
+    dx,
+    rotation_deg,
+    shear_x_deg,
+    shear_y_deg,
+    image_scale,
+    stage_scale,
+    warning_dir=None,
+    context="",
+):
     fixed_small = downsample_for_registration(fixed_image, stage_scale)
     moving_small = downsample_for_registration(moving_image, stage_scale)
     scaled_dy = scaled_shift(dy, stage_scale)
     scaled_dx = scaled_shift(dx, stage_scale)
     if image_scale == 1.0 and rotation_deg == 0 and shear_x_deg == 0 and shear_y_deg == 0:
-        return loss_for_shift(fixed_small, moving_small, scaled_dy, scaled_dx)
+        return loss_for_shift(
+            fixed_small,
+            moving_small,
+            scaled_dy,
+            scaled_dx,
+            warning_dir=warning_dir,
+            context=context,
+            scale=stage_scale,
+            fixed_sample_image=fixed_image,
+            moving_sample_image=moving_image,
+        )
     return score_transform_sparse(
         fixed_small,
         moving_small,
@@ -1000,6 +1141,11 @@ def loss_for_transform_at_scale(fixed_image, moving_image, dy, dx, rotation_deg,
         shear_x_deg,
         shear_y_deg,
         image_scale,
+        warning_dir=warning_dir,
+        context=context,
+        scale=stage_scale,
+        fixed_sample_image=fixed_image,
+        moving_sample_image=moving_image,
     )
 
 
@@ -1064,11 +1210,47 @@ def fit_scale(fixed_image, moving_image):
     return best_scale
 
 
-def loss_for_shift(fixed_image, moving_image, dy, dx):
+def loss_for_shift(
+    fixed_image,
+    moving_image,
+    dy,
+    dx,
+    warning_dir=None,
+    context="",
+    scale=1,
+    fixed_sample_image=None,
+    moving_sample_image=None,
+):
     final_step = len(FIT_SCALES) - 1
-    fixed = make_stage(fixed_image, 1, "loss fixed", final_step, do_print=False)
-    moving = make_stage(moving_image, 1, "loss moving", final_step, do_print=False)
-    loss, overlap = score_shift(fixed, moving, dy, dx)
+    if fixed_sample_image is None:
+        fixed_sample_image = fixed_image
+    if moving_sample_image is None:
+        moving_sample_image = moving_image
+    fixed = make_stage(
+        fixed_image,
+        1,
+        "loss fixed",
+        final_step,
+        do_print=False,
+        warning_dir=warning_dir,
+        context=context,
+        report_scale=scale,
+        sample_image=fixed_sample_image,
+        sample_scale=scale,
+    )
+    moving = make_stage(
+        moving_image,
+        1,
+        "loss moving",
+        final_step,
+        do_print=False,
+        warning_dir=warning_dir,
+        context=context,
+        report_scale=scale,
+        sample_image=moving_sample_image,
+        sample_scale=scale,
+    )
+    loss, overlap = score_shift(fixed, moving, dy, dx, warning_dir=warning_dir, context=context, scale=scale)
     return loss, overlap
 
 
@@ -1292,7 +1474,7 @@ def choose_output_canvas(records, reference_shape):
     return (canvas_h, canvas_w), offset_y, offset_x
 
 
-def fit_affine(fixed_image, moving_image, dy, dx, image_scale):
+def fit_affine(fixed_image, moving_image, dy, dx, image_scale, warning_dir=None, context=""):
     if not CONSIDER_ROTATION and not CONSIDER_SHEAR:
         return 0.0, 0.0, 0.0
 
@@ -1320,6 +1502,11 @@ def fit_affine(fixed_image, moving_image, dy, dx, image_scale):
         0.0,
         0.0,
         image_scale,
+        warning_dir=warning_dir,
+        context=context,
+        scale=scale,
+        fixed_sample_image=fixed_image,
+        moving_sample_image=moving_image,
     )
     best_score = baseline_score
     best_overlap = baseline_overlap
@@ -1345,6 +1532,11 @@ def fit_affine(fixed_image, moving_image, dy, dx, image_scale):
                     shear_x,
                     shear_y,
                     image_scale,
+                    warning_dir=warning_dir,
+                    context=context,
+                    scale=scale,
+                    fixed_sample_image=fixed_image,
+                    moving_sample_image=moving_image,
                 )
                 if score < best_score or (score == best_score and overlap > best_overlap):
                     best_score = score
@@ -1382,7 +1574,18 @@ def transform_has_affine_work(rotation_deg, shear_x_deg, shear_y_deg, image_scal
     return rotation_deg != 0.0 or shear_x_deg != 0.0 or shear_y_deg != 0.0 or image_scale != 1.0
 
 
-def fit_affine_translation_refinement(fixed_image, moving_image, dy, dx, rotation_deg, shear_x_deg, shear_y_deg, image_scale):
+def fit_affine_translation_refinement(
+    fixed_image,
+    moving_image,
+    dy,
+    dx,
+    rotation_deg,
+    shear_x_deg,
+    shear_y_deg,
+    image_scale,
+    warning_dir=None,
+    context="",
+):
     scale = 1
     moving_small = downsample_for_registration(moving_image, scale)
     fixed_small = downsample_for_registration(fixed_image, scale)
@@ -1398,6 +1601,11 @@ def fit_affine_translation_refinement(fixed_image, moving_image, dy, dx, rotatio
         shear_x_deg,
         shear_y_deg,
         image_scale,
+        warning_dir=warning_dir,
+        context=context,
+        scale=scale,
+        fixed_sample_image=fixed_image,
+        moving_sample_image=moving_image,
     )
     best_dy = base_dy
     best_dx = base_dx
@@ -1421,6 +1629,11 @@ def fit_affine_translation_refinement(fixed_image, moving_image, dy, dx, rotatio
                 shear_x_deg,
                 shear_y_deg,
                 image_scale,
+                warning_dir=warning_dir,
+                context=context,
+                scale=scale,
+                fixed_sample_image=fixed_image,
+                moving_sample_image=moving_image,
             )
             if score < best_score or (score == best_score and overlap > best_overlap):
                 best_score = score
@@ -1436,7 +1649,18 @@ def fit_affine_translation_refinement(fixed_image, moving_image, dy, dx, rotatio
     return final_dy, final_dx
 
 
-def fit_translation_after_affine(fixed_image, moving_image, dy, dx, rotation_deg, shear_x_deg, shear_y_deg, image_scale):
+def fit_translation_after_affine(
+    fixed_image,
+    moving_image,
+    dy,
+    dx,
+    rotation_deg,
+    shear_x_deg,
+    shear_y_deg,
+    image_scale,
+    warning_dir=None,
+    context="",
+):
     if not TRANSLATION_AFTER_AFFINE:
         return dy, dx
     if not transform_has_affine_work(rotation_deg, shear_x_deg, shear_y_deg, image_scale):
@@ -1451,10 +1675,23 @@ def fit_translation_after_affine(fixed_image, moving_image, dy, dx, rotation_deg
         shear_x_deg,
         shear_y_deg,
         image_scale,
+        warning_dir=warning_dir,
+        context=context,
     )
 
 
-def fit_subpixel_translation(fixed_image, moving_image, dy, dx, rotation_deg, shear_x_deg, shear_y_deg, image_scale):
+def fit_subpixel_translation(
+    fixed_image,
+    moving_image,
+    dy,
+    dx,
+    rotation_deg,
+    shear_x_deg,
+    shear_y_deg,
+    image_scale,
+    warning_dir=None,
+    context="",
+):
     if not CONSIDER_SUBPIXEL_TRANSLATION:
         return dy, dx, 0.0, 0.0
 
@@ -1472,6 +1709,11 @@ def fit_subpixel_translation(fixed_image, moving_image, dy, dx, rotation_deg, sh
         shear_x_deg,
         shear_y_deg,
         image_scale,
+        warning_dir=warning_dir,
+        context=context,
+        scale=scale,
+        fixed_sample_image=fixed_image,
+        moving_sample_image=moving_image,
     )
     baseline_score = best_score
     best_offset_dy = 0.0
@@ -1493,6 +1735,11 @@ def fit_subpixel_translation(fixed_image, moving_image, dy, dx, rotation_deg, sh
                 shear_x_deg,
                 shear_y_deg,
                 image_scale,
+                warning_dir=warning_dir,
+                context=context,
+                scale=scale,
+                fixed_sample_image=fixed_image,
+                moving_sample_image=moving_image,
             )
             if score < best_score or (score == best_score and overlap > best_overlap):
                 best_score = score
@@ -2072,6 +2319,8 @@ def run_one_slide(input_dir, output_dir):
             full_dy,
             full_dx,
             image_scale,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         affine_applied = transform_has_affine_work(rotation_deg, shear_x_deg, shear_y_deg, image_scale)
         add_timing(timings, output_dir, run_started, start_seconds, "running", "affine", moving_path.name, step_start)
@@ -2086,6 +2335,8 @@ def run_one_slide(input_dir, output_dir):
             shear_x_deg,
             shear_y_deg,
             image_scale,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         add_timing(timings, output_dir, run_started, start_seconds, "running", "post_affine_translation", moving_path.name, step_start)
         post_affine_dy = full_dy
@@ -2101,6 +2352,8 @@ def run_one_slide(input_dir, output_dir):
             shear_x_deg,
             shear_y_deg,
             image_scale,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         add_timing(timings, output_dir, run_started, start_seconds, "running", "subpixel_translation", moving_path.name, step_start)
 
@@ -2115,6 +2368,8 @@ def run_one_slide(input_dir, output_dir):
             0,
             1.0,
             LOSS_DEBUG_SCALE,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         translation_loss, translation_overlap = loss_for_transform_at_scale(
             fixed_registration_image,
@@ -2126,6 +2381,8 @@ def run_one_slide(input_dir, output_dir):
             0,
             image_scale,
             LOSS_DEBUG_SCALE,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         affine_loss, affine_overlap = loss_for_transform_at_scale(
             fixed_registration_image,
@@ -2137,6 +2394,8 @@ def run_one_slide(input_dir, output_dir):
             shear_y_deg,
             image_scale,
             LOSS_DEBUG_SCALE,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         post_affine_translation_loss, post_affine_translation_overlap = loss_for_transform_at_scale(
             fixed_registration_image,
@@ -2148,6 +2407,8 @@ def run_one_slide(input_dir, output_dir):
             shear_y_deg,
             image_scale,
             LOSS_DEBUG_SCALE,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         final_loss, final_overlap = loss_for_transform_at_scale(
             fixed_registration_image,
@@ -2159,6 +2420,8 @@ def run_one_slide(input_dir, output_dir):
             shear_y_deg,
             image_scale,
             LOSS_DEBUG_SCALE,
+            warning_dir=output_dir,
+            context=moving_path.name,
         )
         add_timing(timings, output_dir, run_started, start_seconds, "running", "loss_debug_calc", moving_path.name, step_start)
         print(
