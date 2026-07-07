@@ -1787,6 +1787,54 @@ def dropEqualDuplicateColumns(df):
         print("dropping duplicate columns with identical values:", sorted(list(set(dropped))))
     return(df.iloc[:,keep_inds].copy())
 
+
+def resolveNonUniqueIndex(DFs, names):
+    """Prompt for index column if any loaded table has duplicate index values."""
+    has_dupes = False
+    for i in range(len(DFs)):
+        n_dupes = int(DFs[i].index.duplicated().sum())
+        if n_dupes > 0:
+            print(names[i] + ": " + str(n_dupes) + " duplicate index values out of " + str(DFs[i].shape[0]) + " rows")
+            has_dupes = True
+    if not has_dupes:
+        return
+    # filter to integer-like columns that could serve as a cell ID
+    ref = DFs[0]
+    candidates = []
+    for col in ref.columns:
+        try:
+            vals = pd.to_numeric(ref[col], errors="raise")
+            if (vals != vals.astype(int)).any():
+                continue  # skip float columns
+            candidates.append(col)
+        except Exception:
+            if ref[col].dtype == object:
+                candidates.append(col)
+    if len(candidates) == 1:
+        col_name = candidates[0]
+        print("non-unique index detected; auto-selecting '" + col_name + "' as index column")
+        for i in range(len(DFs)):
+            if col_name in DFs[i].columns:
+                DFs[i].index = DFs[i][col_name].astype(str)
+        return
+    print("non-unique index detected. integer-like columns:")
+    for j in range(len(candidates)):
+        print("  " + str(j) + ": " + str(candidates[j]))
+    choice = logInput("pick index column number, or 'integer' for 1,2,3,...: ")
+    if choice.strip().lower() == "integer":
+        for i in range(len(DFs)):
+            DFs[i].index = np.arange(DFs[i].shape[0]) + 1
+        return
+    try:
+        col_name = candidates[int(choice)]
+        for i in range(len(DFs)):
+            if col_name in DFs[i].columns:
+                DFs[i].index = DFs[i][col_name].astype(str)
+        print("index set to: " + col_name)
+    except (ValueError, IndexError):
+        print("invalid selection; keeping current index")
+
+
 def sortDFs(DFs,names,goodStrs):
     """Merge imported source tables into one aligned dataframe based on filename key strings."""
 
@@ -1798,6 +1846,7 @@ def sortDFs(DFs,names,goodStrs):
         print("no grouping strings supplied; combining selected files side-by-side by shared index")
         DF = pd.concat(list(DFs),axis=1)
         return(dropEqualDuplicateColumns(DF))
+    resolveNonUniqueIndex(DFs, names)
     cheee = 0
     if logInput("add file names to index? (y)") == 'y':
         if logInput("reset index as simple integers? (y)") == "y":

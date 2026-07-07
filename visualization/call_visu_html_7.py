@@ -38,6 +38,10 @@ try:
     from . import subset_project_utils as spu
 except Exception:
     import subset_project_utils as spu
+try:
+    from .adhoc_core_name_bridge import build_core_name_to_parsed_map
+except Exception:
+    from adhoc_core_name_bridge import build_core_name_to_parsed_map
 
 _NEW_DAS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "support"))
 if _NEW_DAS_DIR not in sys.path:
@@ -85,7 +89,7 @@ PROJECT_LEVEL_FIGURE_FAMILY_TOKENS = {
 
 SCENE_RE = re.compile(r"scene([_-]?)([A-Za-z])0*(\d{1,3})", re.IGNORECASE)
 CORE_STR_RE = re.compile(r"^([A-Za-z])0*(\d{1,3})$")
-CORE_IN_NAME_RE = re.compile(r"([A-Ia-i])0*(\d{1,3})$")
+CORE_IN_NAME_RE = re.compile(r"(?<![A-Za-z])([A-Ia-i])0*(\d{1,3})$")
 TMA_RE = re.compile(r"(?i)(ptma\d+)")
 MISSING_LABELS = set(["", "nan", "none", "null", "na", "n/a"])
 PROJECT_CONFIG_FILE = "project_config.txt"
@@ -652,7 +656,7 @@ def expand_input_line(line):
 
     if has_glob_magic(line):
         try:
-            matches = glob.glob(line)
+            matches = glob.glob(line, recursive=True)
         except Exception:
             matches = []
         i = 0
@@ -1142,15 +1146,18 @@ def build_templates(filepaths):
 
 def make_template(fp):
     ap = os.path.abspath(os.path.normpath(fp))
-    info = extract_scene_template_info(ap)
+    kind = classify_path_kind(ap)
 
     out = {
         "sample_path": ap,
-        "kind": classify_path_kind(ap),
+        "kind": kind,
         "scene": None,
         "mode": "none"
     }
 
+    if kind == "segmentation_tiff":
+        return out
+    info = extract_scene_template_info(ap)
     if info is not None:
         out.update(info)
     return out
@@ -1159,6 +1166,9 @@ def make_template(fp):
 def classify_path_kind(fp):
     ext = os.path.splitext(fp)[1].lower()
     if ext in [".tif", ".tiff"]:
+        bn = os.path.basename(fp).lower()
+        if bn.startswith("label_") or bn.startswith("tiff_") or "cellsegmentationbasins" in bn:
+            return "segmentation_tiff"
         return "tiff"
     if ext == ".png":
         if png_has_alpha(fp):
@@ -1217,7 +1227,26 @@ def extract_scene_template_info(path):
             "file_suffix": bn[m.end():]
         }
 
+    # ROI convention: ROI number in filename (and possibly folder name)
     stem, ext = os.path.splitext(bn)
+    roi_m = re.search(r"(?i)_?(ROI0*(\d{1,3}))$", stem)
+    if roi_m is not None:
+        roi_num = int(roi_m.group(2))
+        roi_tag = roi_m.group(1)          # e.g. "ROI06"
+        roi_width = len(roi_m.group(2))   # e.g. 2 for "06"
+        prefix_end = roi_m.start()
+        # include the underscore before ROI in the prefix if present
+        file_prefix = stem[:prefix_end]
+        return {
+            "scene": ("A", roi_num),
+            "scene_num_width": max(roi_width, 2),
+            "mode": "file_roi",
+            "file_dir": parent,
+            "file_prefix": file_prefix,
+            "file_suffix": ext,
+            "roi_tag": roi_tag,
+        }
+
     m2 = CORE_IN_NAME_RE.search(stem)
     if m2 is not None:
         return {
@@ -1313,6 +1342,24 @@ def get_scene_keys_from_file_listing(t, cache):
     if key in cache:
         return cache[key]
 
+    out = set()
+
+    if mode == "file_roi":
+        # ROI convention: siblings are in sibling ROI folders with matching filenames
+        parent_name = os.path.basename(d)
+        if re.match(r"(?i)^ROI\d+$", parent_name):
+            grandparent = os.path.dirname(d)
+            try:
+                siblings = os.listdir(grandparent)
+            except Exception:
+                siblings = []
+            for sib in siblings:
+                sib_m = re.match(r"(?i)^ROI0*(\d{1,3})$", sib)
+                if sib_m is not None and os.path.isdir(os.path.join(grandparent, sib)):
+                    out.add(("A", int(sib_m.group(1))))
+        cache[key] = out
+        return out
+
     if mode == "file_scene":
         pat = re.compile(
             "^" + re.escape(prefix) + r"scene[_-]?([A-Za-z])(\d{1,3})" + re.escape(suffix) + "$",
@@ -1323,7 +1370,6 @@ def get_scene_keys_from_file_listing(t, cache):
             "^" + re.escape(prefix) + r"([A-Ia-i])(\d{1,3})" + re.escape(suffix) + "$"
         )
 
-    out = set()
     try:
         names = os.listdir(d)
     except Exception:
@@ -1373,13 +1419,36 @@ def resolve_template_for_scene(t, core_key, dir_cache):
         p = os.path.normpath(os.path.join(t.get("file_dir", ""), fn))
         return p if os.path.exists(p) else None
 
+    if mode == "file_roi":
+        width = t.get("scene_num_width", 2)
+        roi_txt = "ROI" + str(num).zfill(width)
+        fn = t.get("file_prefix", "") + "_" + roi_txt + t.get("file_suffix", "")
+        d = t.get("file_dir", "")
+        # If parent folder is itself an ROI folder, swap it for the target ROI
+        parent_name = os.path.basename(d)
+        if re.match(r"(?i)^ROI\d+$", parent_name):
+            d = os.path.join(os.path.dirname(d), roi_txt)
+        p = os.path.normpath(os.path.join(d, fn))
+        return p if os.path.exists(p) else None
+
     return None
 
 
 def marker_label_from_path(fp):
+    # NOTE: this duplicates marker_from_tiff_path in visu_html_functions7.py.
+    # The two should be combined into a single shared function in the future.
     name = os.path.splitext(os.path.basename(fp))[0]
+    # Strip ROI token at end if present (e.g. _ROI06)
+    name = re.sub(r"(?i)_?ROI0*\d{1,3}$", "", name)
+    # Strip _c0 / _ch0 channel suffixes
     name = re.sub(r"(?i)_c\d+$", "", name)
     name = re.sub(r"(?i)_ch\d+$", "", name)
+    # For CxxRx_MARKER format (e.g. ..._C01R1_B220), extract just the marker
+    parts = name.split("_")
+    if len(parts) >= 2 and re.match(r"(?i)^C\d+R\d+$", parts[-2]):
+        name = parts[-1]
+    # Clean numeric suffixes like CD11C-001 → CD11C
+    name = re.sub(r"-0+\d*$", "", name)
     name = name.strip()
     if name == "":
         name = "channel"
@@ -1940,6 +2009,20 @@ def _find_seg_file(segpath, slide_scene, suffix=SEG_SUFFIX, depth=0, max_depth=2
                 ),
             )
             return os.path.join(segpath, fallback[0])
+        # ROI convention: seg files named label_*_ROI{nn}.tif
+        roi_m = re.search(r"(?i)ROI0*(\d{1,3})", str(slide_scene))
+        if roi_m is not None:
+            roi_tag = "ROI" + roi_m.group(1).zfill(2)
+            label_hits = []
+            for fn in names:
+                fnl = fn.lower()
+                if fnl.startswith("label_") and roi_tag.lower() in fnl and fnl.endswith((".tif", ".tiff")):
+                    label_hits.append(fn)
+            if len(label_hits) == 1:
+                return os.path.join(segpath, label_hits[0])
+            if len(label_hits) > 1:
+                label_hits.sort(key=len)
+                return os.path.join(segpath, label_hits[0])
         subdirs = []
         i = 0
         while i < len(names):
@@ -2166,9 +2249,35 @@ def classify_obs_columns_by_core_positions(obs, core_positions):
 def extract_slide_scene_from_path(path):
     text = str(path).replace("\\", "/")
     m = re.search(r"(?i)([^/]+_scene[_-]?[A-Za-z]0*\d{1,3})", text)
-    if m is None:
+    if m is not None:
+        return str(m.group(1))
+    # ROI convention: extract ROI tag from filename or folder, with slide ID prefix
+    # e.g. .../40393/Processed/ROI01/file.tif → "40393ROI01"
+    segments = text.split("/")
+    roi_tag = ""
+    roi_idx = -1
+    # First try filename
+    fn = segments[-1]
+    roi_m = re.search(r"(?i)(ROI0*\d{1,3})", fn)
+    if roi_m is not None:
+        roi_tag = roi_m.group(1).upper()
+        roi_idx = len(segments) - 1
+    # Fallback: check folder segments for ROI folder
+    if roi_tag == "":
+        for i in range(len(segments) - 1, -1, -1):
+            if re.match(r"(?i)^ROI0*\d{1,3}$", segments[i]):
+                roi_tag = segments[i].upper()
+                roi_idx = i
+                break
+    if roi_tag == "":
         return ""
-    return str(m.group(1))
+    # Walk up from the ROI location to find a numeric slide ID folder
+    slide_id = ""
+    for i in range(roi_idx - 1, -1, -1):
+        if re.match(r"^\d+$", segments[i]):
+            slide_id = segments[i]
+            break
+    return slide_id + roi_tag
 
 
 def seed_core_slide_scene_map(seed_viewer):
@@ -2219,7 +2328,7 @@ def seed_core_tiff_map(seed_viewer):
 def choose_xy_columns(dfxy):
     if not isinstance(dfxy, pd.DataFrame) or dfxy.shape[0] == 0:
         return None, None
-    preferred = [("DAPI_X", "DAPI_Y"), ("X", "Y"), ("x", "y"), ("centroid-0", "centroid-1")]
+    preferred = [("DAPI_X", "DAPI_Y"), ("X", "Y"), ("x", "y"), ("Location_Center_X", "Location_Center_Y"), ("centroid-0", "centroid-1")]
     i = 0
     while i < len(preferred):
         xcol, ycol = preferred[i]
@@ -2266,10 +2375,28 @@ def prepare_overlay_context(obs, dfxy, seed_viewer):
     cell_int = None
     if "cellid" in obs.columns:
         cell_int = _series_to_cell_int(obs["cellid"])
+        if cell_int is not None and len(cell_int) > 1 and cell_int.nunique() <= 1:
+            cell_int = None
     if cell_int is None and "slide_scene_cellid" in obs.columns:
         cell_int = _series_to_cell_int(obs["slide_scene_cellid"])
+        if cell_int is not None and len(cell_int) > 1 and cell_int.nunique() <= 1:
+            cell_int = None
     if cell_int is None:
         cell_int = _series_to_cell_int(pd.Series(obs.index.astype(str), index=obs.index))
+        if cell_int is not None and len(cell_int) > 1 and cell_int.nunique() <= 1:
+            cell_int = None
+    # Priority 2 fallback: try known integer ID columns directly
+    # TODO: generalize — could validate candidates against actual seg TIFF labels
+    if cell_int is None:
+        for fallback_col in ["ObjectNumber", "Number_Object_Number"]:
+            if fallback_col in obs.columns:
+                try:
+                    candidate = pd.to_numeric(obs[fallback_col], errors="coerce")
+                    if candidate.notna().any() and candidate.nunique() > 1:
+                        cell_int = pd.Series(candidate.values, index=obs.index).astype(int)
+                        break
+                except Exception:
+                    pass
     if cell_int is not None and "cellid" not in obs.columns:
         obs = obs.copy()
         obs["cellid"] = cell_int.astype(int).astype(str)
@@ -2330,16 +2457,26 @@ def build_project_core_positions(obs, allowed_cores=None, seed_core_slide_scenes
             if scene != "":
                 out[core] = np.flatnonzero(slide_scene_array == scene)
             i += 1
-        return out
+        total_hits = sum(len(out.get(c, [])) for c in core_names)
+        if total_hits > 0:
+            return out
+        out = {}
 
     core_series = infer_core_series_from_obs(obs)
     if core_series is None:
         return out
     core_array = core_series.astype(str).to_numpy()
+    # Ad-hoc: core_names may be full slide_scene strings from the asset pool
+    # (e.g. "V_reg_NK_3XTLS_403932_sceneA1") while core_array has parsed IDs
+    # ("A1").  Parse the core_names the same way so both sides match.
+    # See adhoc_core_name_bridge.py — this is one-off glue for the AP mouse
+    # lab file-name translation and unlikely to be needed for future labs.
+    name_map = build_core_name_to_parsed_map(core_names, parse_core_series)
     i = 0
     while i < len(core_names):
         core = str(core_names[i])
-        out[core] = np.flatnonzero(core_array == core)
+        parsed_core = name_map.get(core, core)
+        out[core] = np.flatnonzero(core_array == parsed_core)
         i += 1
     return out
 
@@ -2351,17 +2488,20 @@ def build_core_position_index(core_names, overlay_context):
     seed_scenes = overlay_context.get("seed_core_slide_scenes", {})
     if core_array is None and slide_scene_array is None:
         return out
+    # Ad-hoc: same slide_scene-vs-parsed-core mismatch as build_project_core_positions.
+    # See adhoc_core_name_bridge.py for context.
+    name_map = build_core_name_to_parsed_map(core_names, parse_core_series)
     i = 0
     while i < len(core_names):
         core = str(core_names[i])
         seed_scene = str(seed_scenes.get(core, "")).strip()
+        positions = np.array([], dtype=int)
         if seed_scene != "" and slide_scene_array is not None:
-            mask = (slide_scene_array == seed_scene)
-        elif core_array is not None:
-            mask = (core_array == core)
-        else:
-            mask = np.zeros(0, dtype=bool)
-        out[core] = np.flatnonzero(mask)
+            positions = np.flatnonzero(slide_scene_array == seed_scene)
+        if positions.size == 0 and core_array is not None:
+            parsed_core = name_map.get(core, core)
+            positions = np.flatnonzero(core_array == parsed_core)
+        out[core] = positions
         i += 1
     return out
 
@@ -2556,6 +2696,11 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     if slide_scene != "" and len(ids) > 0 and has_seg_roots:
         if render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path):
             report_overlay_result(report, "segmentation", slide_scene)
+            return seg_out_path
+    seed_slide_scene = str(overlay_context.get("seed_core_slide_scenes", {}).get(str(core), "")).strip()
+    if seed_slide_scene != "" and seed_slide_scene != slide_scene and len(ids) > 0 and has_seg_roots:
+        if render_segmentation_subset_overlay(seg_roots, seed_slide_scene, ids, seg_out_path):
+            report_overlay_result(report, "segmentation", seed_slide_scene)
             return seg_out_path
 
     xvals = overlay_context.get("xvals")
@@ -3045,6 +3190,9 @@ def add_default_full_dataset_grouping(obs, core_names, groupings):
             name = str(col).strip().lower().replace(" ", "_")
             if name == "all_data":
                 all_cols.append(str(col))
+        if len(all_cols) == 0:
+            obs["all_data"] = "all data"
+            all_cols.append("all_data")
     if len(all_cols) > 0:
         col = all_cols[0]
         vals = _clean_obs_values(obs[col]).dropna().unique().tolist()
@@ -3053,7 +3201,9 @@ def add_default_full_dataset_grouping(obs, core_names, groupings):
             groupings[col] = {}
         groupings[col][value] = list(core_names)
         return
-    add_default_full_dataset_grouping(obs, core_names, groupings)
+    if "all_data" not in groupings:
+        groupings["all_data"] = {}
+    groupings["all_data"]["all data"] = list(core_names)
 
 
 def prune_and_sort_groupings(groupings, core_order):
@@ -3644,6 +3794,8 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
 def infer_core_series_from_obs(obs):
     if not isinstance(obs, pd.DataFrame):
         return None
+    if not obs.index.is_unique:
+        raise ValueError("HTML ROI viewer requires unique obs index; duplicate cell indices found.")
 
     candidates = []
     try:
@@ -3715,9 +3867,17 @@ def parse_core_series(ser):
     core_direct = m_core[0].str.upper() + m_core[1].str.lstrip("0")
     core_direct = core_direct.mask(m_core[0].isna())
 
+    m_roi = s.str.extract(r"(?i)ROI0*(\d{1,3})(?!\d)")
+    roi_num = pd.to_numeric(m_roi[0], errors="coerce")
+    core_roi = pd.Series(np.nan, index=s.index, dtype="object")
+    valid = roi_num.dropna().astype(int).astype(str)
+    core_roi.loc[valid.index] = "A" + valid
+
     out = core_scene.copy()
     miss = out.isna()
     out.loc[miss] = core_direct.loc[miss]
+    miss = out.isna()
+    out.loc[miss] = core_roi.loc[miss]
     out = out.mask(out == "")
     return out
 

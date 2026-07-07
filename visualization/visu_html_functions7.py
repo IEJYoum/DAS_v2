@@ -908,13 +908,24 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
 
 
 def marker_from_tiff_path(path):
-    stem = os.path.splitext(os.path.basename(path))[0]
-    stem = re.sub(r"(?i)_c\d+$", "", stem)
-    stem = re.sub(r"(?i)_ch\d+$", "", stem)
-    stem = stem.strip()
-    if stem == "":
-        stem = "channel"
-    return stem
+    # NOTE: this duplicates marker_label_from_path in call_visu_html_7.py.
+    # The two should be combined into a single shared function in the future.
+    name = os.path.splitext(os.path.basename(path))[0]
+    # Strip ROI token at end if present (e.g. _ROI06)
+    name = re.sub(r"(?i)_?ROI0*\d{1,3}$", "", name)
+    # Strip _c0 / _ch0 channel suffixes
+    name = re.sub(r"(?i)_c\d+$", "", name)
+    name = re.sub(r"(?i)_ch\d+$", "", name)
+    # For CxxRx_MARKER format (e.g. ..._C01R1_B220), extract just the marker
+    parts = name.split("_")
+    if len(parts) >= 2 and re.match(r"(?i)^C\d+R\d+$", parts[-2]):
+        name = parts[-1]
+    # Clean numeric suffixes like CD11C-001 → CD11C
+    name = re.sub(r"-0+\d*$", "", name)
+    name = name.strip()
+    if name == "":
+        name = "channel"
+    return name
 
 
 def color_for_marker(marker):
