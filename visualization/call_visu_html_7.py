@@ -38,10 +38,6 @@ try:
     from . import subset_project_utils as spu
 except Exception:
     import subset_project_utils as spu
-try:
-    from .adhoc_core_name_bridge import build_core_name_to_parsed_map
-except Exception:
-    from adhoc_core_name_bridge import build_core_name_to_parsed_map
 
 _NEW_DAS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "support"))
 if _NEW_DAS_DIR not in sys.path:
@@ -96,6 +92,7 @@ PROJECT_CONFIG_FILE = "project_config.txt"
 DEFAULT_SUBSET_ID = "all_cells"
 MAX_SUBSET_OPTION_VALUES = 64
 ROI_RUNTIME_NAME = "roi_editor_runtime.html"
+THRESH_RUNTIME_NAME = "thresh_editor_runtime.html"
 ASSET_REGISTRY_NAME = "asset_pool_registry.json"
 SEG_SUFFIX = "Ecad_nuc30_cell30_matched_exp5_CellSegmentationBasins.tif"
 SEG_SUFFIX_CANDIDATES = [
@@ -621,7 +618,7 @@ def discover_latest_run_html(out_root):
     while i < len(names):
         name = str(names[i])
         low = name.lower()
-        if low.endswith(".html") and low != ROI_RUNTIME_NAME.lower():
+        if low.endswith(".html") and low not in [ROI_RUNTIME_NAME.lower(), THRESH_RUNTIME_NAME.lower()]:
             htmls.append(name)
         i += 1
     htmls = sorted(htmls, key=natural_sort_key)
@@ -1284,7 +1281,7 @@ def collect_scene_keys(scene_templates):
             smap = get_scene_dir_map(t, dir_cache)
             for k in smap:
                 keys.add(k)
-        elif mode in ["file_scene", "file_core"]:
+        elif mode in ["file_scene", "file_core", "file_roi"]:
             fkeys = get_scene_keys_from_file_listing(t, file_cache)
             for k in fkeys:
                 keys.add(k)
@@ -2466,17 +2463,10 @@ def build_project_core_positions(obs, allowed_cores=None, seed_core_slide_scenes
     if core_series is None:
         return out
     core_array = core_series.astype(str).to_numpy()
-    # Ad-hoc: core_names may be full slide_scene strings from the asset pool
-    # (e.g. "V_reg_NK_3XTLS_403932_sceneA1") while core_array has parsed IDs
-    # ("A1").  Parse the core_names the same way so both sides match.
-    # See adhoc_core_name_bridge.py — this is one-off glue for the AP mouse
-    # lab file-name translation and unlikely to be needed for future labs.
-    name_map = build_core_name_to_parsed_map(core_names, parse_core_series)
     i = 0
     while i < len(core_names):
         core = str(core_names[i])
-        parsed_core = name_map.get(core, core)
-        out[core] = np.flatnonzero(core_array == parsed_core)
+        out[core] = np.flatnonzero(core_array == core)
         i += 1
     return out
 
@@ -2488,9 +2478,6 @@ def build_core_position_index(core_names, overlay_context):
     seed_scenes = overlay_context.get("seed_core_slide_scenes", {})
     if core_array is None and slide_scene_array is None:
         return out
-    # Ad-hoc: same slide_scene-vs-parsed-core mismatch as build_project_core_positions.
-    # See adhoc_core_name_bridge.py for context.
-    name_map = build_core_name_to_parsed_map(core_names, parse_core_series)
     i = 0
     while i < len(core_names):
         core = str(core_names[i])
@@ -2499,8 +2486,7 @@ def build_core_position_index(core_names, overlay_context):
         if seed_scene != "" and slide_scene_array is not None:
             positions = np.flatnonzero(slide_scene_array == seed_scene)
         if positions.size == 0 and core_array is not None:
-            parsed_core = name_map.get(core, core)
-            positions = np.flatnonzero(core_array == parsed_core)
+            positions = np.flatnonzero(core_array == core)
         out[core] = positions
         i += 1
     return out
@@ -2842,13 +2828,56 @@ def _roi_json_scalar(v):
     return str(v)
 
 
-def build_roi_data_for_seed(seed_viewer, obs, dfxy, meta=None, out_root=""):
+def build_expression_payload_frame(df, obs):
+    if not isinstance(df, pd.DataFrame):
+        return None, [], "df is not available"
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return None, [], "obs is not available"
+    if not obs.index.is_unique:
+        return None, [], "obs index is not unique"
+    if not df.index.is_unique:
+        return None, [], "df index is not unique"
+    col_names = [str(c) for c in list(df.columns)]
+    if len(set(col_names)) != len(col_names):
+        return None, [], "df marker column names are not unique"
+    aligned = df.reindex(obs.index)
+    expr_cols = {}
+    i = 0
+    while i < len(df.columns):
+        marker = str(df.columns[i])
+        try:
+            vals = pd.to_numeric(aligned.iloc[:, i], errors="coerce")
+            arr = vals.to_numpy(dtype=float, copy=False)
+        except Exception:
+            i += 1
+            continue
+        if bool(np.isfinite(arr).any()):
+            expr_cols[marker] = vals
+        i += 1
+    marker_list = sorted(list(expr_cols.keys()), key=natural_sort_key)
+    if len(marker_list) == 0:
+        return None, [], "no numeric marker columns"
+    expr_df = pd.DataFrame(index=obs.index)
+    i = 0
+    while i < len(marker_list):
+        marker = marker_list[i]
+        expr_df[marker] = expr_cols[marker]
+        i += 1
+    return expr_df, marker_list, ""
+
+
+def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root=""):
     overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
     if overlay_context is None:
         return {}
     core_names = sorted(list(seed_viewer.get("core_tiles", {}).keys()), key=natural_sort_key)
     if len(core_names) == 0:
         return {}
+
+    expr_df, marker_list, expr_reason = build_expression_payload_frame(df, obs)
+    has_expression_data = expr_df is not None and len(marker_list) > 0
+    if not has_expression_data and str(expr_reason or "").strip() != "":
+        print("Threshold expression payload disabled:", str(expr_reason))
 
     core_positions = build_core_position_index(core_names, overlay_context)
     obs_cols = [str(c) for c in list(obs.columns)]
@@ -2942,6 +2971,21 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, meta=None, out_root=""):
                 "y": y,
                 "subset_values": subset_values,
             })
+            if has_expression_data:
+                expr = {}
+                expr_row = expr_df.iloc[pos]
+                k = 0
+                while k < len(marker_list):
+                    marker = marker_list[k]
+                    v = _roi_json_scalar(expr_row[marker])
+                    # Skip NaN/Inf/missing values (serialized as "" by
+                    # _roi_json_scalar).  Omitting the key lets the JS
+                    # markerValue() function return NaN via hasOwnProperty,
+                    # rather than Number("") which silently becomes 0.
+                    if v != "":
+                        expr[marker] = v
+                    k += 1
+                rows[-1]["expr"] = expr
             j += 1
         cores[core] = {
             "core": core,
@@ -2961,6 +3005,9 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, meta=None, out_root=""):
         "subset_columns": subset_cols,
         "x_column": str(overlay_context.get("xcol") or ""),
         "y_column": str(overlay_context.get("ycol") or ""),
+        "marker_list": marker_list,
+        "has_expression_data": bool(has_expression_data),
+        "expression_status": "" if has_expression_data else str(expr_reason or ""),
         "cores": cores,
     }
 
@@ -3540,7 +3587,7 @@ def assemble_project_catalog(core_tiles, patch, figure_entries, subset_options, 
     }
 
 
-def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_root, roi_mailbox=None, provenance=None):
+def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_root, roi_mailbox=None, provenance=None, df=None):
     if not isinstance(base_viewer, dict):
         return None
     core_tiles = base_viewer.get("core_tiles", {})
@@ -3578,7 +3625,7 @@ def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_roo
     patch["subset_options"] = subset_options
     patch["subset_overlays"] = subset_overlays
     patch["figure_entries"] = figure_entries
-    patch["roi_data"] = build_roi_data_for_seed(base_viewer, obs, dfxy, meta=meta, out_root=out_root)
+    patch["roi_data"] = build_roi_data_for_seed(base_viewer, obs, dfxy, df=df, meta=meta, out_root=out_root)
     patch["roi_mailbox"] = build_roi_mailbox_payload(roi_mailbox)
     patch["overlay_backend"] = {
         "segmentation_root": str(overlay_report.get("segmentation_root", "")),
@@ -3754,7 +3801,7 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
         else:
             print("Project viewer: no segmentation root selected; centroid subset overlays will be used when needed.")
         print("Project viewer: preparing dataset overlay onto reusable assets.")
-        catalog = build_project_catalog_from_base_viewer(base_viewer, build_obs, build_dfxy, meta, out_root, roi_mailbox=roi_mailbox, provenance=provenance)
+        catalog = build_project_catalog_from_base_viewer(base_viewer, build_obs, build_dfxy, meta, out_root, roi_mailbox=roi_mailbox, provenance=provenance, df=build_df)
         if catalog is None:
             print("Project viewer could not build a fresh catalog from the available reusable assets.")
             return None
