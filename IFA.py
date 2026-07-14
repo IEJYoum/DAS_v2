@@ -99,6 +99,56 @@ ROI_MAILBOX_HELPER_PORT = 38765
 ROI_MAILBOX_HELPER_PATH = os.path.join(os.path.dirname(__file__), "visualization", "roi_mailbox_helper.py")
 
 
+def _das_meta_sink():
+    sink = globals().get("_new_das_meta")
+    if not isinstance(sink, dict):
+        sink = {}
+        globals()["_new_das_meta"] = sink
+    return sink
+
+
+def _sync_cvh_meta_sink():
+    try:
+        cvh._new_das_meta = _das_meta_sink()
+    except Exception:
+        pass
+
+
+def _record_loaded_triplet_context(folder, selected_path="", stem=""):
+    global DATAFOLDER, SAVEFOLDER, TPATH, TSTEM
+    folder = os.path.abspath(os.path.normpath(str(folder))).replace("\\", "/")
+    if folder == "" or not os.path.isdir(folder):
+        return
+    DATAFOLDER = folder
+    SAVEFOLDER = folder
+    TPATH = folder
+    stem = str(stem or "").strip()
+    if stem != "":
+        TSTEM = stem
+    selected_path = str(selected_path or "").strip()
+    if selected_path != "":
+        selected_path = os.path.abspath(os.path.normpath(selected_path)).replace("\\", "/")
+    sink = _das_meta_sink()
+    sink["last_selected_dir"] = folder
+    sink["data_folder"] = folder
+    sink["build_folder"] = folder
+    sink["dataset_stem"] = str(TSTEM)
+    if selected_path != "":
+        sink["last_selected_path"] = selected_path
+    _sync_cvh_meta_sink()
+
+
+def _viewer_project_root():
+    sink = _das_meta_sink()
+    for key in ["last_selected_dir", "data_folder"]:
+        candidate = str(sink.get(key, "")).strip()
+        if candidate != "" and os.path.isdir(candidate):
+            return os.path.abspath(os.path.normpath(candidate))
+    if str(SAVEFOLDER).strip() != "" and os.path.isdir(SAVEFOLDER):
+        return os.path.abspath(os.path.normpath(SAVEFOLDER))
+    return os.path.abspath(os.getcwd())
+
+
 def _resolve_roi_mailbox_dir(project_root, create=True):
     configured = ""
     try:
@@ -450,7 +500,8 @@ def main(dataFolder=DATAFOLDER,saveFolder=SAVEFOLDER):
 
 def htmlViewer(df=9,obs=9,dfxy=9):
     """Resolve viewer inputs from the active project, then launch the HTML viewer once."""
-    current = os.path.abspath(os.getcwd())
+    _sync_cvh_meta_sink()
+    current = _viewer_project_root()
     viewer_context = cvh.prompt_project_viewer_context(
         {
             "data_folder": current,
@@ -1592,6 +1643,7 @@ def preload(bl1,bl2,bl3,path = TPATH):
     print(df.index,obs.index)
     print(all(obs.index==df.index),"all index the same")
     print(obs,'obs!')
+    _record_loaded_triplet_context(path, df_path or obs_path or dfxy_path or "", TSTEM)
     return(df,obs,dfxy)
 
 def load(bl1,bl2,bl3,path = "none"):
@@ -1646,6 +1698,7 @@ def load(bl1,bl2,bl3,path = "none"):
     #obs.index = ser
     #dfxy = dfxy.loc[df.index,:]
     #logInput()
+    _record_loaded_triplet_context(path, df_path or obs_path or dfxy_path or "", name[:-1] if name.endswith("_") else name)
     return(df,obs,dfxy)
 
 
