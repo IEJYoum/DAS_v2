@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import copy
 import sys
 from datetime import datetime
 
@@ -2515,6 +2516,24 @@ def overlay_canvas_size(core, overlay_context, core_mask):
     return 1024, 1024
 
 
+def _validate_cached_overlay(path, expected_w, expected_h):
+    if not os.path.isfile(path):
+        return False
+    try:
+        expected = (int(expected_w), int(expected_h))
+        with Image.open(path) as im:
+            ok = tuple(im.size) == expected
+    except Exception:
+        ok = False
+    if ok:
+        return True
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+    return False
+
+
 def render_point_subset_overlay(xvals, yvals, size, out_path):
     if len(xvals) == 0 or len(yvals) == 0:
         return False
@@ -2591,7 +2610,8 @@ def render_segmentation_subset_overlay(seg_roots, slide_scene, ids, out_path):
 def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_roots, cache_dir):
     obs = overlay_context["obs"]
     core_series = overlay_context["core_series"]
-    mask = core_series == str(core)
+    core_mask = core_series == str(core)
+    mask = core_mask.copy()
     seed_slide_scene = str(overlay_context.get("seed_core_slide_scenes", {}).get(str(core), "")).strip()
     if seed_slide_scene != "" and "slide_scene" in obs.columns:
         mask = mask & (obs["slide_scene"].astype(str) == seed_slide_scene)
@@ -2613,10 +2633,11 @@ def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_root
     base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96))
     seg_out_path = base + "__seg.png"
     centroid_out_path = base + "__centroid.png"
+    expected_size = overlay_canvas_size(core, overlay_context, core_mask)
     has_seg_roots = len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
-    if has_seg_roots and os.path.isfile(seg_out_path):
+    if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
         return seg_out_path
-    if (not has_seg_roots) and os.path.isfile(centroid_out_path):
+    if (not has_seg_roots) and _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
         return centroid_out_path
     ids = []
     cell_int = overlay_context.get("cell_int")
@@ -2624,7 +2645,8 @@ def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_root
         ids = list(cell_int.loc[mask].dropna().astype(int).tolist())
     if slide_scene != "" and len(ids) > 0 and has_seg_roots:
         if render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path):
-            return seg_out_path
+            if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
+                return seg_out_path
 
     xy = overlay_context.get("xy")
     xcol = overlay_context.get("xcol")
@@ -2633,8 +2655,7 @@ def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_root
         xvals = pd.to_numeric(xy.loc[mask, xcol], errors="coerce").dropna().tolist()
         yvals = pd.to_numeric(xy.loc[mask, ycol], errors="coerce").dropna().tolist()
         if len(xvals) > 0 and len(yvals) > 0:
-            size = overlay_canvas_size(core, overlay_context, mask)
-            if render_point_subset_overlay(xvals, yvals, size, centroid_out_path):
+            if render_point_subset_overlay(xvals, yvals, expected_size, centroid_out_path):
                 return centroid_out_path
     return ""
 
@@ -2659,6 +2680,8 @@ def report_overlay_result(report, mode, slide_scene=""):
 def build_subset_overlay_for_positions(core, subset_option, positions, overlay_context, cache_dir, seg_roots, report=None):
     if positions is None or len(positions) == 0:
         return ""
+    core_mask = overlay_context["core_series"] == str(core)
+    expected_size = overlay_canvas_size(core, overlay_context, core_mask)
     slide_scene = ""
     slide_scene_series = overlay_context.get("slide_scene_series")
     if isinstance(slide_scene_series, pd.Series):
@@ -2676,38 +2699,38 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     if isinstance(cell_int, pd.Series):
         ids = list(cell_int.iloc[positions].dropna().astype(int).tolist())
     has_seg_roots = len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
-    if has_seg_roots and os.path.isfile(seg_out_path):
+    if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
         report_overlay_result(report, "segmentation", slide_scene)
         return seg_out_path
     if slide_scene != "" and len(ids) > 0 and has_seg_roots:
         if render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path):
-            report_overlay_result(report, "segmentation", slide_scene)
-            return seg_out_path
+            if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
+                report_overlay_result(report, "segmentation", slide_scene)
+                return seg_out_path
     seed_slide_scene = str(overlay_context.get("seed_core_slide_scenes", {}).get(str(core), "")).strip()
     if seed_slide_scene != "" and seed_slide_scene != slide_scene and len(ids) > 0 and has_seg_roots:
         if render_segmentation_subset_overlay(seg_roots, seed_slide_scene, ids, seg_out_path):
-            report_overlay_result(report, "segmentation", seed_slide_scene)
-            return seg_out_path
+            if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
+                report_overlay_result(report, "segmentation", seed_slide_scene)
+                return seg_out_path
 
     xvals = overlay_context.get("xvals")
     yvals = overlay_context.get("yvals")
-    if os.path.isfile(centroid_out_path):
+    if _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
         report_overlay_result(report, "centroid", slide_scene)
         return centroid_out_path
     if isinstance(xvals, pd.Series) and isinstance(yvals, pd.Series):
         xsub = xvals.iloc[positions].dropna().tolist()
         ysub = yvals.iloc[positions].dropna().tolist()
         if len(xsub) > 0 and len(ysub) > 0:
-            core_mask = overlay_context["core_series"] == str(core)
-            size = overlay_canvas_size(core, overlay_context, core_mask)
-            if render_point_subset_overlay(xsub, ysub, size, centroid_out_path):
+            if render_point_subset_overlay(xsub, ysub, expected_size, centroid_out_path):
                 report_overlay_result(report, "centroid", slide_scene)
                 return centroid_out_path
     report_overlay_result(report, "none", slide_scene)
     return ""
 
 
-def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, meta, out_root):
+def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None):
     overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
     if overlay_context is None:
         return {}, {}
@@ -2722,6 +2745,15 @@ def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, m
         "segmentation_roots": list(seg_roots),
     }
     core_names = sorted(list(seed_viewer.get("core_tiles", {}).keys()), key=natural_sort_key)
+    view_core_names = {}
+    if isinstance(view_sets, list):
+        for view in view_sets:
+            if not isinstance(view, dict):
+                continue
+            view_id = str(view.get("id", "")).strip()
+            cores = [str(x) for x in list(view.get("core_names", []) or [])]
+            if view_id != "" and len(cores) > 0:
+                view_core_names[view_id] = cores
     core_positions = build_core_position_index(core_names, overlay_context)
     column_cache = {}
     unique_options = {}
@@ -2770,6 +2802,7 @@ def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, m
         view_payload = subset_options_by_view.get(view_id, {})
         if not isinstance(view_payload, dict) or len(view_payload) == 0:
             continue
+        view_cores = list(view_core_names.get(str(view_id), core_names))
         view_map = {}
         for subset_group in view_payload:
             option_map = {}
@@ -2788,8 +2821,8 @@ def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, m
                 col_array = column_cache[col]
                 core_map = {}
                 i = 0
-                while i < len(core_names):
-                    core = str(core_names[i])
+                while i < len(view_cores):
+                    core = str(view_cores[i])
                     overlay_path = str(rendered_cache.get((subset_id, core), "") or "")
                     if overlay_path != "":
                         core_map[core] = [overlay_path]
@@ -3527,7 +3560,7 @@ def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_
     ifprog.tick_progress("Project viewer: building subset options and overlays.")
     print("Project viewer: building subset options and overlays.")
     subset_options = build_subset_options_by_view(view_sets, obs, core_positions=core_positions)
-    subset_overlays, overlay_report = build_subset_overlay_specs(base_viewer, subset_options, obs, dfxy, meta, out_root)
+    subset_overlays, overlay_report = build_subset_overlay_specs(base_viewer, subset_options, obs, dfxy, meta, out_root, view_sets=view_sets)
     return subset_options, subset_overlays, overlay_report
 
 
@@ -3697,6 +3730,65 @@ def filter_tables_to_slide_scenes(df, obs, dfxy, slide_scenes):
     return build_df, build_obs, build_dfxy
 
 
+def _build_and_write_project_viewer(base_viewer, build_df, build_obs, build_dfxy, meta, out_root, roi_mailbox, provenance, update_meta=True):
+    ifprog.reset_progress(4, "Project viewer: preparing dataset overlay onto seed viewer.")
+    try:
+        seg_roots = resolve_segmentation_roots(meta)
+        if len(seg_roots) > 0:
+            meta["segmentation_root"] = seg_roots[0]
+            meta["segmentation_roots"] = seg_roots
+            print("Project viewer: segmentation outlines enabled from", len(seg_roots), "folder(s).")
+        else:
+            print("Project viewer: no segmentation root selected; centroid subset overlays will be used when needed.")
+        print("Project viewer: preparing dataset overlay onto reusable assets.")
+        catalog = build_project_catalog_from_base_viewer(
+            base_viewer,
+            build_obs,
+            build_dfxy,
+            meta,
+            out_root,
+            roi_mailbox=roi_mailbox,
+            provenance=provenance,
+            df=build_df,
+        )
+        if catalog is None:
+            print("Project viewer could not build a fresh catalog from the available reusable assets.")
+            return None
+        overlay_report = dict(catalog.get("overlay_backend", {}))
+        if int(overlay_report.get("centroid_count", 0)) > 0:
+            scenes = list(overlay_report.get("centroid_scenes", []))
+            if len(scenes) > 0:
+                print("Project viewer: centroid fallback used for subset overlays on", len(scenes), "slide_scene values.")
+            else:
+                print("Project viewer: centroid fallback used for subset overlays.")
+        if update_meta:
+            _set_cvh_meta(
+                cvh_mode="project",
+                cvh_out_root=os.path.abspath(out_root),
+                cvh_seed_viewer=str(provenance.get("path", "")).strip(),
+                cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
+                viewer_root=os.path.abspath(out_root),
+                figure_folder=str(meta.get("figure_folder", "")).strip(),
+                segmentation_root=seg_roots[0] if len(seg_roots) > 0 else "",
+                segmentation_roots=seg_roots,
+            )
+        ifprog.tick_progress("Project viewer: writing HTML.")
+        if str(provenance.get("kind", "")).strip() == "seed":
+            vhf.build_viewer_from_seed(base_viewer, catalog_patch=catalog, outdir=out_root)
+        else:
+            vhf.build_catalog(catalog, outdir=out_root)
+        if update_meta:
+            latest_html = discover_latest_run_html(out_root)
+            _set_cvh_meta(
+                cvh_last_viewer_data=os.path.abspath(discover_latest_seed_viewer(out_root)),
+                cvh_last_html=os.path.abspath(latest_html) if latest_html != "" else "",
+            )
+        ifprog.tick_progress("Project viewer: viewer HTML ready.")
+        return catalog
+    finally:
+        ifprog.clear_progress()
+
+
 def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
     meta = dict(_cvh_meta_sink())
     if isinstance(resolved, dict):
@@ -3791,51 +3883,93 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
         print("Skipped slide_scene values:", ", ".join(missing_scenes[:12]))
         build_df, build_obs, build_dfxy = filter_tables_to_slide_scenes(df, obs, dfxy, covered_scenes)
 
-    ifprog.reset_progress(4, "Project viewer: preparing dataset overlay onto seed viewer.")
-    try:
-        seg_roots = resolve_segmentation_roots(meta)
-        if len(seg_roots) > 0:
-            meta["segmentation_root"] = seg_roots[0]
-            meta["segmentation_roots"] = seg_roots
-            print("Project viewer: segmentation outlines enabled from", len(seg_roots), "folder(s).")
-        else:
-            print("Project viewer: no segmentation root selected; centroid subset overlays will be used when needed.")
-        print("Project viewer: preparing dataset overlay onto reusable assets.")
-        catalog = build_project_catalog_from_base_viewer(base_viewer, build_obs, build_dfxy, meta, out_root, roi_mailbox=roi_mailbox, provenance=provenance, df=build_df)
-        if catalog is None:
-            print("Project viewer could not build a fresh catalog from the available reusable assets.")
-            return None
-        overlay_report = dict(catalog.get("overlay_backend", {}))
-        if int(overlay_report.get("centroid_count", 0)) > 0:
-            scenes = list(overlay_report.get("centroid_scenes", []))
-            if len(scenes) > 0:
-                print("Project viewer: centroid fallback used for subset overlays on", len(scenes), "slide_scene values.")
+    per_roi = False
+    unique_scenes = []
+    if isinstance(build_obs, pd.DataFrame) and "slide_scene" in build_obs.columns:
+        unique_scenes = sorted(
+            build_obs["slide_scene"].dropna().astype(str).unique().tolist(),
+            key=natural_sort_key,
+        )
+        if len(unique_scenes) > 1:
+            raw = str(input("Build individual viewer per slide_scene? (" + str(len(unique_scenes)) + " found) (y/n) [n]: ")).strip().lower()
+            per_roi = raw in ["y", "yes"]
+
+    if per_roi:
+        built_count = 0
+        built_roots = []
+        last_viewer_data = ""
+        last_html = ""
+        scene_series = build_obs["slide_scene"].astype(str)
+        scene_i = 0
+        while scene_i < len(unique_scenes):
+            scene_val = str(unique_scenes[scene_i])
+            print("--- Viewer", scene_i + 1, "of", len(unique_scenes), ":", scene_val, "---")
+            sub_obs = build_obs.loc[scene_series == scene_val].copy()
+            sub_df = build_df.reindex(sub_obs.index) if isinstance(build_df, pd.DataFrame) else build_df
+            sub_dfxy = build_dfxy.reindex(sub_obs.index) if isinstance(build_dfxy, pd.DataFrame) else build_dfxy
+            sub_viewer = trim_seed_viewer_to_obs(copy.deepcopy(base_viewer), sub_obs)
+            if not isinstance(sub_viewer.get("core_tiles"), dict) or len(sub_viewer.get("core_tiles", {})) == 0:
+                print("  Skipping", scene_val, "- no matching core tiles.")
+                scene_i += 1
+                continue
+            sub_out = os.path.join(out_root, safe_tag(scene_val, 80))
+            catalog = _build_and_write_project_viewer(
+                sub_viewer,
+                sub_df,
+                sub_obs,
+                sub_dfxy,
+                meta,
+                sub_out,
+                roi_mailbox,
+                provenance,
+                update_meta=False,
+            )
+            if catalog is None:
+                print("  Skipping", scene_val, "- catalog build failed.")
             else:
-                print("Project viewer: centroid fallback used for subset overlays.")
+                built_count += 1
+                built_roots.append(os.path.abspath(sub_out))
+                latest_viewer_data = discover_latest_seed_viewer(sub_out)
+                latest_html = discover_latest_run_html(sub_out)
+                if latest_viewer_data != "":
+                    last_viewer_data = os.path.abspath(latest_viewer_data)
+                if latest_html != "":
+                    last_html = os.path.abspath(latest_html)
+            scene_i += 1
+        if built_count == 0:
+            print("No individual viewers were built.")
+            return None
         _set_cvh_meta(
-            cvh_mode="project",
+            cvh_mode="project_per_roi",
             cvh_out_root=os.path.abspath(out_root),
             cvh_seed_viewer=str(provenance.get("path", "")).strip(),
-            cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
+            cvh_selection_view_count=built_count,
+            cvh_individual_viewer_roots=built_roots,
+            cvh_last_viewer_data=last_viewer_data,
+            cvh_last_html=last_html,
             viewer_root=os.path.abspath(out_root),
             figure_folder=str(meta.get("figure_folder", "")).strip(),
-            segmentation_root=seg_roots[0] if len(seg_roots) > 0 else "",
-            segmentation_roots=seg_roots,
+            segmentation_root=str(meta.get("segmentation_root", "")).strip(),
+            segmentation_roots=list(meta.get("segmentation_roots", [])) if isinstance(meta.get("segmentation_roots", []), list) else [],
         )
-        ifprog.tick_progress("Project viewer: writing HTML.")
-        if str(provenance.get("kind", "")).strip() == "seed":
-            vhf.build_viewer_from_seed(base_viewer, catalog_patch=catalog, outdir=out_root)
-        else:
-            vhf.build_catalog(catalog, outdir=out_root)
-        _set_cvh_meta(
-            cvh_last_viewer_data=os.path.abspath(discover_latest_seed_viewer(out_root)),
-            cvh_last_html=os.path.abspath(discover_latest_run_html(out_root)) if discover_latest_run_html(out_root) != "" else "",
-        )
-        ifprog.tick_progress("Project viewer: viewer HTML ready.")
-        print("Done.")
+        print("Done. Built individual viewers for", built_count, "of", len(unique_scenes), "slide_scene values.")
         return (df, obs, dfxy)
-    finally:
-        ifprog.clear_progress()
+
+    catalog = _build_and_write_project_viewer(
+        base_viewer,
+        build_df,
+        build_obs,
+        build_dfxy,
+        meta,
+        out_root,
+        roi_mailbox,
+        provenance,
+        update_meta=True,
+    )
+    if catalog is None:
+        return None
+    print("Done.")
+    return (df, obs, dfxy)
 
 
 def infer_core_series_from_obs(obs):

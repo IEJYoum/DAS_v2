@@ -3629,6 +3629,17 @@ def write_roi_runtime_html(outdir):
     flex-wrap: wrap;
     margin-top: 8px;
   }
+  .zoomBar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .zoomLabel {
+    min-width: 44px;
+    font-size: 12px;
+    color: var(--muted);
+  }
   button {
     border-radius: 8px;
     border: 1px solid var(--line);
@@ -3709,6 +3720,21 @@ def write_roi_runtime_html(outdir):
       <div class="label">Session</div>
       <div class="small" id="sessionStage">Initializing ROI editor...</div>
     </div>
+    <div class="section">
+      <div class="label">Zoom</div>
+      <div class="zoomBar">
+        <button id="zoomOutBtn" type="button">-</button>
+        <button id="zoomResetBtn" type="button">100%</button>
+        <button id="zoomInBtn" type="button">+</button>
+        <span class="zoomLabel" id="zoomLabel">100%</span>
+      </div>
+    </div>
+    <div class="section">
+      <div class="label">Display</div>
+      <div class="btnbar">
+        <button id="overlayToggleBtn" type="button">overlays on</button>
+      </div>
+    </div>
     <div class="section" id="columnSection">
       <div class="label">Column Name To Add Or Change Annotations</div>
       <input id="columnInput" type="text" list="columnList" autocomplete="off">
@@ -3757,7 +3783,10 @@ const state = {
   closedPolygons: [],
   acceptedBatches: [],
   saveInFlight: false,
-  lastSavedSignature: ''
+  lastSavedSignature: '',
+  zoom: 1,
+  baseStageWidth: 0,
+  showOverlays: true
 };
 function el(id) { return document.getElementById(id); }
 function esc(s) {
@@ -3813,8 +3842,41 @@ function stageDims() {
   const h = Math.max(1, Number(DATA.height || 1024));
   return [w, h];
 }
-function pointSvg(x, y, r, fill, stroke) {
-  return '<circle cx="' + x + '" cy="' + y + '" r="' + r + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1"></circle>';
+function applyStageZoom() {
+  const stage = el('stage');
+  if (!stage) return;
+  const dims = stageDims();
+  stage.style.aspectRatio = String(dims[0]) + ' / ' + String(dims[1]);
+  if (!(state.baseStageWidth > 0)) {
+    const oldWidth = stage.style.width;
+    stage.style.width = '';
+    state.baseStageWidth = Math.max(240, Math.round(stage.getBoundingClientRect().width || Math.min(1400, dims[0])));
+    stage.style.width = oldWidth;
+  }
+  const zoom = Math.max(0.5, Math.min(8, Number(state.zoom || 1)));
+  state.zoom = zoom;
+  stage.style.width = String(Math.round(state.baseStageWidth * zoom)) + 'px';
+  const label = el('zoomLabel');
+  if (label) label.textContent = String(Math.round(zoom * 100)) + '%';
+}
+function setStageZoom(nextZoom) {
+  state.zoom = Math.max(0.5, Math.min(8, Number(nextZoom) || 1));
+  applyStageZoom();
+}
+function syncOverlayVisibility() {
+  const visible = !!state.showOverlays;
+  for (const node of document.querySelectorAll('.overlayLayer, .overlayMark')) {
+    node.style.display = visible ? '' : 'none';
+  }
+  const btn = el('overlayToggleBtn');
+  if (btn) {
+    btn.textContent = visible ? 'overlays on' : 'overlays off';
+    btn.setAttribute('aria-pressed', visible ? 'true' : 'false');
+  }
+}
+function pointSvg(x, y, r, fill, stroke, cls) {
+  const klass = cls ? ' class="' + String(cls) + '"' : '';
+  return '<circle' + klass + ' cx="' + x + '" cy="' + y + '" r="' + r + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1"></circle>';
 }
 function polygonSvg(points, stroke, fill, dash) {
   const pts = points.map(function(p) { return String(p[0]) + ',' + String(p[1]); }).join(' ');
@@ -4088,8 +4150,7 @@ function defaultRoiColumnName() {
 function renderStage() {
   const inner = el('stageInner');
   const dims = stageDims();
-  const stage = el('stage');
-  stage.style.aspectRatio = String(dims[0]) + ' / ' + String(dims[1]);
+  applyStageZoom();
   inner.innerHTML = '';
   const base = DATA.base_layer && DATA.base_layer.url ? DATA.base_layer.url : '';
   const channelLayers = Array.isArray(DATA.channel_layers) ? DATA.channel_layers : [];
@@ -4126,7 +4187,7 @@ function renderStage() {
     const x = Number(row && row.x);
     const y = Number(row && row.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    markup += pointSvg(x, y, 2.4, 'rgba(255,255,255,0.42)', 'rgba(255,255,255,0.28)');
+    markup += pointSvg(x, y, 2.4, 'rgba(255,255,255,0.42)', 'rgba(255,255,255,0.28)', 'overlayMark');
   }
   for (const poly of state.closedPolygons) {
     markup += polygonSvg(poly, '#ffd166', 'rgba(255,209,102,0.08)', '');
@@ -4147,6 +4208,7 @@ function renderStage() {
   svg.innerHTML = markup;
   svg.addEventListener('click', onStageClick);
   inner.appendChild(svg);
+  syncOverlayVisibility();
 }
 function renderPhase() {
   if (state.phase === 'column') {
@@ -4241,6 +4303,17 @@ async function bind() {
   });
   el('discardBtn').addEventListener('click', function() {
     window.close();
+  });
+  el('zoomOutBtn').addEventListener('click', function() { setStageZoom(state.zoom / 1.25); });
+  el('zoomResetBtn').addEventListener('click', function() { setStageZoom(1); });
+  el('zoomInBtn').addEventListener('click', function() { setStageZoom(state.zoom * 1.25); });
+  el('overlayToggleBtn').addEventListener('click', function() {
+    state.showOverlays = !state.showOverlays;
+    syncOverlayVisibility();
+  });
+  window.addEventListener('resize', function() {
+    state.baseStageWidth = 0;
+    applyStageZoom();
   });
 }
 (async function() {
@@ -4357,6 +4430,17 @@ def write_thresh_runtime_html(outdir):
     gap: 8px;
     flex-wrap: wrap;
     margin-top: 8px;
+  }
+  .zoomBar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .zoomLabel {
+    min-width: 44px;
+    font-size: 12px;
+    color: var(--muted);
   }
   button {
     border-radius: 8px;
@@ -4485,6 +4569,22 @@ def write_thresh_runtime_html(outdir):
         <button id="saveBtn" type="button">Save</button>
       </div>
     </div>
+    <div class="section">
+      <div class="label">Image Zoom</div>
+      <div class="zoomBar">
+        <button id="zoomOutBtn" type="button">-</button>
+        <button id="zoomResetBtn" type="button">100%</button>
+        <button id="zoomInBtn" type="button">+</button>
+        <span class="zoomLabel" id="zoomLabel">100%</span>
+      </div>
+    </div>
+    <div class="section">
+      <div class="label">Display</div>
+      <div class="btnbar">
+        <button id="overlayToggleBtn" type="button">overlays on</button>
+        <button id="scaleToggleBtn" type="button">scatter raw</button>
+      </div>
+    </div>
     <div class="section scatterWrap">
       <canvas id="scatterCanvas" width="760" height="520"></canvas>
     </div>
@@ -4510,7 +4610,11 @@ const state = {
   plotted: false,
   previewed: false,
   saveInFlight: false,
-  lastSavedSignature: ''
+  lastSavedSignature: '',
+  zoom: 1,
+  baseStageWidth: 0,
+  showOverlays: true,
+  logScatter: false
 };
 function el(id) { return document.getElementById(id); }
 function esc(s) {
@@ -4642,6 +4746,44 @@ function stageDims() {
   const h = Math.max(1, Number(DATA.height || 1024));
   return [w, h];
 }
+function applyStageZoom() {
+  const stage = el('stage');
+  if (!stage) return;
+  const dims = stageDims();
+  stage.style.aspectRatio = String(dims[0]) + ' / ' + String(dims[1]);
+  if (!(state.baseStageWidth > 0)) {
+    const oldWidth = stage.style.width;
+    stage.style.width = '';
+    state.baseStageWidth = Math.max(240, Math.round(stage.getBoundingClientRect().width || Math.min(1400, dims[0])));
+    stage.style.width = oldWidth;
+  }
+  const zoom = Math.max(0.5, Math.min(8, Number(state.zoom || 1)));
+  state.zoom = zoom;
+  stage.style.width = String(Math.round(state.baseStageWidth * zoom)) + 'px';
+  const label = el('zoomLabel');
+  if (label) label.textContent = String(Math.round(zoom * 100)) + '%';
+}
+function setStageZoom(nextZoom) {
+  state.zoom = Math.max(0.5, Math.min(8, Number(nextZoom) || 1));
+  applyStageZoom();
+}
+function syncOverlayVisibility() {
+  const visible = !!state.showOverlays;
+  for (const node of document.querySelectorAll('.overlayLayer, .canvasLayer')) {
+    node.style.display = visible ? '' : 'none';
+  }
+  const btn = el('overlayToggleBtn');
+  if (btn) {
+    btn.textContent = visible ? 'overlays on' : 'overlays off';
+    btn.setAttribute('aria-pressed', visible ? 'true' : 'false');
+  }
+}
+function syncScaleToggleLabel() {
+  const btn = el('scaleToggleBtn');
+  if (!btn) return;
+  btn.textContent = state.logScatter ? 'scatter log' : 'scatter raw';
+  btn.setAttribute('aria-pressed', state.logScatter ? 'true' : 'false');
+}
 function renderHeader() {
   el('metaRow').innerHTML = [
     '<span class="pill">core: ' + esc(DATA.core || '') + '</span>',
@@ -4680,9 +4822,12 @@ function renderStatus(text) {
   const positives = Number.isFinite(th) ? positiveRows().length : 0;
   const col = thresholdColumnName(state.xMarker);
   const saveTarget = DATA && DATA.writer_url ? 'mailbox ready' : 'mailbox unavailable';
+  const scaleNote = state.logScatter ? 'scatter scale: log10(10x+1)' : 'scatter scale: raw';
+  const displayTh = state.logScatter && Number.isFinite(th) && th >= 0 ? Math.round(Math.log10(10 * th + 1) * 1000) / 1000 : NaN;
   el('statusBox').textContent = [
     'column: ' + col,
     'threshold: ' + (Number.isFinite(th) ? String(th) : '(not numeric)'),
+    scaleNote + (Number.isFinite(displayTh) ? ' | display line: ' + String(displayTh) : ''),
     'positive cells: ' + String(positives) + ' / ' + String(ROWS.length),
     saveTarget
   ].join('\\n');
@@ -4690,6 +4835,16 @@ function renderStatus(text) {
 function drawScatter() {
   clearError();
   const th = requireThreshold();
+  const useLog = !!state.logScatter;
+  function displayValue(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return NaN;
+    return useLog ? (n >= 0 ? Math.log10(10 * n + 1) : NaN) : n;
+  }
+  const thPlot = displayValue(th);
+  if (!Number.isFinite(thPlot)) {
+    throw new Error('log scatter display requires threshold >= 0');
+  }
   const canvas = el('scatterCanvas');
   const ctx = canvas.getContext('2d');
   const w = canvas.width;
@@ -4704,11 +4859,23 @@ function drawScatter() {
     renderStatus('No numeric rows for selected markers.');
     return;
   }
-  let xmin = th;
-  let xmax = th;
-  let ymin = pts[0].y;
-  let ymax = pts[0].y;
+  const plotPts = [];
   for (const p of pts) {
+    const xp = displayValue(p.x);
+    const yp = displayValue(p.y);
+    if (Number.isFinite(xp) && Number.isFinite(yp)) plotPts.push({x: xp, y: yp});
+  }
+  if (plotPts.length === 0) {
+    ctx.fillStyle = '#eef1f4';
+    ctx.fillText('No rows can be displayed with the selected scatter scale.', 24, 34);
+    renderStatus('No rows can be displayed with the selected scatter scale.');
+    return;
+  }
+  let xmin = thPlot;
+  let xmax = thPlot;
+  let ymin = plotPts[0].y;
+  let ymax = plotPts[0].y;
+  for (const p of plotPts) {
     if (p.x < xmin) xmin = p.x;
     if (p.x > xmax) xmax = p.x;
     if (p.y < ymin) ymin = p.y;
@@ -4729,13 +4896,30 @@ function drawScatter() {
   ctx.lineTo(left, h - bottom);
   ctx.lineTo(w - right, h - bottom);
   ctx.stroke();
-  ctx.fillStyle = 'rgba(180,210,255,0.34)';
-  for (const p of pts) {
+  const binSize = 12;
+  const bins = new Map();
+  for (const p of plotPts) {
+    p.px = sx(p.x);
+    p.py = sy(p.y);
+    p.bin = String(Math.floor(p.px / binSize)) + ',' + String(Math.floor(p.py / binSize));
+    bins.set(p.bin, (bins.get(p.bin) || 0) + 1);
+  }
+  let maxBin = 1;
+  for (const count of bins.values()) {
+    if (count > maxBin) maxBin = count;
+  }
+  function densityColor(count) {
+    const t = Math.max(0, Math.min(1, Math.log1p(Number(count || 1)) / Math.log1p(maxBin)));
+    const hue = Math.round(220 - 220 * t);
+    return 'hsla(' + String(hue) + ', 92%, 58%, 0.58)';
+  }
+  for (const p of plotPts) {
+    ctx.fillStyle = densityColor(bins.get(p.bin) || 1);
     ctx.beginPath();
-    ctx.arc(sx(p.x), sy(p.y), 2.0, 0, Math.PI * 2);
+    ctx.arc(p.px, p.py, 1.9, 0, Math.PI * 2);
     ctx.fill();
   }
-  const tx = sx(th);
+  const tx = sx(thPlot);
   ctx.strokeStyle = '#79e2b3';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -4744,12 +4928,17 @@ function drawScatter() {
   ctx.stroke();
   ctx.fillStyle = '#eef1f4';
   ctx.font = '12px Segoe UI, Arial, sans-serif';
-  ctx.fillText(state.xMarker, left, h - 18);
+  const scaleText = useLog ? ' log10(10x+1)' : ' raw';
+  ctx.fillText(state.xMarker + scaleText, left, h - 18);
   ctx.save();
   ctx.translate(16, h - bottom);
   ctx.rotate(-Math.PI / 2);
-  ctx.fillText(state.yMarker || state.xMarker, 0, 0);
+  ctx.fillText((state.yMarker || state.xMarker) + scaleText, 0, 0);
   ctx.restore();
+  ctx.fillStyle = '#8fb9ff';
+  ctx.fillText('density: blue low', w - 150, top + 14);
+  ctx.fillStyle = '#ff6969';
+  ctx.fillText('red high', w - 76, top + 14);
   state.plotted = true;
   renderStatus();
 }
@@ -4766,8 +4955,7 @@ function positiveRows() {
 function renderImagePanel() {
   const inner = el('stageInner');
   const dims = stageDims();
-  const stage = el('stage');
-  stage.style.aspectRatio = String(dims[0]) + ' / ' + String(dims[1]);
+  applyStageZoom();
   inner.innerHTML = '';
   const base = DATA.base_layer && DATA.base_layer.url ? DATA.base_layer.url : '';
   const channelLayers = Array.isArray(DATA.channel_layers) ? DATA.channel_layers : [];
@@ -4801,6 +4989,7 @@ function renderImagePanel() {
   canvas.width = dims[0];
   canvas.height = dims[1];
   inner.appendChild(canvas);
+  syncOverlayVisibility();
 }
 function drawPreviewOverlay() {
   clearError();
@@ -4940,6 +5129,28 @@ function bindControls() {
       state.saveInFlight = false;
       setButtonsDisabled(false);
     }
+  });
+  el('zoomOutBtn').addEventListener('click', function() { setStageZoom(state.zoom / 1.25); });
+  el('zoomResetBtn').addEventListener('click', function() { setStageZoom(1); });
+  el('zoomInBtn').addEventListener('click', function() { setStageZoom(state.zoom * 1.25); });
+  el('overlayToggleBtn').addEventListener('click', function() {
+    state.showOverlays = !state.showOverlays;
+    syncOverlayVisibility();
+  });
+  el('scaleToggleBtn').addEventListener('click', function() {
+    state.logScatter = !state.logScatter;
+    syncScaleToggleLabel();
+    try {
+      drawScatter();
+    } catch (err) {
+      showError(String(err && err.message || err));
+      renderStatus(String(err && err.message || err));
+    }
+  });
+  syncScaleToggleLabel();
+  window.addEventListener('resize', function() {
+    state.baseStageWidth = 0;
+    applyStageZoom();
   });
 }
 async function boot() {
