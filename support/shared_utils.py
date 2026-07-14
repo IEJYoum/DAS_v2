@@ -177,8 +177,11 @@ def load_key_value_config(path: str | Path) -> dict[str, str]:
     """
     Read a cheap key=value config file, ignoring blank/comment lines.
     """
-    config_path = Path(path).expanduser().resolve()
-    if not config_path.is_file():
+    try:
+        config_path = Path(path).expanduser().resolve()
+        if not config_path.is_file():
+            return {}
+    except Exception:
         return {}
     out: dict[str, str] = {}
     try:

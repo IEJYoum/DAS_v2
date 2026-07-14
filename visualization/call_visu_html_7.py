@@ -119,6 +119,51 @@ def _set_cvh_meta(**kwargs):
         sink[str(key)] = kwargs[key]
 
 
+def _optional_bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    low = str(value).strip().lower()
+    if low in ["y", "yes", "true", "1"]:
+        return True
+    if low in ["n", "no", "false", "0", ""]:
+        return False
+    return None
+
+
+def prompt_per_slide_scene_viewers(obs):
+    if not isinstance(obs, pd.DataFrame) or "slide_scene" not in obs.columns:
+        return None
+    unique_scenes = sorted(
+        obs["slide_scene"].dropna().astype(str).unique().tolist(),
+        key=natural_sort_key,
+    )
+    if len(unique_scenes) <= 1:
+        return None
+    raw = str(
+        cvh_input(
+            "Build individual viewer per slide_scene? (" + str(len(unique_scenes)) + " found) (y/n) [n]: ",
+            default="n",
+            prompt_meta={
+                "options": [
+                    {
+                        "value": "n",
+                        "label": "Combined viewer",
+                        "description": "Build one viewer containing all matched slide_scene values.",
+                    },
+                    {
+                        "value": "y",
+                        "label": "Individual viewers",
+                        "description": "Build one viewer output folder per slide_scene value.",
+                    },
+                ]
+            },
+        )
+    ).strip().lower()
+    return raw in ["y", "yes"]
+
+
 def normalize_viewer_context(context):
     if not isinstance(context, dict):
         return None
@@ -142,6 +187,15 @@ def normalize_viewer_context(context):
         "viewer_root": os.path.abspath(os.path.normpath(viewer_root)) if viewer_root != "" else "",
         "seed_viewer_path": os.path.abspath(os.path.normpath(seed_path)) if seed_path != "" else "",
     }
+    per_slide_scene_viewers = _optional_bool(context.get("per_slide_scene_viewers", None))
+    if per_slide_scene_viewers is not None:
+        out["per_slide_scene_viewers"] = per_slide_scene_viewers
+    use_existing_seed_viewer = _optional_bool(context.get("use_existing_seed_viewer", None))
+    if use_existing_seed_viewer is not None:
+        out["use_existing_seed_viewer"] = use_existing_seed_viewer
+    seed_viewer_just_built = _optional_bool(context.get("seed_viewer_just_built", None))
+    if seed_viewer_just_built is not None:
+        out["seed_viewer_just_built"] = seed_viewer_just_built
     if out["dataset_stem"] == "" and out["data_folder"] != "":
         out["dataset_stem"] = os.path.basename(out["data_folder"])
     return out
@@ -546,8 +600,32 @@ def prompt_project_viewer_context(meta):
         print("Could not save viewer project settings:", exc)
 
     seed_path = discover_latest_seed_viewer(viewer_root)
+    use_existing_seed_viewer = None
     if seed_path == "":
         print("No reusable viewer assets found under:", viewer_root)
+    else:
+        seed_name = os.path.basename(str(seed_path).strip())
+        raw = strip_quotes(
+            cvh_input(
+                "Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ",
+                default="y",
+                prompt_meta={
+                    "options": [
+                        {
+                            "value": "y",
+                            "label": "Use assets",
+                            "description": "Reuse the existing viewer asset map and write a fresh project-aware viewer run.",
+                        },
+                        {
+                            "value": "n",
+                            "label": "Skip assets",
+                            "description": "Try to rebuild from the asset registry instead.",
+                        },
+                    ]
+                },
+            ).strip()
+        ).lower()
+        use_existing_seed_viewer = raw in ["", "y", "yes", "use"]
 
     updated_meta = dict(meta)
     updated_meta["data_folder"] = data_folder
@@ -567,6 +645,7 @@ def prompt_project_viewer_context(meta):
         "segmentation_roots": segmentation_roots,
         "viewer_root": viewer_root,
         "seed_viewer_path": seed_path,
+        "use_existing_seed_viewer": use_existing_seed_viewer,
     }
 
 
@@ -3814,16 +3893,27 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
         meta["segmentation_root"] = segmentation_roots[0] if len(segmentation_roots) > 0 else ""
         meta["segmentation_roots"] = segmentation_roots
         meta["viewer_root"] = out_root
+        seed_viewer_just_built = _optional_bool(resolved.get("seed_viewer_just_built", None)) is True
+        use_existing_seed_viewer = _optional_bool(resolved.get("use_existing_seed_viewer", None))
+        per_slide_scene_viewers = _optional_bool(resolved.get("per_slide_scene_viewers", None))
     else:
         out_root = prompt_output_root(find_default_out_root(meta))
         default_seed = discover_latest_seed_viewer(out_root)
         seed_path = prompt_seed_viewer_path(default_seed)
+        seed_viewer_just_built = False
+        use_existing_seed_viewer = None
+        per_slide_scene_viewers = None
     reuse_json_var = False
     if seed_path != "" and os.path.isfile(seed_path):
         seed_name = os.path.basename(str(seed_path).strip())
-        reuse_raw = str(input("Re-use " + seed_name + "? (y) ")).strip().lower()
-        if reuse_raw in ["y", "yes"]:
+        if seed_viewer_just_built:
+            print("Project viewer: using newly built reusable viewer assets from", seed_name)
             reuse_json_var = True
+        elif use_existing_seed_viewer is not None:
+            reuse_json_var = bool(use_existing_seed_viewer)
+        else:
+            reuse_raw = str(input("Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ")).strip().lower()
+            reuse_json_var = reuse_raw in ["", "y", "yes"]
     base_viewer = None
     provenance = {}
     if seed_path != "" and os.path.isfile(seed_path) and reuse_json_var:
@@ -3891,8 +3981,11 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
             key=natural_sort_key,
         )
         if len(unique_scenes) > 1:
-            raw = str(input("Build individual viewer per slide_scene? (" + str(len(unique_scenes)) + " found) (y/n) [n]: ")).strip().lower()
-            per_roi = raw in ["y", "yes"]
+            if per_slide_scene_viewers is None:
+                raw = str(input("Build individual viewer per slide_scene? (" + str(len(unique_scenes)) + " found) (y/n) [n]: ")).strip().lower()
+                per_roi = raw in ["y", "yes"]
+            else:
+                per_roi = bool(per_slide_scene_viewers)
 
     if per_roi:
         built_count = 0

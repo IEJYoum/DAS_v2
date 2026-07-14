@@ -461,6 +461,9 @@ def htmlViewer(df=9,obs=9,dfxy=9):
     if not isinstance(viewer_context, dict):
         print("Could not resolve HTML viewer context from the current project.")
         return(df,obs,dfxy)
+    per_slide_scene_viewers = cvh.prompt_per_slide_scene_viewers(obs)
+    if per_slide_scene_viewers is not None:
+        viewer_context["per_slide_scene_viewers"] = per_slide_scene_viewers
     viewer_root = str(viewer_context.get("viewer_root", "")).strip()
     if not cvh.has_reusable_viewer_assets(viewer_root):
         print("No reusable viewer assets detected. Starting manual asset creation runtime.")
@@ -469,6 +472,7 @@ def htmlViewer(df=9,obs=9,dfxy=9):
             print("Manual asset creation did not produce reusable viewer assets. Returning without launching HTML viewer.")
             return(df,obs,dfxy)
         viewer_context["seed_viewer_path"] = str(built_seed)
+        viewer_context["seed_viewer_just_built"] = True
         print("Manual asset creation finished. Continuing to HTML generation.")
     mailbox = _ensure_roi_mailbox_session(current)
     roi_mailbox = {
@@ -2016,10 +2020,7 @@ def navigate(path,text="send blank to go back to parent directory, send 'all' to
     if len(path) == 2 and path[1] == ':':
         path = path + '\\'
 
-    if sbt == True:
-        of = sortByTime(os.listdir(path),path=path)
-    else:
-        of = sorted(os.listdir(path))
+    of = sorted(os.listdir(path))
 
     folder = []
     swi = 0
