@@ -77,10 +77,28 @@ allcolors, orthoType7, orthogonal7, combat1, napari7, orthoType5, cmifAnalysis49
 '''
 
 
-DATAFOLDER =  os.getcwd()
+def _resolve_initial_data_folder():
+    """Pick a data folder for loadLast / preload at startup.
+
+    Priority:
+    1. sys.argv[1] if it is an existing directory containing *_df.csv files.
+    2. The current working directory (original behaviour).
+    """
+    cwd = os.getcwd().replace("\\", "/")
+    if len(sys.argv) > 1:
+        candidate = sys.argv[1].strip()
+        if candidate and os.path.isdir(candidate):
+            candidate = os.path.abspath(candidate).replace("\\", "/")
+            try:
+                if any(f.endswith("_df.csv") for f in os.listdir(candidate)):
+                    return candidate
+            except OSError:
+                pass
+    return cwd
+
+
+DATAFOLDER = _resolve_initial_data_folder()
 SAVEFOLDER = DATAFOLDER
-DATAFOLDER = DATAFOLDER.replace("\\","/")
-SAVEFOLDER = SAVEFOLDER.replace("\\","/")
 TSTEM = 'u54_05'#'W_5_09_w9b'#'W_5_11_ctimp'#'ST_AD_04_allmarkers'#'ST_3_03_tumonly'#'WOO_5_07'#'WOO_nan_all+09-2020_3'#'MIT_2'#'WOO_03'#'06_MCF_both'#'march_KLF_07'#'agg_klf4_neighborhoods_typedbyslide5'#'agg_klg4_neighborhoods_nocellnsidk'#'2223_b_mw_1000_cbt'#'2333_b_raw'#'3011_b_mw1000'#'rna_3011_both_nodep'#'3011_test'#'rna_3011_both'#'86_GL_bigobs'#"91_GL"#'Aaron_topics_3011_2'#'rna_3011_cl'#'rna_2223A_4'#'rna_2223D_0'# 'rna_2223_combined_2'#'rna_2223A_3'#'11Bx1_A manual_99'#'BR301_tumonly_2'#"Agg_KLF_94"#'W_Or_93'#"Agg_KLF_95"#"z95_MCF7"#"KLF-Nov2"#"BR301_96"#"BC_93_tum"#'89_MS'#'zzz95_U54_IY'  #'86_pTMA1_6_98'#'zzz95_U54_IY'
 #agg_klg4_neighborhoods_typedbyslide4 has neighborhood info in df, removed for v5
 #'zzz95_U54'#'92_MS'#'KLF_Nov1'#'zzz92_U54'#'94_MS'#'KLF_Nov1'#'z91_MCF7-7'#'pTMA1_6pts_1'#'91_pTMA1'#'z95_MCF7'#'z98_MCF7'#'90_pt4076_pTMA1'#'93_b11_4076_pTMA1'#'93_pTMA1'#'94_pTMA1'#'95_GL'#'z3_GL631'#'93_BR301'#'198_MCF7_blank'#'199_MCF7'#'zzz_hta14'#'PIPELINE_bx2_95'#'zzzzzzz_pipeline_refined_99'#'PIPELINE_92'#'PIPELINE_hta14_bx1_99'#'bx2_training_set'#'PIPELINE_bx2_95'#'PIPELINE_92'#'PIPELINE_hta14_bx1_99'  #'zzzzzzz_pipeline_refined_99 #'bx2_training_set'#

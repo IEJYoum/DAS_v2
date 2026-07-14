@@ -132,6 +132,64 @@ def _optional_bool(value):
     return None
 
 
+def _is_foreign_path(text):
+    """True when *text* looks like it belongs to a different OS."""
+    text = str(text or "").strip().replace("\\", "/")
+    if text == "":
+        return False
+    if os.name != "nt":
+        # On Linux: drive letters and UNC paths are foreign
+        if re.match(r"^[A-Za-z]:/", text):
+            return True
+        # UNC-style //server/share (but not //mnt typo — that gets normalized)
+        if re.match(r"^//[A-Za-z]", text) and not text.startswith("//mnt"):
+            return True
+    else:
+        # On Windows: bare /mnt/ or /home/ are foreign
+        if text.startswith("/mnt/") or text.startswith("/home/"):
+            return True
+    return False
+
+
+def _strip_garbled_prefix(text):
+    """Strip a cwd prefix that os.path.abspath prepended to a foreign path.
+
+    e.g. /home/lab/youm/DAS_v2/Z:/Foo -> Z:/Foo  (then _is_foreign_path catches it)
+    """
+    text = str(text or "").strip()
+    if os.name == "nt":
+        return text
+    text = text.replace("\\", "/")
+    m = re.search(r"[A-Za-z]:/", text)
+    if m and m.start() > 0:
+        return text[m.start():]
+    return text
+
+
+def normalize_stored_path(path):
+    """Normalize a path from config or user input.
+
+    Returns the cleaned absolute path if it looks native to this OS.
+    Returns "" if the path looks foreign (e.g. Windows path on Linux).
+    """
+    raw = strip_quotes(str(path or "").strip())
+    if raw == "":
+        return ""
+    if os.name == "nt":
+        if _is_foreign_path(raw):
+            return ""
+        return os.path.abspath(os.path.normpath(raw))
+
+    cleaned = _strip_garbled_prefix(raw).replace("\\", "/")
+    if "\\" in raw and re.search(r"/{2,}[^/]+/", cleaned):
+        return ""
+    if _is_foreign_path(cleaned):
+        return ""
+    if cleaned.startswith("//mnt/"):
+        cleaned = cleaned[1:]
+    return os.path.abspath(os.path.normpath(cleaned))
+
+
 def prompt_per_slide_scene_viewers(obs):
     if not isinstance(obs, pd.DataFrame) or "slide_scene" not in obs.columns:
         return None
@@ -178,14 +236,14 @@ def normalize_viewer_context(context):
     if len(segmentation_roots) == 0 and single_seg != "":
         segmentation_roots = _normalize_path_list([single_seg], keep_missing=True)
     out = {
-        "data_folder": os.path.abspath(os.path.normpath(data_folder)) if data_folder != "" else "",
-        "build_folder": os.path.abspath(os.path.normpath(build_folder)) if build_folder != "" else "",
+        "data_folder": normalize_stored_path(data_folder) if data_folder != "" else "",
+        "build_folder": normalize_stored_path(build_folder) if build_folder != "" else "",
         "dataset_stem": dataset_stem,
-        "figure_folder": os.path.abspath(os.path.normpath(figure_folder)) if figure_folder != "" else "",
+        "figure_folder": normalize_stored_path(figure_folder) if figure_folder != "" else "",
         "segmentation_root": segmentation_roots[0] if len(segmentation_roots) > 0 else "",
         "segmentation_roots": segmentation_roots,
-        "viewer_root": os.path.abspath(os.path.normpath(viewer_root)) if viewer_root != "" else "",
-        "seed_viewer_path": os.path.abspath(os.path.normpath(seed_path)) if seed_path != "" else "",
+        "viewer_root": normalize_stored_path(viewer_root) if viewer_root != "" else "",
+        "seed_viewer_path": normalize_stored_path(seed_path) if seed_path != "" else "",
     }
     per_slide_scene_viewers = _optional_bool(context.get("per_slide_scene_viewers", None))
     if per_slide_scene_viewers is not None:
@@ -502,12 +560,16 @@ def reuse_seed_viewer_run(seed_viewer, seed_path, out_root):
 def prompt_output_root(default_root=None):
     if default_root is None or str(default_root).strip() == "":
         default_root = DEFAULT_OUT_ROOT
+    default_root = normalize_stored_path(default_root)
     while True:
         s = input("Output root folder [" + str(default_root) + "]: ").strip()
         if s == "":
             s = str(default_root)
         s = strip_quotes(s)
-        s = os.path.normpath(s)
+        s = normalize_stored_path(s)
+        if s == "":
+            print("Path is not usable on this system. Please enter a native path.")
+            continue
         try:
             os.makedirs(s, exist_ok=True)
             return s
@@ -535,7 +597,7 @@ def find_default_out_root(meta):
         inherited = load_inherited_project_value(data_folder, "viewer_root")
         if inherited != "":
             roots.append(inherited)
-        current = os.path.abspath(os.path.normpath(data_folder))
+        current = normalize_stored_path(data_folder)
         while True:
             roots.append(os.path.join(current, "HTMLs", "visu_html7"))
             parent = os.path.dirname(current)
@@ -556,7 +618,9 @@ def prompt_project_viewer_context(meta):
     data_folder = str(meta.get("data_folder", "") or meta.get("build_folder", "")).strip()
     if data_folder == "":
         return None
-    data_folder = os.path.abspath(os.path.normpath(data_folder))
+    data_folder = normalize_stored_path(data_folder)
+    if data_folder == "":
+        return None
     print("HTML viewer setup.")
     print("For each saved setting, press Enter or choose Use to keep the current value, or choose change to replace it.")
 
@@ -922,7 +986,17 @@ def load_project_config(folder):
 
 
 def load_inherited_project_value(folder, key):
-    return load_inherited_config_value(folder, key, filename=PROJECT_CONFIG_FILE)
+    value = load_inherited_config_value(folder, key, filename=PROJECT_CONFIG_FILE)
+    if str(key).strip().lower() in [
+        "figure_folder",
+        "viewer_root",
+        "segmentation_root",
+        "roi_mailbox_dir",
+        "data_folder",
+        "build_folder",
+    ]:
+        return normalize_stored_path(value) if str(value).strip() != "" else ""
+    return value
 
 
 def _parse_saved_path_list(text):
@@ -957,7 +1031,10 @@ def _normalize_path_list(values, *, keep_missing=False):
         if raw == "":
             i += 1
             continue
-        candidate = os.path.abspath(os.path.normpath(raw))
+        candidate = normalize_stored_path(raw)
+        if candidate == "":
+            i += 1
+            continue
         if (keep_missing or os.path.isdir(candidate) or os.path.isfile(candidate)) and candidate not in seen:
             seen.add(candidate)
             out.append(candidate)
@@ -966,7 +1043,9 @@ def _normalize_path_list(values, *, keep_missing=False):
 
 
 def load_inherited_project_segmentation_roots(folder):
-    current = os.path.abspath(os.path.normpath(str(folder)))
+    current = normalize_stored_path(folder)
+    if current == "":
+        return []
     while True:
         config = load_project_config(current)
         multi = _normalize_path_list(_parse_saved_path_list(config.get("segmentation_roots_json", "")))
@@ -1081,7 +1160,11 @@ def prompt_required_project_path(current_value, label, *, create=False, allow_bl
             print(label, "is required.")
             current_value = ""
             continue
-        selected = os.path.abspath(os.path.normpath(selected))
+        selected = normalize_stored_path(selected)
+        if selected == "":
+            print("Path is not usable on this system. Please enter a native path.")
+            current_value = ""
+            continue
         if create:
             try:
                 os.makedirs(selected, exist_ok=True)
@@ -1100,8 +1183,8 @@ def prompt_required_project_path(current_value, label, *, create=False, allow_bl
 def resolve_project_figure_folder(project_folder):
     configured = load_inherited_project_value(project_folder, "figure_folder")
     if configured != "":
-        return os.path.abspath(os.path.normpath(configured))
-    return os.path.abspath(os.path.join(project_folder, "temp"))
+        return normalize_stored_path(configured)
+    return normalize_stored_path(os.path.join(str(project_folder), "temp"))
 
 
 def ancestor_paths(path):
@@ -2211,7 +2294,10 @@ def prompt_segmentation_roots(meta, current_roots=None):
         )
         if raw == "":
             break
-        candidate = os.path.abspath(os.path.normpath(raw))
+        candidate = normalize_stored_path(raw)
+        if candidate == "":
+            print("Path is not usable on this system. Please enter a native path.")
+            continue
         if os.path.isdir(candidate) or os.path.isfile(candidate):
             if candidate not in out:
                 out.append(candidate)
