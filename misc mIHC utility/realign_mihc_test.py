@@ -2596,4 +2596,16 @@ def main(input_dir=None, output_dir=None):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="mIHC registration pipeline.")
+    parser.add_argument("--input-dir", type=Path, default=None,
+                        help="Folder containing SVS files (overrides INPUT_DIR constant).")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="Root folder for registered output (overrides OUTPUT_DIR constant).")
+    parser.add_argument("--fixed-file-contains", default=None,
+                        help="Substring matching the fixed/reference SVS filename "
+                             "(overrides FIXED_FILE_CONTAINS constant).")
+    args = parser.parse_args()
+    if args.fixed_file_contains is not None:
+        FIXED_FILE_CONTAINS = args.fixed_file_contains
+    main(input_dir=args.input_dir, output_dir=args.output_dir)
