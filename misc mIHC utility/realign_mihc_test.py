@@ -105,11 +105,11 @@ MAKE_OVERLAY_PNGS = True
 # Multichannel OME is useful QC but memory-heavy because it combines all channels.
 # Set False to preserve the per-channel full-resolution OME outputs and skip the stack.
 MAKE_MULTICHANNEL_OME = True
-MAKE_REGISTERED_RGB_OME = True
+MAKE_REGISTERED_RGB_OME = False
 # SS AEC CMYK color deconvolution on the registered RGB OMEs: writes
 # {folder_name}_ss_deconv.ome.tiff matching SS_AEC_CMYK_ColorDeconNew.py.
 # Requires MAKE_REGISTERED_RGB_OME = True (reads from registered_rgb_ome/).
-MAKE_SS_DECONV_OME = True
+MAKE_SS_DECONV_OME = False
 
 
 def ome_metadata(axes, pixel_size_um, channel_names=None):
@@ -1850,12 +1850,12 @@ def registered_folder_matches_slide(folder_name, slide_name):
     return slide_key(slide_name) in keys
 
 
-def completed_output_has_registered_rgb(output_dir):
+def completed_output_has_multichannel_ome(output_dir):
     timing_path = output_dir / TIMING_TXT_NAME
     if not _exists(timing_path):
         return False
     text = _retry_io("read_text", timing_path, lambda: timing_path.read_text(encoding="utf-8"))
-    return "registered_rgb_ome" in text
+    return text.rstrip().endswith("Done!")
 
 
 def completed_output_for_slide(slide_dir, output_root):
@@ -1880,7 +1880,7 @@ def completed_output_for_slide(slide_dir, output_root):
 
     candidates = sorted(candidates, key=lambda path: _stat(path).st_mtime, reverse=True)
     for candidate in candidates:
-        if completed_output_has_registered_rgb(candidate):
+        if completed_output_has_multichannel_ome(candidate):
             return candidate
     return None
 
@@ -2542,6 +2542,11 @@ def run_one_slide(input_dir, output_dir):
     save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "complete", timings)
     add_timing(timings, output_dir, run_started, start_seconds, "complete", "save_config_txt", "complete", step_start)
     save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run_started, start_seconds, "complete", timings)
+    _timing_done_path = output_dir / TIMING_TXT_NAME
+    def _write_done():
+        with _timing_done_path.open("a", encoding="utf-8") as f:
+            f.write("Done!\n")
+    _retry_io("append_done_marker", _timing_done_path, _write_done)
     print("done")
 
 
@@ -2605,7 +2610,22 @@ if __name__ == "__main__":
     parser.add_argument("--fixed-file-contains", default=None,
                         help="Substring matching the fixed/reference SVS filename "
                              "(overrides FIXED_FILE_CONTAINS constant).")
+    parser.add_argument("--skip-completed-slides", action="store_true", default=None,
+                        help="Skip slide folders that already have a completed run "
+                             "(overrides SKIP_COMPLETED_SLIDES constant).")
+    parser.add_argument("--no-rgb-ome", action="store_true", default=False,
+                        help="Skip writing registered RGB OME-TIFFs "
+                             "(overrides MAKE_REGISTERED_RGB_OME constant).")
+    parser.add_argument("--no-ss-deconv", action="store_true", default=False,
+                        help="Skip SS AEC CMYK color deconvolution OME "
+                             "(overrides MAKE_SS_DECONV_OME constant).")
     args = parser.parse_args()
     if args.fixed_file_contains is not None:
         FIXED_FILE_CONTAINS = args.fixed_file_contains
+    if args.skip_completed_slides:
+        SKIP_COMPLETED_SLIDES = True
+    if args.no_rgb_ome:
+        MAKE_REGISTERED_RGB_OME = False
+    if args.no_ss_deconv:
+        MAKE_SS_DECONV_OME = False
     main(input_dir=args.input_dir, output_dir=args.output_dir)

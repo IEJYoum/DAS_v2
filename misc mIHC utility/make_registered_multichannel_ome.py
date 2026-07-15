@@ -267,7 +267,7 @@ def main(registered_dir=None, pixel_size_um=None):
     if registered_dir is None:
         registered_dir = latest_registered_dir()
     registered_dir = Path(registered_dir)
-    output_path = registered_dir / OUTPUT_PATH.name
+    output_path = registered_dir / (registered_dir.name + "_multichannel.ome.tiff")
     if pixel_size_um is None:
         pixel_size_um = DEFAULT_PIXEL_SIZE_UM
 
