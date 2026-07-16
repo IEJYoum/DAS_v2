@@ -120,8 +120,10 @@ def channel_name(path):
     stem = path.stem
     if stem.lower().endswith(".ome"):
         stem = stem[:-4]
-    stem = stem.replace("_reg_to_", "_to_")
-    stem = stem.replace("_fixed", "")
+    # Drop "_reg_to_<target>" suffix entirely; keep "_fixed" on the fixed channel
+    idx = stem.lower().find("_reg_to_")
+    if idx != -1:
+        stem = stem[:idx]
     return stem
 
 
@@ -267,7 +269,7 @@ def main(registered_dir=None, pixel_size_um=None):
     if registered_dir is None:
         registered_dir = latest_registered_dir()
     registered_dir = Path(registered_dir)
-    output_path = registered_dir / (registered_dir.name + "_multichannel.ome.tiff")
+    output_path = registered_dir / (registered_dir.parent.name + "_multichannel.ome.tiff")
     if pixel_size_um is None:
         pixel_size_um = DEFAULT_PIXEL_SIZE_UM
 

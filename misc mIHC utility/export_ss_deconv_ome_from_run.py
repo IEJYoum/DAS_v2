@@ -260,7 +260,7 @@ def main(registered_dir):
         print("SS deconv: no *_registered_rgb.ome.tiff files found in", rgb_dir)
         return
 
-    output_path = registered_dir / (registered_dir.name + OUTPUT_SUFFIX)
+    output_path = registered_dir / (registered_dir.parent.name + OUTPUT_SUFFIX)
     pixel_size_um = read_pixel_size_from_config(registered_dir)
 
     names = [channel_name_from_path(p) for p in paths]

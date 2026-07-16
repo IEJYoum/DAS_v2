@@ -211,10 +211,43 @@ def downsample_for_registration(image, scale):
     raise ValueError("unknown DOWNSAMPLE_MODE: " + str(DOWNSAMPLE_MODE))
 
 
+def logical_svs_stem(path):
+    return re.sub(r"-\d{3}$", "", Path(path).stem)
+
+
+def logical_svs_name(path):
+    return logical_svs_stem(path) + Path(path).suffix
+
+
+def check_unique_logical_svs_stems(paths):
+    groups = {}
+    for path in paths:
+        key = logical_svs_stem(path).lower()
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(path)
+
+    duplicate_lines = []
+    for key in sorted(groups):
+        group = groups[key]
+        if len(group) > 1:
+            logical_stem = logical_svs_stem(group[0])
+            raw_names = ", ".join(path.name for path in sorted(group, key=lambda p: p.name.lower()))
+            duplicate_lines.append(logical_stem + ": " + raw_names)
+
+    if len(duplicate_lines) > 0:
+        raise ValueError(
+            "multiple SVS files map to the same logical stem; "
+            "remove duplicates before running. "
+            + " | ".join(duplicate_lines)
+        )
+
+
 def choose_fixed_file(paths):
+    check_unique_logical_svs_stems(paths)
     matches = []
     for path in paths:
-        if FIXED_FILE_CONTAINS.lower() in path.name.lower():
+        if FIXED_FILE_CONTAINS.lower() in logical_svs_name(path).lower():
             matches.append(path)
     if len(matches) != 1:
         raise ValueError("expected exactly one fixed file, found " + str(len(matches)))
@@ -1780,8 +1813,8 @@ def fit_subpixel_translation(
 
 def output_path_for(output_dir, input_path, fixed_path):
     if input_path == fixed_path:
-        return output_dir / (input_path.stem + "_fixed.ome.tiff")
-    return output_dir / (input_path.stem + "_reg_to_" + fixed_path.stem + ".ome.tiff")
+        return output_dir / (logical_svs_stem(input_path) + "_fixed.ome.tiff")
+    return output_dir / (logical_svs_stem(input_path) + "_reg_to_" + logical_svs_stem(fixed_path) + ".ome.tiff")
 
 
 def next_output_dir(root):

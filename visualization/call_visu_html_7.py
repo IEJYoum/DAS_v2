@@ -2699,6 +2699,23 @@ def _validate_cached_overlay(path, expected_w, expected_h):
     return False
 
 
+def _seg_roots_cache_tag(seg_roots):
+    """Short legible tag identifying which segmentation roots were used.
+
+    Produces e.g. ``seg_40393_processed_a1b2c3d4`` so cached overlay
+    filenames are both human-readable and unique per seg-root set.
+    """
+    roots = _normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])
+    if len(roots) == 0:
+        return "noseg"
+    joined = "|".join(sorted(roots))
+    h = hashlib.md5(joined.encode("utf-8", errors="replace")).hexdigest()[:8]
+    # Use the last two path components of the first root for readability
+    parts = roots[0].replace("\\", "/").rstrip("/").split("/")
+    readable = "_".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "x")
+    return "seg_" + safe_tag(readable, 40) + "_" + h
+
+
 def render_point_subset_overlay(xvals, yvals, size, out_path):
     if len(xvals) == 0 or len(yvals) == 0:
         return False
@@ -2795,7 +2812,8 @@ def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_root
             slide_scene = scenes[0]
     subset_id = str(subset_option.get("id", "")).strip()
     scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
-    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96))
+    seg_tag = _seg_roots_cache_tag(seg_roots)
+    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
     seg_out_path = base + "__seg.png"
     centroid_out_path = base + "__centroid.png"
     expected_size = overlay_canvas_size(core, overlay_context, core_mask)
@@ -2855,7 +2873,8 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
             slide_scene = scenes[0]
     subset_id = str(subset_option.get("id", "")).strip()
     scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
-    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96))
+    seg_tag = _seg_roots_cache_tag(seg_roots)
+    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
     seg_out_path = base + "__seg.png"
     centroid_out_path = base + "__centroid.png"
 
