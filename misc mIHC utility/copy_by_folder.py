@@ -6,7 +6,7 @@ from datetime import datetime
 
 
 SOURCE_ROOT = r"V:\\"
-DESTINATION_ROOT = r"Z:\Multiplex_IHC_studies\Isaac_Youm\D8_Panel_StudySlides\Slides"
+DESTINATION_ROOT = r'Z:\Multiplex_IHC_studies\Isaac_Youm\TestData\29-002'# r"Z:\Multiplex_IHC_studies\Isaac_Youm\D8_Panel_StudySlides\Slides"
 #r"Z:\Multiplex_IHC_studies\Isaac_Youm\KateByrne_D8Panel_Practice_PDACctrl\Slides"
 FILENAME_PREFIX = "IY"
 OLDEST_DATE = "2026-06-23"

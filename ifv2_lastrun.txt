@@ -1,0 +1,1 @@
+[[11,[Area_cell,Area_cyto,Area_nuc,CAV1_,CD31_,CD90_,CK19_,CK5_,DAPI-9_,EGFR_,Ecad_,Ecc_cell,Ecc_nuc,Ki67_,Vim_,aSMA_,CD163_,CD44_,CD45_,CD4_,CD68_,CD8_,FoxP3_,],[Ki67_,]],[17,Primary Celltype,slide_scene,],[18,50.0,4,25,],[20,y,Primary Celltype,]]
