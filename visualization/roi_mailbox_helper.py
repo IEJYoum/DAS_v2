@@ -9,6 +9,36 @@ import sys
 ROI_MAILBOX_PREFIX = "ifa_roi_patch_"
 
 
+def _is_native_path(path):
+    """Reject foreign-OS paths so we never create phantom directory trees.
+
+    On Windows: require a drive letter (C:\\, Z:/) or UNC (\\\\server\\share).
+    On POSIX:   require an absolute POSIX path; reject drive letters and UNC.
+
+    NOTE for future work — a better solution would translate paths between OSes
+    using project_config.txt / project_config_posix.txt so a Linux-generated
+    viewer works natively on Windows.  That risks fragility if the two configs
+    point at different data versions.  Raise with the user before implementing.
+    """
+    p = str(path).strip()
+    if not p:
+        return False
+    if os.name == "nt":
+        # Windows: accept  Z:\...  Z:/...  \\server\share
+        if len(p) >= 2 and p[1] == ":" and p[0].isalpha():
+            return True
+        if p.startswith("\\\\"):
+            return True
+        return False
+    else:
+        # POSIX: accept /... but reject drive letters and UNC
+        if len(p) >= 2 and p[1] == ":" and p[0].isalpha():
+            return False
+        if p.startswith("\\\\"):
+            return False
+        return p.startswith("/")
+
+
 def next_roi_mailbox_patch_path(mailbox_dir):
     mailbox_dir = os.path.abspath(os.path.normpath(str(mailbox_dir)))
     os.makedirs(mailbox_dir, exist_ok=True)
@@ -85,6 +115,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(400)
             self._send_cors()
             self.end_headers()
+            return
+        if not _is_native_path(mailbox_dir):
+            self.send_response(400)
+            self._send_cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            body = json.dumps({"ok": False, "error": "mailbox_dir is a foreign-OS path"}).encode("utf-8")
+            self.wfile.write(body)
             return
         try:
             final_path = next_roi_mailbox_patch_path(mailbox_dir)
