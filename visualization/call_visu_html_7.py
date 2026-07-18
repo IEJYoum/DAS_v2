@@ -48,7 +48,6 @@ try:
 except Exception:
     das_io = None
 from shared_utils import (
-    load_inherited_config_value,
     load_project_config_values,
     save_project_config_updates,
 )
@@ -90,6 +89,7 @@ CORE_IN_NAME_RE = re.compile(r"(?<![A-Za-z])([A-Ia-i])0*(\d{1,3})$")
 TMA_RE = re.compile(r"(?i)(ptma\d+)")
 MISSING_LABELS = set(["", "nan", "none", "null", "na", "n/a"])
 PROJECT_CONFIG_FILE = "project_config.txt"
+PROJECT_CONFIG_POSIX_FILE = "project_config_posix.txt"
 DEFAULT_SUBSET_ID = "all_cells"
 MAX_SUBSET_OPTION_VALUES = 64
 ROI_RUNTIME_NAME = "roi_editor_runtime.html"
@@ -188,6 +188,43 @@ def normalize_stored_path(path):
     if cleaned.startswith("//mnt/"):
         cleaned = cleaned[1:]
     return os.path.abspath(os.path.normpath(cleaned))
+
+
+def project_config_filename():
+    return PROJECT_CONFIG_FILE if os.name == "nt" else PROJECT_CONFIG_POSIX_FILE
+
+
+def other_project_config_filename():
+    return PROJECT_CONFIG_POSIX_FILE if os.name == "nt" else PROJECT_CONFIG_FILE
+
+
+def project_config_os_label(filename):
+    return "Windows" if str(filename) == PROJECT_CONFIG_FILE else "Linux/Mac"
+
+
+_reported_other_os_project_configs = set()
+
+
+def report_other_os_project_config(folder):
+    current = normalize_stored_path(folder)
+    if current == "":
+        return
+    current_file = project_config_filename()
+    other_file = other_project_config_filename()
+    key = current + "|" + current_file
+    if key in _reported_other_os_project_configs:
+        return
+    _reported_other_os_project_configs.add(key)
+    current_path = os.path.join(current, current_file)
+    other_path = os.path.join(current, other_file)
+    if (not os.path.isfile(current_path)) and os.path.isfile(other_path):
+        print(
+            "Project was configured on",
+            project_config_os_label(other_file),
+            "but not",
+            project_config_os_label(current_file) + ".",
+            "Please configure paths for this system.",
+        )
 
 
 def prompt_per_slide_scene_viewers(obs):
@@ -621,6 +658,7 @@ def prompt_project_viewer_context(meta):
     data_folder = normalize_stored_path(data_folder)
     if data_folder == "":
         return None
+    report_other_os_project_config(data_folder)
     print("HTML viewer setup.")
     print("For each saved setting, press Enter or choose Use to keep the current value, or choose change to replace it.")
 
@@ -982,11 +1020,27 @@ def candidate_descendant_figure_roots(figure_folder, selection_stack, max_depth=
 
 
 def load_project_config(folder):
-    return load_project_config_values(folder, filename=PROJECT_CONFIG_FILE)
+    config = {}
+    if os.name != "nt":
+        # Keep OS-neutral subset/project metadata visible on Linux even when it
+        # was written by older Windows-oriented tools. POSIX path keys override.
+        config.update(load_project_config_values(folder, filename=PROJECT_CONFIG_FILE))
+    config.update(load_project_config_values(folder, filename=project_config_filename()))
+    return config
 
 
 def load_inherited_project_value(folder, key):
-    value = load_inherited_config_value(folder, key, filename=PROJECT_CONFIG_FILE)
+    current = normalize_stored_path(folder)
+    value = ""
+    while current != "":
+        config = load_project_config(current)
+        value = str(config.get(str(key), "")).strip()
+        if value != "":
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
     if str(key).strip().lower() in [
         "figure_folder",
         "viewer_root",
@@ -1065,7 +1119,7 @@ def save_project_config(folder, updates):
     save_project_config_updates(
         folder,
         updates,
-        filename=PROJECT_CONFIG_FILE,
+        filename=project_config_filename(),
         sort_key=natural_sort_key,
     )
 
@@ -2084,10 +2138,10 @@ def build_view_subset_options(view, subset_source):
     return out
 
 
-def build_subset_options_by_view(view_sets, obs, core_positions=None):
+def build_subset_options_by_view(view_sets, obs, core_positions=None, return_source=False):
     subset_source = precompute_subset_option_source(obs, core_positions=core_positions)
     if len(subset_source) == 0:
-        return {}
+        return ({}, subset_source) if return_source else {}
     out = {}
     i = 0
     while i < len(view_sets):
@@ -2096,7 +2150,41 @@ def build_subset_options_by_view(view_sets, obs, core_positions=None):
         if isinstance(options, dict) and len(options) > 0:
             out[str(view.get("id", ""))] = options
         i += 1
-    return out
+    return (out, subset_source) if return_source else out
+
+
+def report_project_subset_debug(view_sets, obs, core_positions, subset_source, subset_options):
+    try:
+        core_counts = {str(c): len(core_positions.get(c, [])) for c in core_positions}
+        hit_cores = [c for c in sorted(core_counts, key=natural_sort_key) if core_counts[c] > 0]
+        view_cores = []
+        for view in list(view_sets or []):
+            for core in list(view.get("core_names", [])):
+                core = str(core)
+                if core not in view_cores:
+                    view_cores.append(core)
+        source_cores = []
+        for cname in subset_source:
+            values_by_core = subset_source.get(cname, {}).get("values_by_core", {})
+            for core in values_by_core:
+                core = str(core)
+                if core not in source_cores:
+                    source_cores.append(core)
+        option_counts = {}
+        for view_id in subset_options:
+            n = 0
+            for group in subset_options.get(view_id, {}):
+                n += len(list(subset_options.get(view_id, {}).get(group, [])))
+            option_counts[str(view_id)] = n
+        print("Subset debug: obs rows", int(obs.shape[0]) if isinstance(obs, pd.DataFrame) else 0)
+        print("Subset debug: matched cores", len(hit_cores), "of", len(core_counts))
+        print("Subset debug: view cores:", ", ".join(view_cores[:8]) if len(view_cores) > 0 else "[none]")
+        print("Subset debug: position cores:", ", ".join([c + "=" + str(core_counts[c]) for c in hit_cores[:8]]) if len(hit_cores) > 0 else "[none]")
+        print("Subset debug: subset-source cores:", ", ".join(sorted(source_cores, key=natural_sort_key)[:8]) if len(source_cores) > 0 else "[none]")
+        print("Subset debug: candidate subset columns:", ", ".join(sorted(list(subset_source.keys()), key=natural_sort_key)[:12]) if len(subset_source) > 0 else "[none]")
+        print("Subset debug: per-view option counts:", option_counts if len(option_counts) > 0 else "{}")
+    except Exception as exc:
+        print("Subset debug: report failed:", exc)
 
 
 def derive_dataset_label(meta, obs):
@@ -2320,7 +2408,7 @@ def ensure_project_segmentation_root(meta):
         try:
             save_project_segmentation_roots(data_folder, selected)
         except Exception as exc:
-            print("Could not save segmentation folders to project_config.txt:", exc)
+            print("Could not save segmentation folders to " + project_config_filename() + ":", exc)
     _set_cvh_meta(
         segmentation_root=selected[0] if len(selected) > 0 else "",
         segmentation_roots=selected,
@@ -3232,7 +3320,7 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
 def build_roi_mailbox_payload(roi_mailbox):
     if not isinstance(roi_mailbox, dict):
         return {}
-    mailbox_dir = os.path.abspath(os.path.normpath(str(roi_mailbox.get("mailbox_dir", "")).strip())) if str(roi_mailbox.get("mailbox_dir", "")).strip() != "" else ""
+    mailbox_dir = normalize_stored_path(roi_mailbox.get("mailbox_dir", ""))
     patch_file_name = str(roi_mailbox.get("patch_file_name", "ifa_roi_patch.csv")).strip() or "ifa_roi_patch.csv"
     writer_url = str(roi_mailbox.get("writer_url", "")).strip()
     patch_path = os.path.join(mailbox_dir, patch_file_name) if mailbox_dir != "" else patch_file_name
@@ -3743,7 +3831,8 @@ def build_figure_entries_from_specs(specs, view, subset_option=None):
 def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions):
     ifprog.tick_progress("Project viewer: building subset options and overlays.")
     print("Project viewer: building subset options and overlays.")
-    subset_options = build_subset_options_by_view(view_sets, obs, core_positions=core_positions)
+    subset_options, subset_source = build_subset_options_by_view(view_sets, obs, core_positions=core_positions, return_source=True)
+    report_project_subset_debug(view_sets, obs, core_positions, subset_source, subset_options)
     subset_overlays, overlay_report = build_subset_overlay_specs(base_viewer, subset_options, obs, dfxy, meta, out_root, view_sets=view_sets)
     return subset_options, subset_overlays, overlay_report
 

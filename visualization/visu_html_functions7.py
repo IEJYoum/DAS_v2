@@ -4019,6 +4019,33 @@ function renderBatchList() {
     box.appendChild(div);
   }
 }
+function _buildMailboxCsv(column, assignments) {
+  const lines = ['column,index,label'];
+  for (const a of assignments) {
+    const col = String(column).replace(/"/g, '""');
+    const idx = String(a.index != null ? a.index : '').replace(/"/g, '""');
+    const lbl = String(a.label != null ? a.label : '').replace(/"/g, '""');
+    lines.push('"' + col + '","' + idx + '","' + lbl + '"');
+  }
+  return lines.join('\\n') + '\\n';
+}
+function _downloadCsvFallback(column, assignments) {
+  const csv = _buildMailboxCsv(column, assignments);
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ifa_roi_patch_' + ts + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function _mailboxFolderHint() {
+  const dir = String((DATA && DATA.mailbox_dir) || '').trim();
+  return dir ? ' Mailbox folder: ' + dir : '';
+}
 async function saveChanges() {
   const assignments = assignmentsFromAcceptedBatches();
   if (!state.targetColumn || assignments.length === 0) return;
@@ -4029,31 +4056,37 @@ async function saveChanges() {
     renderPhase();
     return;
   }
-  if (!DATA.writer_url) {
-    throw new Error('ROI mailbox writer is unavailable for this run.');
-  }
   state.saveInFlight = true;
   renderPhase();
-  const payload = {
-    mailbox_dir: String(DATA.mailbox_dir || ''),
-    column: String(state.targetColumn || ''),
-    assignments: assignments
-  };
-  try {
-    const res = await fetch(String(DATA.writer_url), {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) {
-      throw new Error('ROI mailbox save failed with status ' + String(res.status));
+  const column = String(state.targetColumn || '');
+  let saved = false;
+  if (DATA.writer_url) {
+    try {
+      const res = await fetch(String(DATA.writer_url), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          mailbox_dir: String(DATA.mailbox_dir || ''),
+          column: column,
+          assignments: assignments
+        })
+      });
+      if (res.ok) {
+        saved = true;
+        state.lastSavedSignature = saveSignature;
+        el('sessionStage').textContent = 'ROI changes saved to mailbox. Return to DAS to apply them to obs.';
+      }
+    } catch (e) {
+      // Server unreachable — fall through to download fallback
     }
-    state.lastSavedSignature = saveSignature;
-    el('sessionStage').textContent = 'ROI changes saved to mailbox. Return to DAS to apply them to obs.';
-  } finally {
-    state.saveInFlight = false;
-    renderPhase();
   }
+  if (!saved) {
+    _downloadCsvFallback(column, assignments);
+    state.lastSavedSignature = saveSignature;
+    el('sessionStage').textContent = 'CSV downloaded — place it in the mailbox folder to apply.' + _mailboxFolderHint();
+  }
+  state.saveInFlight = false;
+  renderPhase();
 }
 function normalizeColumnAndLabelInputs() {
   let column = String(el('columnInput').value || '').trim();
@@ -4132,7 +4165,7 @@ function renderHeader() {
     : 'Editing is limited: ' + String(DATA.trust_note || 'untrusted alignment');
   const saveMode = DATA.writer_url
     ? 'Save target: ' + String(DATA.mailbox_path || (String(DATA.mailbox_dir || '') + '/' + String(DATA.mailbox_file_name || 'ifa_roi_patch.csv')))
-    : 'Save back is unavailable in this run.';
+    : 'Mailbox server not running — CSV download available as fallback.';
   el('trustText').textContent = trust + ' ' + saveMode;
 }
 function renderColumns() {
@@ -4219,14 +4252,14 @@ function renderPhase() {
     el('sessionStage').textContent = 'Click to place polygon vertices. Click near the first point to close a polygon.';
   }
   if (state.saveInFlight) el('saveBtn').textContent = 'saving...';
-  else el('saveBtn').textContent = DATA.writer_url ? 'save to mailbox' : 'save unavailable';
+  else el('saveBtn').textContent = DATA.writer_url ? 'save to mailbox' : 'download CSV';
   const columnLocked = state.acceptedBatches.length > 0;
   el('columnInput').disabled = columnLocked;
   el('columnNextBtn').disabled = columnLocked || !String(el('columnInput').value || '').trim();
   el('undoBtn').disabled = (state.currentPoints.length === 0 && state.closedPolygons.length === 0);
   el('submitBtn').disabled = !(state.targetColumn && state.currentLabel && state.closedPolygons.length > 0);
   el('labelNextBtn').disabled = !String(el('labelInput').value || '').trim();
-  el('saveBtn').disabled = !!state.saveInFlight || !(DATA.writer_url && state.targetColumn && assignmentsFromAcceptedBatches().length > 0);
+  el('saveBtn').disabled = !!state.saveInFlight || !(state.targetColumn && assignmentsFromAcceptedBatches().length > 0);
   renderHeader();
   renderBatchList();
 }
@@ -4811,7 +4844,7 @@ function renderMarkerControls() {
 function setButtonsDisabled(disabled) {
   el('plotBtn').disabled = !!disabled;
   el('previewBtn').disabled = !!disabled;
-  el('saveBtn').disabled = !!disabled || !DATA || !DATA.writer_url;
+  el('saveBtn').disabled = !!disabled || !DATA;
 }
 function renderStatus(text) {
   if (text) {
@@ -4821,7 +4854,7 @@ function renderStatus(text) {
   const th = currentThreshold();
   const positives = Number.isFinite(th) ? positiveRows().length : 0;
   const col = thresholdColumnName(state.xMarker);
-  const saveTarget = DATA && DATA.writer_url ? 'mailbox ready' : 'mailbox unavailable';
+  const saveTarget = DATA && DATA.writer_url ? 'mailbox ready' : 'CSV download ready';
   const scaleNote = state.logScatter ? 'scatter scale: log10(10x+1)' : 'scatter scale: raw';
   const displayTh = state.logScatter && Number.isFinite(th) && th >= 0 ? Math.round(Math.log10(10 * th + 1) * 1000) / 1000 : NaN;
   el('statusBox').textContent = [
@@ -4977,12 +5010,9 @@ function renderImagePanel() {
     img.src = absUrlForRel(base);
     inner.appendChild(img);
   }
-  for (const url of (DATA.overlay_layers || [])) {
-    const img = document.createElement('img');
-    img.className = 'overlayLayer';
-    img.src = absUrlForRel(url);
-    inner.appendChild(img);
-  }
+  // Threshold editor: skip segmentation overlay layers — use dots only.
+  // Seg outlines obscure the dot-based preview toggle. ROI editor has its own
+  // renderImagePanel that still loads overlay_layers.
   const canvas = document.createElement('canvas');
   canvas.id = 'previewLayer';
   canvas.className = 'canvasLayer';
@@ -5044,12 +5074,38 @@ function mailboxSaveSignature(assignments) {
     assignments: assignments
   });
 }
+function _buildMailboxCsv(column, assignments) {
+  const lines = ['column,index,label'];
+  for (const a of assignments) {
+    const col = String(column).replace(/"/g, '""');
+    const idx = String(a.index != null ? a.index : '').replace(/"/g, '""');
+    const lbl = String(a.label != null ? a.label : '').replace(/"/g, '""');
+    lines.push('"' + col + '","' + idx + '","' + lbl + '"');
+  }
+  return lines.join('\\n') + '\\n';
+}
+function _downloadCsvFallback(column, assignments) {
+  const csv = _buildMailboxCsv(column, assignments);
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ifa_roi_patch_' + ts + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function _mailboxFolderHint() {
+  const dir = String((DATA && DATA.mailbox_dir) || '').trim();
+  return dir ? ' Mailbox folder: ' + dir : '';
+}
 async function saveThreshold() {
   clearError();
   if (state.saveInFlight) return;
   const column = thresholdColumnName(state.xMarker);
   if (!state.xMarker || column === 'thresh_') throw new Error('threshold marker is not set');
-  if (!DATA.writer_url) throw new Error('ROI mailbox writer is unavailable for this run');
   const assignments = thresholdAssignments();
   if (assignments.length === 0) throw new Error('no rows are available to save');
   const signature = mailboxSaveSignature(assignments);
@@ -5060,23 +5116,34 @@ async function saveThreshold() {
   state.saveInFlight = true;
   setButtonsDisabled(true);
   renderStatus('Saving threshold assignments...');
-  try {
-    const res = await fetch(String(DATA.writer_url), {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        mailbox_dir: String(DATA.mailbox_dir || ''),
-        column: column,
-        assignments: assignments
-      })
-    });
-    if (!res.ok) throw new Error('threshold mailbox save failed with status ' + String(res.status));
-    state.lastSavedSignature = signature;
-    renderStatus('Threshold assignments saved to mailbox. Return to DAS to apply them to obs.');
-  } finally {
-    state.saveInFlight = false;
-    setButtonsDisabled(false);
+  let saved = false;
+  if (DATA.writer_url) {
+    try {
+      const res = await fetch(String(DATA.writer_url), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          mailbox_dir: String(DATA.mailbox_dir || ''),
+          column: column,
+          assignments: assignments
+        })
+      });
+      if (res.ok) {
+        saved = true;
+        state.lastSavedSignature = signature;
+        renderStatus('Threshold assignments saved to mailbox. Return to DAS to apply them to obs.');
+      }
+    } catch (e) {
+      // Server unreachable — fall through to download fallback
+    }
   }
+  if (!saved) {
+    _downloadCsvFallback(column, assignments);
+    state.lastSavedSignature = signature;
+    renderStatus('CSV downloaded — place it in the mailbox folder to apply.' + _mailboxFolderHint());
+  }
+  state.saveInFlight = false;
+  setButtonsDisabled(false);
 }
 function syncStateFromControls() {
   state.xMarker = String(el('xMarker').value || '');
