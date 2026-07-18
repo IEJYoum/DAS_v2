@@ -78,23 +78,76 @@ allcolors, orthoType7, orthogonal7, combat1, napari7, orthoType5, cmifAnalysis49
 '''
 
 
+def _folder_has_triplet(folder):
+    """True if *folder* contains at least one complete {stem}_df/_obs/_dfxy set."""
+    try:
+        files = os.listdir(folder)
+    except OSError:
+        return False
+    stems = set()
+    for f in files:
+        if f.endswith("_df.csv"):
+            stems.add(f[: -len("_df.csv")])
+    for s in stems:
+        if f"{s}_obs.csv" in files and f"{s}_dfxy.csv" in files:
+            return True
+    return False
+
+
+def _app_state_projects_file():
+    """Path to the projects.csv registry shared with controler.py."""
+    local = os.environ.get(
+        "LOCALAPPDATA",
+        str(Path.home() / "AppData" / "Local"),
+    )
+    return Path(local) / "IF_Analysis" / "New_DAS" / "projects.csv"
+
+
+def _resolve_data_folder_from_projects_csv():
+    """Return the most-recent valid data folder from the GUI registry, or None."""
+    pf = _app_state_projects_file()
+    if not pf.is_file():
+        return None
+    try:
+        with open(pf, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                folder = (row.get("data_folder") or "").strip()
+                if not folder:
+                    continue
+                try:
+                    resolved = str(Path(folder).expanduser().resolve())
+                except Exception:
+                    continue
+                if os.path.isdir(resolved) and _folder_has_triplet(resolved):
+                    return resolved.replace("\\", "/")
+    except Exception:
+        pass
+    return None
+
+
 def _resolve_initial_data_folder():
     """Pick a data folder for loadLast / preload at startup.
 
     Priority:
-    1. sys.argv[1] if it is an existing directory containing *_df.csv files.
-    2. The current working directory (original behaviour).
+    1. sys.argv[1] if it contains a valid triplet.
+    2. cwd if it contains a valid triplet.
+    3. Most recent entry in projects.csv (shared with controler GUI).
+    4. cwd fallback.
     """
     cwd = os.getcwd().replace("\\", "/")
     if len(sys.argv) > 1:
         candidate = sys.argv[1].strip()
         if candidate and os.path.isdir(candidate):
             candidate = os.path.abspath(candidate).replace("\\", "/")
-            try:
-                if any(f.endswith("_df.csv") for f in os.listdir(candidate)):
-                    return candidate
-            except OSError:
-                pass
+            if _folder_has_triplet(candidate):
+                return candidate
+    if _folder_has_triplet(cwd):
+        return cwd
+    from_registry = _resolve_data_folder_from_projects_csv()
+    if from_registry is not None:
+        print(f"Using recent GUI project: {from_registry}")
+        return from_registry
     return cwd
 
 
