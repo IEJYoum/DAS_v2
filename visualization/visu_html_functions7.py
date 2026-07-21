@@ -4494,10 +4494,13 @@ def write_thresh_runtime_html(outdir):
     background: #07090c;
     overflow: hidden;
   }
-  #scatterCanvas {
+  #scatterCanvas, #histCanvas {
     display: block;
     width: 100%;
     height: auto;
+  }
+  #histCanvas {
+    border-top: 1px solid rgba(255,255,255,0.10);
   }
   .stage {
     position: relative;
@@ -4620,6 +4623,7 @@ def write_thresh_runtime_html(outdir):
     </div>
     <div class="section scatterWrap">
       <canvas id="scatterCanvas" width="760" height="520"></canvas>
+      <canvas id="histCanvas" width="760" height="150"></canvas>
     </div>
     <div class="section">
       <div class="statusBox" id="statusBox">Initializing threshold editor...</div>
@@ -4774,6 +4778,14 @@ function requireThreshold() {
   }
   return th;
 }
+function scatterScaleSuffix() {
+  return state.logScatter ? ' log(100x+1)' : ' raw';
+}
+function displayValue(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return NaN;
+  return state.logScatter ? (n >= 0 ? Math.log(100 * n + 1) : NaN) : n;
+}
 function stageDims() {
   const w = Math.max(1, Number(DATA.width || 1024));
   const h = Math.max(1, Number(DATA.height || 1024));
@@ -4855,8 +4867,8 @@ function renderStatus(text) {
   const positives = Number.isFinite(th) ? positiveRows().length : 0;
   const col = thresholdColumnName(state.xMarker);
   const saveTarget = DATA && DATA.writer_url ? 'mailbox ready' : 'CSV download ready';
-  const scaleNote = state.logScatter ? 'scatter scale: log10(10x+1)' : 'scatter scale: raw';
-  const displayTh = state.logScatter && Number.isFinite(th) && th >= 0 ? Math.round(Math.log10(10 * th + 1) * 1000) / 1000 : NaN;
+  const scaleNote = 'scatter scale:' + scatterScaleSuffix();
+  const displayTh = Number.isFinite(th) ? Math.round(displayValue(th) * 1000) / 1000 : NaN;
   el('statusBox').textContent = [
     'column: ' + col,
     'threshold: ' + (Number.isFinite(th) ? String(th) : '(not numeric)'),
@@ -4865,15 +4877,78 @@ function renderStatus(text) {
     saveTarget
   ].join('\\n');
 }
+function clearHistogram(message) {
+  const canvas = el('histCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#07090c';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (message) {
+    ctx.fillStyle = '#eef1f4';
+    ctx.font = '12px Segoe UI, Arial, sans-serif';
+    ctx.fillText(String(message), 24, 28);
+  }
+}
+function drawHistogram(plotPts, xmin, xmax, thPlot) {
+  const canvas = el('histCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#07090c';
+  ctx.fillRect(0, 0, w, h);
+  if (!Array.isArray(plotPts) || plotPts.length === 0 || xmin === xmax) {
+    clearHistogram('No x-axis values for histogram.');
+    return;
+  }
+  const left = 58, right = 18, top = 16, bottom = 32;
+  const innerW = w - left - right;
+  const innerH = h - top - bottom;
+  const binCount = Math.max(12, Math.min(72, Math.round(innerW / 10)));
+  const bins = new Array(binCount).fill(0);
+  for (const p of plotPts) {
+    const raw = ((p.x - xmin) / (xmax - xmin)) * binCount;
+    const idx = Math.max(0, Math.min(binCount - 1, Math.floor(raw)));
+    bins[idx] += 1;
+  }
+  let maxBin = 1;
+  for (const count of bins) {
+    if (count > maxBin) maxBin = count;
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.34)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(left, top);
+  ctx.lineTo(left, h - bottom);
+  ctx.lineTo(w - right, h - bottom);
+  ctx.stroke();
+  for (let i = 0; i < bins.length; i += 1) {
+    const count = bins[i];
+    const barH = innerH * (count / maxBin);
+    const x0 = left + (i / binCount) * innerW;
+    const x1 = left + ((i + 1) / binCount) * innerW;
+    ctx.fillStyle = 'rgba(143,185,255,0.62)';
+    ctx.fillRect(x0 + 1, h - bottom - barH, Math.max(1, x1 - x0 - 2), barH);
+  }
+  function sx(v) { return left + ((v - xmin) / (xmax - xmin)) * innerW; }
+  const tx = sx(thPlot);
+  if (Number.isFinite(tx)) {
+    ctx.strokeStyle = '#79e2b3';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx, top);
+    ctx.lineTo(tx, h - bottom);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#eef1f4';
+  ctx.font = '12px Segoe UI, Arial, sans-serif';
+  ctx.fillText('x-axis histogram' + scatterScaleSuffix(), left, h - 10);
+}
 function drawScatter() {
   clearError();
   const th = requireThreshold();
-  const useLog = !!state.logScatter;
-  function displayValue(v) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return NaN;
-    return useLog ? (n >= 0 ? Math.log10(10 * n + 1) : NaN) : n;
-  }
   const thPlot = displayValue(th);
   if (!Number.isFinite(thPlot)) {
     throw new Error('log scatter display requires threshold >= 0');
@@ -4889,6 +4964,7 @@ function drawScatter() {
   if (pts.length === 0) {
     ctx.fillStyle = '#eef1f4';
     ctx.fillText('No numeric rows for selected markers.', 24, 34);
+    clearHistogram('No numeric rows for selected markers.');
     renderStatus('No numeric rows for selected markers.');
     return;
   }
@@ -4901,6 +4977,7 @@ function drawScatter() {
   if (plotPts.length === 0) {
     ctx.fillStyle = '#eef1f4';
     ctx.fillText('No rows can be displayed with the selected scatter scale.', 24, 34);
+    clearHistogram('No rows can be displayed with the selected scatter scale.');
     renderStatus('No rows can be displayed with the selected scatter scale.');
     return;
   }
@@ -4961,7 +5038,7 @@ function drawScatter() {
   ctx.stroke();
   ctx.fillStyle = '#eef1f4';
   ctx.font = '12px Segoe UI, Arial, sans-serif';
-  const scaleText = useLog ? ' log10(10x+1)' : ' raw';
+  const scaleText = scatterScaleSuffix();
   ctx.fillText(state.xMarker + scaleText, left, h - 18);
   ctx.save();
   ctx.translate(16, h - bottom);
@@ -4972,6 +5049,7 @@ function drawScatter() {
   ctx.fillText('density: blue low', w - 150, top + 14);
   ctx.fillStyle = '#ff6969';
   ctx.fillText('red high', w - 76, top + 14);
+  drawHistogram(plotPts, xmin, xmax, thPlot);
   state.plotted = true;
   renderStatus();
 }
@@ -5166,7 +5244,16 @@ function bindControls() {
   });
   el('thresholdInput').addEventListener('input', function() {
     syncStateFromControls();
-    renderStatus();
+    if (state.plotted) {
+      try {
+        drawScatter();
+      } catch (err) {
+        showError(String(err && err.message || err));
+        renderStatus(String(err && err.message || err));
+      }
+    } else {
+      renderStatus();
+    }
   });
   el('plotBtn').addEventListener('click', function() {
     try {
