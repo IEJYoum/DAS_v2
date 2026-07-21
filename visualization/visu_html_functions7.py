@@ -601,7 +601,7 @@ def build_legacy(grid2, outdir=None, norm_kw=None):
 
 
 def build_catalog(catalog, outdir=None, norm_kw=None):
-    run_name_hint = str(catalog.get("dataset_label", "") or catalog.get("viewer_filename_base", "")).strip()
+    run_name_hint = str(catalog.get("run_name_hint", "") or catalog.get("dataset_label", "") or catalog.get("viewer_filename_base", "")).strip()
     registry, run_dir, registry_path = prepare_run_context(outdir=outdir, norm_kw=norm_kw, run_name_hint=run_name_hint)
     if norm_kw is None:
         norm_kw = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0)
@@ -1263,7 +1263,8 @@ def build_viewer_from_seed(seed_viewer, catalog_patch=None, outdir=None, norm_kw
         seed_viewer = {}
     patch = catalog_patch if isinstance(catalog_patch, dict) else {}
     run_name_hint = str(
-        patch.get("dataset_label", "")
+        patch.get("run_name_hint", "")
+        or patch.get("dataset_label", "")
         or patch.get("viewer_filename_base", "")
         or seed_viewer.get("dataset_label", "")
         or seed_viewer.get("viewer_filename_base", "")

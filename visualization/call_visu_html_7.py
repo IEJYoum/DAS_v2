@@ -312,7 +312,7 @@ def main(df=9, obs=9, dfxy=9, *args, **kwargs):
         )
     if context_ok:
         if resolved is None:
-            resolved = prompt_project_viewer_context(meta)
+            resolved = prompt_project_viewer_context(meta, obs=obs)
         if resolved is not None:
             out = run_context_mode(df, obs, dfxy, resolved=resolved, roi_mailbox=roi_mailbox)
             if out is not None:
@@ -330,7 +330,7 @@ def main(df=9, obs=9, dfxy=9, *args, **kwargs):
         out_root = prompt_output_root(find_default_out_root(meta))
     else:
         print("Manual mode: using viewer assets/output folder:", out_root)
-    default_files, default_seed = discover_default_manual_filepaths(out_root)
+    default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
     filepaths = prompt_filepaths(default_items=default_files, default_label=default_seed)
     if len(filepaths) == 0:
         print("No filepaths provided. Returning.")
@@ -379,7 +379,7 @@ def run_manual_asset_creation(out_root, obs):
     else:
         print("Manual asset creation: using viewer assets/output folder:", out_root)
 
-    default_files, default_seed = discover_default_manual_filepaths(out_root)
+    default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
     filepaths = prompt_filepaths(default_items=default_files, default_label=default_seed)
     if len(filepaths) == 0:
         print("No filepaths provided. Returning without creating viewer assets.")
@@ -492,8 +492,8 @@ def build_core_tiles_from_asset_registry(out_root):
     return core_tiles
 
 
-def has_reusable_viewer_assets(out_root):
-    seed_path = discover_latest_seed_viewer(out_root)
+def has_reusable_viewer_assets(out_root, obs=None):
+    seed_path = discover_latest_seed_viewer(out_root, obs=obs)
     if seed_path not in [None, ""] and os.path.isfile(seed_path):
         return True
     core_tiles = build_core_tiles_from_asset_registry(out_root)
@@ -535,8 +535,8 @@ def prompt_filepaths(default_items=None, default_label=""):
     return out
 
 
-def discover_default_manual_filepaths(out_root):
-    seed_path = discover_latest_seed_viewer(out_root)
+def discover_default_manual_filepaths(out_root, obs=None):
+    seed_path = discover_latest_seed_viewer(out_root, obs=obs)
     if seed_path in [None, ""] or (not os.path.isfile(seed_path)):
         return [], ""
     seed_viewer = load_json_file(seed_path, default={})
@@ -651,7 +651,7 @@ def find_default_out_root(meta):
     return os.path.normpath(str(roots[0]))
 
 
-def prompt_project_viewer_context(meta):
+def prompt_project_viewer_context(meta, obs=None):
     data_folder = str(meta.get("data_folder", "") or meta.get("build_folder", "")).strip()
     if data_folder == "":
         return None
@@ -701,10 +701,14 @@ def prompt_project_viewer_context(meta):
     except Exception as exc:
         print("Could not save viewer project settings:", exc)
 
-    seed_path = discover_latest_seed_viewer(viewer_root)
+    seed_path = discover_latest_seed_viewer(viewer_root, obs=obs)
     use_existing_seed_viewer = None
     if seed_path == "":
-        print("No reusable viewer assets found under:", viewer_root)
+        any_seed = discover_latest_seed_viewer(viewer_root)
+        if any_seed != "":
+            print("No compatible reusable viewer_data.json found under:", viewer_root)
+        else:
+            print("No reusable viewer assets found under:", viewer_root)
     else:
         seed_name = os.path.basename(str(seed_path).strip())
         raw = strip_quotes(
@@ -751,7 +755,20 @@ def prompt_project_viewer_context(meta):
     }
 
 
-def discover_latest_seed_viewer(out_root):
+def seed_viewer_compatible_with_obs(seed_viewer, obs):
+    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
+    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
+        return False
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return True
+    if len(missing_obs_slide_scenes(seed_viewer, obs)) > 0:
+        return False
+    trimmed = trim_seed_viewer_to_obs(seed_viewer, obs)
+    trimmed_tiles = trimmed.get("core_tiles", {}) if isinstance(trimmed, dict) else {}
+    return isinstance(trimmed_tiles, dict) and len(trimmed_tiles) > 0
+
+
+def discover_latest_seed_viewer(out_root, obs=None):
     runs_dir = os.path.join(out_root, vhf.RUNS_DIRNAME)
     if not os.path.isdir(runs_dir):
         return ""
@@ -780,6 +797,11 @@ def discover_latest_seed_viewer(out_root):
     while i < len(dirs):
         candidate = os.path.join(dirs[i], vhf.VIEWER_DATA_FN)
         if os.path.isfile(candidate):
+            if obs is not None:
+                seed_viewer = load_json_file(candidate, default={})
+                if not seed_viewer_compatible_with_obs(seed_viewer, obs):
+                    i += 1
+                    continue
             return candidate
         i += 1
     return ""
@@ -4003,7 +4025,7 @@ def filter_tables_to_slide_scenes(df, obs, dfxy, slide_scenes):
     return build_df, build_obs, build_dfxy
 
 
-def _build_and_write_project_viewer(base_viewer, build_df, build_obs, build_dfxy, meta, out_root, roi_mailbox, provenance, update_meta=True):
+def _build_and_write_project_viewer(base_viewer, build_df, build_obs, build_dfxy, meta, out_root, roi_mailbox, provenance, update_meta=True, run_name_hint=""):
     ifprog.reset_progress(4, "Project viewer: preparing dataset overlay onto seed viewer.")
     try:
         seg_roots = resolve_segmentation_roots(meta)
@@ -4027,6 +4049,8 @@ def _build_and_write_project_viewer(base_viewer, build_df, build_obs, build_dfxy
         if catalog is None:
             print("Project viewer could not build a fresh catalog from the available reusable assets.")
             return None
+        if str(run_name_hint).strip() != "":
+            catalog["run_name_hint"] = str(run_name_hint).strip()
         overlay_report = dict(catalog.get("overlay_backend", {}))
         if int(overlay_report.get("centroid_count", 0)) > 0:
             scenes = list(overlay_report.get("centroid_scenes", []))
@@ -4092,7 +4116,7 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
         per_slide_scene_viewers = _optional_bool(resolved.get("per_slide_scene_viewers", None))
     else:
         out_root = prompt_output_root(find_default_out_root(meta))
-        default_seed = discover_latest_seed_viewer(out_root)
+        default_seed = discover_latest_seed_viewer(out_root, obs=obs)
         seed_path = prompt_seed_viewer_path(default_seed)
         seed_viewer_just_built = False
         use_existing_seed_viewer = None
@@ -4113,17 +4137,20 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
     if seed_path != "" and os.path.isfile(seed_path) and reuse_json_var:
         seed_viewer = load_json_file(seed_path, default={})
         if isinstance(seed_viewer, dict) and isinstance(seed_viewer.get("core_tiles"), dict):
-            trimmed_seed = trim_seed_viewer_to_obs(seed_viewer, obs)
-            if isinstance(trimmed_seed.get("core_tiles"), dict) and len(trimmed_seed.get("core_tiles", {})) > 0:
-                base_viewer = trimmed_seed
-                provenance = {
-                    "kind": "seed",
-                    "path": os.path.abspath(seed_path),
-                    "label": os.path.basename(os.path.dirname(os.path.abspath(seed_path))),
-                }
-                print("Project viewer: reusing compatible seed viewer structure.")
+            if seed_viewer_compatible_with_obs(seed_viewer, obs):
+                trimmed_seed = trim_seed_viewer_to_obs(seed_viewer, obs)
+                if isinstance(trimmed_seed.get("core_tiles"), dict) and len(trimmed_seed.get("core_tiles", {})) > 0:
+                    base_viewer = trimmed_seed
+                    provenance = {
+                        "kind": "seed",
+                        "path": os.path.abspath(seed_path),
+                        "label": os.path.basename(os.path.dirname(os.path.abspath(seed_path))),
+                    }
+                    print("Project viewer: reusing compatible seed viewer structure.")
+                else:
+                    print("Seed viewer does not match the current obs; trying reusable asset pool instead.")
             else:
-                print("Seed viewer does not match the current obs; trying reusable asset pool instead.")
+                print("Seed viewer does not fully cover the current obs; trying reusable asset pool instead.")
         else:
             print("Seed viewer data is invalid; trying reusable asset pool instead.")
     else:
@@ -4199,27 +4226,28 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
                 print("  Skipping", scene_val, "- no matching core tiles.")
                 scene_i += 1
                 continue
-            sub_out = os.path.join(out_root, safe_tag(scene_val, 80))
+            sub_run_hint = safe_tag(scene_val, 80)
             catalog = _build_and_write_project_viewer(
                 sub_viewer,
                 sub_df,
                 sub_obs,
                 sub_dfxy,
                 meta,
-                sub_out,
+                out_root,
                 roi_mailbox,
                 provenance,
                 update_meta=False,
+                run_name_hint=sub_run_hint,
             )
             if catalog is None:
                 print("  Skipping", scene_val, "- catalog build failed.")
             else:
                 built_count += 1
-                built_roots.append(os.path.abspath(sub_out))
-                latest_viewer_data = discover_latest_seed_viewer(sub_out)
-                latest_html = discover_latest_run_html(sub_out)
+                latest_viewer_data = discover_latest_seed_viewer(out_root)
+                latest_html = discover_latest_run_html(out_root)
                 if latest_viewer_data != "":
                     last_viewer_data = os.path.abspath(latest_viewer_data)
+                    built_roots.append(os.path.dirname(os.path.abspath(latest_viewer_data)))
                 if latest_html != "":
                     last_html = os.path.abspath(latest_html)
             scene_i += 1
@@ -4227,7 +4255,7 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
             print("No individual viewers were built.")
             return None
         _set_cvh_meta(
-            cvh_mode="project_per_roi",
+            cvh_mode="project_per_slide_scene",
             cvh_out_root=os.path.abspath(out_root),
             cvh_seed_viewer=str(provenance.get("path", "")).strip(),
             cvh_selection_view_count=built_count,

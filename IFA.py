@@ -605,7 +605,8 @@ def htmlViewer(df=9,obs=9,dfxy=9):
             "data_folder": current,
             "build_folder": current,
             "dataset_stem": os.path.basename(current),
-        }
+        },
+        obs=obs,
     )
     if not isinstance(viewer_context, dict):
         print("Could not resolve HTML viewer context from the current project.")
@@ -615,7 +616,7 @@ def htmlViewer(df=9,obs=9,dfxy=9):
         viewer_context["per_slide_scene_viewers"] = per_slide_scene_viewers
     viewer_root = str(viewer_context.get("viewer_root", "")).strip()
     transient_seed_viewer = ""
-    if not cvh.has_reusable_viewer_assets(viewer_root):
+    if not cvh.has_reusable_viewer_assets(viewer_root, obs=obs):
         print("No reusable viewer assets detected. Starting manual asset creation runtime.")
         built_seed = cvh.run_manual_asset_creation(viewer_root, obs)
         if str(built_seed).strip() == "" or (not os.path.isfile(str(built_seed))):
