@@ -773,6 +773,7 @@ def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
         "overlay_backend": catalog.get("overlay_backend", {}),
         "roi_data": catalog.get("roi_data", {}),
         "roi_mailbox": catalog.get("roi_mailbox", {}),
+        "threshold_store": catalog.get("threshold_store", {}),
         "core_meta": catalog.get("core_meta", {}),
         "groupings": catalog.get("groupings", {}),
         "view_sets": catalog.get("view_sets", []),
@@ -3105,9 +3106,24 @@ function currentThreshSnapshotForCore(core) {
     }
   }
   const mailbox = VIEWER.roi_mailbox || {};
+  const thresholdStore = VIEWER.threshold_store || {};
+  let roiId = '';
+  const coreToRoi = thresholdStore.core_to_roi_id || {};
+  if (coreToRoi && typeof coreToRoi === 'object') roiId = String(coreToRoi[String(core || '')] || '');
+  if (!roiId && payload.slide_scene) {
+    const roiIds = Array.isArray(thresholdStore.roi_ids) ? thresholdStore.roi_ids : [];
+    for (const candidate of roiIds) {
+      const text = String(candidate || '');
+      if (text && text.toLowerCase().endsWith(String(payload.slide_scene || '').toLowerCase())) {
+        roiId = text;
+        break;
+      }
+    }
+  }
   const payloadRel = String(payload.payload_rel || '');
   return {
     core: String(core || ''),
+    roi_id: roiId,
     slide_scene: String(payload.slide_scene || ''),
     width: Number(payload.width || 1024),
     height: Number(payload.height || 1024),
@@ -3131,6 +3147,7 @@ function currentThreshSnapshotForCore(core) {
     mailbox_file_name: String(mailbox.patch_file_name || 'ifa_roi_patch.csv'),
     mailbox_path: String(mailbox.patch_path || ''),
     writer_url: String(mailbox.writer_url || ''),
+    threshold_store: thresholdStore,
     snapshot_label: 'threshold snapshot from the main viewer at popup open'
   };
 }
@@ -3698,6 +3715,70 @@ def write_roi_runtime_html(outdir):
     padding: 10px;
     font-size: 12px;
     white-space: pre-wrap;
+  }
+  .applyPanel {
+    display: none;
+    max-height: 150px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 8px;
+    background: rgba(255,255,255,0.035);
+  }
+  .applyPanel.active {
+    display: block;
+  }
+  .applyTools {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .applyToggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .applyToggle input,
+  .roiCheck input {
+    width: auto;
+  }
+  .savedTableWrap {
+    max-height: 190px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255,255,255,0.025);
+  }
+  .savedTable {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .savedTable th,
+  .savedTable td {
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: 4px 6px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .savedTable th {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .savedTable .nan {
+    color: rgba(255,255,255,0.34);
+  }
+  .roiCheck {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    margin: 4px 0;
+    font-size: 12px;
+    color: var(--muted);
   }
   @media (max-width: 900px) {
     .main {
@@ -4603,8 +4684,18 @@ def write_thresh_runtime_html(outdir):
       <div class="btnbar">
         <button id="plotBtn" type="button">Plot</button>
         <button id="previewBtn" type="button">Preview</button>
-        <button id="saveBtn" type="button">Save</button>
+        <button id="saveMemoryBtn" type="button">Save to Memory</button>
+        <button id="saveBtn" type="button">Save to CSV</button>
+        <button id="loadThresholdsBtn" type="button">Load Thresholds...</button>
       </div>
+      <input id="thresholdFileInput" type="file" accept=".csv" style="display:none;">
+    </div>
+    <div class="section applyPanel" id="applyPanel">
+      <div class="label">Apply To ROIs</div>
+      <div class="applyTools">
+        <label class="applyToggle"><input id="applyAllToggle" type="checkbox"> All ROIs</label>
+      </div>
+      <div id="applyRoiList"></div>
     </div>
     <div class="section">
       <div class="label">Image Zoom</div>
@@ -4627,8 +4718,12 @@ def write_thresh_runtime_html(outdir):
       <canvas id="histCanvas" width="760" height="150"></canvas>
     </div>
     <div class="section">
-      <div class="statusBox" id="statusBox">Initializing threshold editor...</div>
+      <div class="statusBox" id="statusBox">Initializing threshold editor... loading payload</div>
       <div class="errorBox" id="errorBox" style="display:none;"></div>
+    </div>
+    <div class="section">
+      <div class="label">Saved Thresholds</div>
+      <div class="savedTableWrap" id="savedThresholdTable"></div>
     </div>
   </div>
   <div class="panel">
@@ -4641,6 +4736,7 @@ def write_thresh_runtime_html(outdir):
 let DATA = null;
 let ROWS = [];
 let fatalError = false;
+const LOG_SCALE_MULTIPLIER = 1000;
 const state = {
   xMarker: '',
   yMarker: '',
@@ -4652,7 +4748,8 @@ const state = {
   zoom: 1,
   baseStageWidth: 0,
   showOverlays: true,
-  logScatter: false
+  logScatter: false,
+  thresholdStore: null
 };
 function el(id) { return document.getElementById(id); }
 function esc(s) {
@@ -4723,6 +4820,7 @@ function loadExternalThreshRows(rel) {
   });
 }
 async function loadPayload() {
+  renderStatus('Initializing threshold editor... reading launch payload');
   const params = new URLSearchParams(window.location.search);
   const key = String(params.get('key') || '');
   if (!key) throw new Error('missing threshold payload key');
@@ -4730,6 +4828,7 @@ async function loadPayload() {
   if (!raw) throw new Error('threshold payload not found in localStorage');
   DATA = JSON.parse(raw);
   try { localStorage.removeItem(key); } catch (_err) {}
+  renderStatus('Initializing threshold editor... loading cell data');
   if (Array.isArray(DATA.rows)) ROWS = DATA.rows;
   else if (DATA.payload_rel) ROWS = await loadExternalThreshRows(DATA.payload_rel);
   else ROWS = [];
@@ -4744,6 +4843,83 @@ function markerValue(row, marker) {
   if (!Object.prototype.hasOwnProperty.call(expr, marker)) return NaN;
   const v = Number(expr[marker]);
   return Number.isFinite(v) ? v : NaN;
+}
+function thresholdStore() {
+  const store = DATA && DATA.threshold_store;
+  return store && typeof store === 'object' ? store : null;
+}
+function thresholdStoreActive() {
+  const store = thresholdStore();
+  return !!(store && String(store.mode || 'study_thresholds') === 'study_thresholds');
+}
+function currentRoiId() {
+  const store = thresholdStore();
+  const direct = String(DATA && DATA.roi_id || '').trim();
+  if (direct) return direct;
+  const coreMap = store && store.core_to_roi_id && typeof store.core_to_roi_id === 'object' ? store.core_to_roi_id : {};
+  const mapped = String(coreMap[String(DATA && DATA.core || '')] || '').trim();
+  if (mapped) return mapped;
+  const slideScene = String(DATA && DATA.slide_scene || '').trim();
+  const roiIds = Array.isArray(store && store.roi_ids) ? store.roi_ids.map(function(x) { return String(x || '').trim(); }) : [];
+  for (const roi of roiIds) {
+    if (roi && slideScene && roi.toLowerCase().endsWith(slideScene.toLowerCase())) return roi;
+  }
+  return slideScene;
+}
+function knownRoiIds() {
+  const store = thresholdStore();
+  return Array.isArray(store && store.roi_ids) ? store.roi_ids.map(function(x) { return String(x || '').trim(); }).filter(function(x) { return x !== ''; }) : [];
+}
+function resolveRoiId(rawRoi) {
+  const raw = String(rawRoi || '').trim();
+  if (!raw) return '';
+  const roiIds = knownRoiIds();
+  for (const roi of roiIds) {
+    if (roi === raw) return roi;
+  }
+  const matches = roiIds.filter(function(roi) {
+    return roi.toLowerCase().endsWith(raw.toLowerCase());
+  });
+  return matches.length === 1 ? matches[0] : raw;
+}
+function markerValueCaseInsensitive(byRoi, marker) {
+  if (!byRoi || typeof byRoi !== 'object') return NaN;
+  const target = String(marker || '');
+  if (Object.prototype.hasOwnProperty.call(byRoi, target)) {
+    const exact = Number(byRoi[target]);
+    if (Number.isFinite(exact)) return exact;
+  }
+  const lower = target.toLowerCase();
+  for (const key of Object.keys(byRoi)) {
+    if (String(key).toLowerCase() === lower) {
+      const v = Number(byRoi[key]);
+      if (Number.isFinite(v)) return v;
+    }
+  }
+  return NaN;
+}
+function thresholdValueFor(marker) {
+  const store = thresholdStore();
+  if (!store) return NaN;
+  const roiId = currentRoiId();
+  const working = store.working_thresholds && typeof store.working_thresholds === 'object' ? store.working_thresholds[roiId] : null;
+  const workingValue = markerValueCaseInsensitive(working, marker);
+  if (Number.isFinite(workingValue)) return workingValue;
+  const initial = store.initial_thresholds && typeof store.initial_thresholds === 'object' ? store.initial_thresholds[roiId] : null;
+  return markerValueCaseInsensitive(initial, marker);
+}
+function setThresholdForCurrentMarker() {
+  const stored = thresholdValueFor(state.xMarker);
+  if (Number.isFinite(stored)) el('thresholdInput').value = String(stored);
+  else el('thresholdInput').value = defaultThreshold(ROWS, state.xMarker);
+  state.threshold = currentThreshold();
+}
+function commitCurrentThresholdToLocalStore() {
+  if (!thresholdStoreActive()) return;
+  const marker = String(state.xMarker || '').trim();
+  const value = currentThreshold();
+  if (!marker || !Number.isFinite(value)) return;
+  updateThresholdStoreLayer('working_thresholds', marker, value, checkedApplyRois());
 }
 function usableRows() {
   const x = state.xMarker;
@@ -4767,6 +4943,95 @@ function defaultThreshold(rows, marker) {
   const idx = Math.max(0, Math.min(vals.length - 1, Math.floor(vals.length * 0.75)));
   return String(Math.round(vals[idx] * 1000) / 1000);
 }
+function csvRowsFromText(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+  const s = String(text || '');
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    const next = i + 1 < s.length ? s[i + 1] : '';
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        cell += '"';
+        i += 1;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cell += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else if (ch !== '\\r') {
+      cell += ch;
+    }
+  }
+  row.push(cell);
+  if (row.length > 1 || String(row[0] || '').trim() !== '') rows.push(row);
+  return rows;
+}
+function mergeThresholdTable(table) {
+  const store = thresholdStore();
+  if (!store) return 0;
+  if (!store.initial_thresholds || typeof store.initial_thresholds !== 'object') store.initial_thresholds = {};
+  let updated = 0;
+  if (!Array.isArray(table) || table.length < 2) return updated;
+  const header = table[0].map(function(x) { return String(x || '').trim(); });
+  const first = header[0].toLowerCase();
+  const second = header.length > 1 ? header[1].toLowerCase() : '';
+  if (second === 'markers' || first === 'markers' || header.slice(1).some(function(x) { return /^Nuclei_/i.test(x); })) {
+    const markerCol = second === 'markers' ? 1 : 0;
+    const roiStart = markerCol + 1;
+    for (let r = 1; r < table.length; r += 1) {
+      const marker = String((table[r] || [])[markerCol] || '').trim();
+      if (!marker || marker.toLowerCase() === 'area') continue;
+      for (let c = roiStart; c < header.length; c += 1) {
+        const roi = resolveRoiId(header[c]);
+        const v = Number((table[r] || [])[c]);
+        if (!roi || !Number.isFinite(v)) continue;
+        if (!store.initial_thresholds[roi]) store.initial_thresholds[roi] = {};
+        store.initial_thresholds[roi][marker] = v;
+        updated += 1;
+      }
+    }
+    return updated;
+  }
+  const imageCol = header.findIndex(function(x) { return x.toLowerCase() === 'image'; });
+  if (imageCol >= 0) {
+    for (let r = 1; r < table.length; r += 1) {
+      const roi = resolveRoiId((table[r] || [])[imageCol]);
+      if (!roi) continue;
+      if (!store.initial_thresholds[roi]) store.initial_thresholds[roi] = {};
+      for (let c = 0; c < header.length; c += 1) {
+        if (c === imageCol || header[c] === '') continue;
+        const v = Number((table[r] || [])[c]);
+        if (!Number.isFinite(v)) continue;
+        store.initial_thresholds[roi][header[c]] = v;
+        updated += 1;
+      }
+    }
+  }
+  return updated;
+}
+function loadedThresholdCountForCurrentRoi() {
+  const store = thresholdStore();
+  const byRoi = store && store.initial_thresholds && typeof store.initial_thresholds === 'object' ? store.initial_thresholds[currentRoiId()] : null;
+  if (!byRoi || typeof byRoi !== 'object') return 0;
+  let count = 0;
+  for (const marker of Object.keys(byRoi)) {
+    if (Number.isFinite(Number(byRoi[marker]))) count += 1;
+  }
+  return count;
+}
 function currentThreshold() {
   const v = Number(el('thresholdInput').value);
   if (!Number.isFinite(v)) return NaN;
@@ -4780,12 +5045,12 @@ function requireThreshold() {
   return th;
 }
 function scatterScaleSuffix() {
-  return state.logScatter ? ' log(100x+1)' : ' raw';
+  return state.logScatter ? ' log(1000x+1)' : ' raw';
 }
 function displayValue(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return NaN;
-  return state.logScatter ? (n >= 0 ? Math.log(100 * n + 1) : NaN) : n;
+  return state.logScatter ? (n >= 0 ? Math.log(LOG_SCALE_MULTIPLIER * n + 1) : NaN) : n;
 }
 function stageDims() {
   const w = Math.max(1, Number(DATA.width || 1024));
@@ -4852,11 +5117,13 @@ function renderMarkerControls() {
   state.yMarker = markers.includes(String(DATA.default_y_marker || '')) ? String(DATA.default_y_marker) : (markers[1] || state.xMarker || '');
   xsel.value = state.xMarker;
   ysel.value = state.yMarker;
-  if (!el('thresholdInput').value) el('thresholdInput').value = defaultThreshold(ROWS, state.xMarker);
+  setThresholdForCurrentMarker();
+  renderApplyPanel();
 }
 function setButtonsDisabled(disabled) {
   el('plotBtn').disabled = !!disabled;
   el('previewBtn').disabled = !!disabled;
+  el('saveMemoryBtn').disabled = !!disabled || !DATA;
   el('saveBtn').disabled = !!disabled || !DATA;
 }
 function renderStatus(text) {
@@ -4867,7 +5134,10 @@ function renderStatus(text) {
   const th = currentThreshold();
   const positives = Number.isFinite(th) ? positiveRows().length : 0;
   const col = thresholdColumnName(state.xMarker);
-  const saveTarget = DATA && DATA.writer_url ? 'mailbox ready' : 'CSV download ready';
+  const targets = [];
+  if (thresholdStoreActive()) targets.push('study thresholds');
+  if (DATA && DATA.writer_url) targets.push('mailbox');
+  const saveTarget = targets.length > 0 ? targets.join(' + ') + ' ready' : 'CSV download ready';
   const scaleNote = 'scatter scale:' + scatterScaleSuffix();
   const displayTh = Number.isFinite(th) ? Math.round(displayValue(th) * 1000) / 1000 : NaN;
   el('statusBox').textContent = [
@@ -4877,6 +5147,115 @@ function renderStatus(text) {
     'positive cells: ' + String(positives) + ' / ' + String(ROWS.length),
     saveTarget
   ].join('\\n');
+}
+function renderApplyPanel() {
+  const panel = el('applyPanel');
+  const list = el('applyRoiList');
+  if (!panel || !list) return;
+  const store = thresholdStore();
+  const active = thresholdStoreActive();
+  panel.className = active ? 'section applyPanel active' : 'section applyPanel';
+  list.innerHTML = '';
+  if (!active) {
+    const note = document.createElement('div');
+    note.className = 'small';
+    note.textContent = 'No study threshold store is available for this viewer.';
+    list.appendChild(note);
+    return;
+  }
+  const roiIds = Array.isArray(store.roi_ids) ? store.roi_ids.map(function(x) { return String(x || '').trim(); }).filter(function(x) { return x !== ''; }) : [];
+  const current = currentRoiId();
+  for (const roi of roiIds) {
+    const id = 'apply_' + roi.replace(/[^A-Za-z0-9_-]+/g, '_');
+    const label = document.createElement('label');
+    label.className = 'roiCheck';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = roi;
+    box.checked = roi === current || roiIds.length === 1;
+    box.id = id;
+    label.appendChild(box);
+    const span = document.createElement('span');
+    span.textContent = roi;
+    label.appendChild(span);
+    list.appendChild(label);
+  }
+  syncApplyToggles();
+}
+function syncApplyToggles() {
+  const boxes = Array.from(document.querySelectorAll('#applyRoiList input[type="checkbox"]'));
+  const allToggle = el('applyAllToggle');
+  if (!allToggle) return;
+  const checked = boxes.filter(function(box) { return box.checked; }).length;
+  allToggle.checked = boxes.length > 0 && checked === boxes.length;
+  allToggle.indeterminate = checked > 0 && checked < boxes.length;
+}
+function checkedApplyRois() {
+  const store = thresholdStore();
+  if (!thresholdStoreActive()) return [];
+  const out = [];
+  for (const box of document.querySelectorAll('#applyRoiList input[type="checkbox"]')) {
+    if (box.checked && String(box.value || '').trim() !== '') out.push(String(box.value).trim());
+  }
+  if (out.length === 0) {
+    const current = currentRoiId();
+    if (current) out.push(current);
+  }
+  if (out.length === 0 && Array.isArray(store.roi_ids) && store.roi_ids.length > 0) out.push(String(store.roi_ids[0]));
+  return out;
+}
+function updateThresholdStoreLayer(layerName, marker, threshold, roiIds) {
+  const store = thresholdStore();
+  if (!store) return;
+  const key = String(layerName || '');
+  if (!store[key] || typeof store[key] !== 'object') store[key] = {};
+  for (const roi of roiIds) {
+    if (!store[key][roi]) store[key][roi] = {};
+    store[key][roi][marker] = threshold;
+  }
+}
+function updateLocalThresholdStore(marker, threshold, roiIds) {
+  updateThresholdStoreLayer('working_thresholds', marker, threshold, roiIds);
+}
+function commitCurrentThresholdToSavedStore() {
+  if (!thresholdStoreActive()) return 0;
+  const marker = String(state.xMarker || '').trim();
+  const value = currentThreshold();
+  if (!marker || !Number.isFinite(value)) return 0;
+  const roiIds = checkedApplyRois();
+  updateThresholdStoreLayer('working_thresholds', marker, value, roiIds);
+  updateThresholdStoreLayer('saved_thresholds', marker, value, roiIds);
+  renderSavedThresholdTable();
+  return roiIds.length;
+}
+function savedThresholdValue(roiId, marker) {
+  const store = thresholdStore();
+  const saved = store && store.saved_thresholds && typeof store.saved_thresholds === 'object' ? store.saved_thresholds[roiId] : null;
+  return markerValueCaseInsensitive(saved, marker);
+}
+function renderSavedThresholdTable() {
+  const wrap = el('savedThresholdTable');
+  if (!wrap) return;
+  const markers = markerList();
+  const roiIds = knownRoiIds();
+  if (!thresholdStoreActive() || markers.length === 0 || roiIds.length === 0) {
+    wrap.innerHTML = '<div class="small">No saved threshold table is available.</div>';
+    return;
+  }
+  const parts = ['<table class="savedTable"><thead><tr><th>Marker</th>'];
+  for (const roi of roiIds) parts.push('<th>' + esc(roi) + '</th>');
+  parts.push('</tr></thead><tbody>');
+  for (const marker of markers) {
+    parts.push('<tr><td>' + esc(marker) + '</td>');
+    for (const roi of roiIds) {
+      const v = savedThresholdValue(roi, marker);
+      if (Number.isFinite(v)) parts.push('<td>' + esc(String(v)) + '</td>');
+      else parts.push('<td class="nan">NaN</td>');
+    }
+    parts.push('</tr>');
+  }
+  parts.push('</tbody></table>');
+  wrap.innerHTML = parts.join('');
 }
 function clearHistogram(message) {
   const canvas = el('histCanvas');
@@ -4907,7 +5286,7 @@ function drawHistogram(plotPts, xmin, xmax, thPlot) {
   const left = 58, right = 18, top = 16, bottom = 32;
   const innerW = w - left - right;
   const innerH = h - top - bottom;
-  const binCount = Math.max(12, Math.min(72, Math.round(innerW / 10)));
+  const binCount = Math.max(48, Math.min(288, Math.round(innerW / 2.5)));
   const bins = new Array(binCount).fill(0);
   for (const p of plotPts) {
     const raw = ((p.x - xmin) / (xmax - xmin)) * binCount;
@@ -4925,14 +5304,16 @@ function drawHistogram(plotPts, xmin, xmax, thPlot) {
   ctx.lineTo(left, h - bottom);
   ctx.lineTo(w - right, h - bottom);
   ctx.stroke();
+  ctx.strokeStyle = 'rgba(143,185,255,0.88)';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
   for (let i = 0; i < bins.length; i += 1) {
-    const count = bins[i];
-    const barH = innerH * (count / maxBin);
-    const x0 = left + (i / binCount) * innerW;
-    const x1 = left + ((i + 1) / binCount) * innerW;
-    ctx.fillStyle = 'rgba(143,185,255,0.62)';
-    ctx.fillRect(x0 + 1, h - bottom - barH, Math.max(1, x1 - x0 - 2), barH);
+    const x = left + ((i + 0.5) / binCount) * innerW;
+    const y = h - bottom - innerH * (bins[i] / maxBin);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
   }
+  ctx.stroke();
   function sx(v) { return left + ((v - xmin) / (xmax - xmin)) * innerW; }
   const tx = sx(thPlot);
   if (Number.isFinite(tx)) {
@@ -5180,22 +5561,124 @@ function _mailboxFolderHint() {
   const dir = String((DATA && DATA.mailbox_dir) || '').trim();
   return dir ? ' Mailbox folder: ' + dir : '';
 }
+function filteredStudyThresholds(applyTo) {
+  const store = thresholdStore();
+  const all = store && store.saved_thresholds && typeof store.saved_thresholds === 'object' ? store.saved_thresholds : {};
+  const out = {};
+  for (const roi of applyTo || []) {
+    const roiId = String(roi || '').trim();
+    const byMarker = all[roiId];
+    if (!roiId || !byMarker || typeof byMarker !== 'object') continue;
+    for (const marker of Object.keys(byMarker)) {
+      const value = Number(byMarker[marker]);
+      if (!String(marker || '').trim() || !Number.isFinite(value)) continue;
+      if (!out[roiId]) out[roiId] = {};
+      out[roiId][marker] = value;
+    }
+  }
+  return out;
+}
+function _buildStudyThresholdCsv(thresholds) {
+  const safe = function(v) { return String(v == null ? '' : v).replace(/"/g, '""'); };
+  const roiIds = Object.keys(thresholds || {});
+  const markerSeen = {};
+  const markers = [];
+  for (const roi of roiIds) {
+    const byMarker = thresholds[roi] || {};
+    for (const marker of Object.keys(byMarker)) {
+      if (!markerSeen[marker]) {
+        markerSeen[marker] = true;
+        markers.push(marker);
+      }
+    }
+  }
+  markers.sort();
+  const lines = [];
+  lines.push(['', 'Markers'].concat(roiIds).map(function(x) { return '"' + safe(x) + '"'; }).join(','));
+  for (const marker of markers) {
+    const row = ['', marker];
+    for (const roi of roiIds) row.push(Object.prototype.hasOwnProperty.call(thresholds[roi] || {}, marker) ? thresholds[roi][marker] : '');
+    lines.push(row.map(function(x) { return '"' + safe(x) + '"'; }).join(','));
+  }
+  return lines.join('\\n') + '\\n';
+}
+function _downloadThresholdFallback(thresholds) {
+  const csv = _buildStudyThresholdCsv(thresholds);
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'study_threshold_update_' + ts + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+async function saveStudyThreshold(applyTo) {
+  const store = thresholdStore();
+  if (!thresholdStoreActive()) return {status: 'skipped'};
+  const sourceRoi = currentRoiId();
+  const thresholds = filteredStudyThresholds(applyTo);
+  if (Object.keys(thresholds).length === 0) return {status: 'skipped'};
+  const writerUrl = String(store.writer_url || '').trim();
+  if (!writerUrl) {
+    _downloadThresholdFallback(thresholds);
+    return {status: 'downloaded'};
+  }
+  const res = await fetch(writerUrl, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      study_thresholds_path: String(store.study_thresholds_path || ''),
+      thresholds: thresholds,
+      source_roi: sourceRoi,
+    })
+  });
+  let payload = {};
+  try { payload = await res.json(); } catch (_err) { payload = {}; }
+  if (!res.ok || payload.ok === false) {
+    throw new Error(String(payload.error || ('study threshold save failed with status ' + String(res.status))));
+  }
+  return {status: 'saved', updated_cells: payload.updated_cells || []};
+}
 async function saveThreshold() {
   clearError();
   if (state.saveInFlight) return;
+  commitCurrentThresholdToLocalStore();
   const column = thresholdColumnName(state.xMarker);
   if (!state.xMarker || column === 'thresh_') throw new Error('threshold marker is not set');
   const assignments = thresholdAssignments();
   if (assignments.length === 0) throw new Error('no rows are available to save');
-  const signature = mailboxSaveSignature(assignments);
+  const applyTo = checkedApplyRois();
+  const rawThreshold = requireThreshold();
+  const signature = JSON.stringify({
+    mailbox: mailboxSaveSignature(assignments),
+    study: thresholdStoreActive() ? {marker: state.xMarker, threshold: String(rawThreshold), apply_to: applyTo} : null
+  });
   if (signature === state.lastSavedSignature) {
-    renderStatus('This threshold assignment was already saved to mailbox.');
+    renderStatus('This threshold assignment was already saved.');
     return;
   }
   state.saveInFlight = true;
   setButtonsDisabled(true);
   renderStatus('Saving threshold assignments...');
-  let saved = false;
+  let mailboxSaved = false;
+  let mailboxDownloaded = false;
+  let studySaved = false;
+  let studyDownloaded = false;
+  const errors = [];
+  if (thresholdStoreActive()) {
+    try {
+      const studyResult = await saveStudyThreshold(applyTo);
+      studySaved = studyResult.status === 'saved';
+      studyDownloaded = studyResult.status === 'downloaded';
+    } catch (e) {
+      _downloadThresholdFallback(filteredStudyThresholds(applyTo));
+      studyDownloaded = true;
+      errors.push(String(e && e.message || e));
+    }
+  }
   if (DATA.writer_url) {
     try {
       const res = await fetch(String(DATA.writer_url), {
@@ -5207,19 +5690,30 @@ async function saveThreshold() {
           assignments: assignments
         })
       });
-      if (res.ok) {
-        saved = true;
-        state.lastSavedSignature = signature;
-        renderStatus('Threshold assignments saved to mailbox. Return to DAS to apply them to obs.');
-      }
+      if (res.ok) mailboxSaved = true;
     } catch (e) {
-      // Server unreachable — fall through to download fallback
+      errors.push(String(e && e.message || e));
     }
   }
-  if (!saved) {
+  if (!mailboxSaved && DATA.writer_url) {
     _downloadCsvFallback(column, assignments);
+    mailboxDownloaded = true;
+  }
+  if (!mailboxSaved && !DATA.writer_url && !thresholdStoreActive()) {
+    _downloadCsvFallback(column, assignments);
+    mailboxDownloaded = true;
     state.lastSavedSignature = signature;
-    renderStatus('CSV downloaded — place it in the mailbox folder to apply.' + _mailboxFolderHint());
+    renderStatus('CSV downloaded - place it in the mailbox folder to apply.' + _mailboxFolderHint());
+  } else {
+    state.lastSavedSignature = signature;
+    const parts = [];
+    if (studySaved) parts.push('study thresholds saved');
+    if (studyDownloaded) parts.push('study threshold update downloaded');
+    if (mailboxSaved) parts.push('mailbox labels saved');
+    if (mailboxDownloaded) parts.push('mailbox labels downloaded');
+    if (errors.length > 0) parts.push('errors: ' + errors.join('; '));
+    if (parts.length === 0) parts.push('nothing saved');
+    renderStatus(parts.join('\\n'));
   }
   state.saveInFlight = false;
   setButtonsDisabled(false);
@@ -5231,8 +5725,9 @@ function syncStateFromControls() {
 }
 function bindControls() {
   el('xMarker').addEventListener('change', function() {
+    commitCurrentThresholdToLocalStore();
     syncStateFromControls();
-    el('thresholdInput').value = defaultThreshold(ROWS, state.xMarker);
+    setThresholdForCurrentMarker();
     state.plotted = false;
     state.previewed = false;
     drawScatter();
@@ -5274,6 +5769,16 @@ function bindControls() {
       renderStatus(String(err && err.message || err));
     }
   });
+  el('saveMemoryBtn').addEventListener('click', function() {
+    try {
+      syncStateFromControls();
+      const n = commitCurrentThresholdToSavedStore();
+      renderStatus('Saved threshold to memory for ' + String(n) + ' ROI(s).');
+    } catch (err) {
+      showError('Save to memory failed: ' + String(err && err.message || err));
+      renderStatus('Save to memory failed: ' + String(err && err.message || err));
+    }
+  });
   el('saveBtn').addEventListener('click', async function() {
     try {
       syncStateFromControls();
@@ -5292,6 +5797,43 @@ function bindControls() {
     state.showOverlays = !state.showOverlays;
     syncOverlayVisibility();
   });
+  el('loadThresholdsBtn').addEventListener('click', function() {
+    el('thresholdFileInput').click();
+  });
+  el('thresholdFileInput').addEventListener('change', function() {
+    const file = el('thresholdFileInput').files && el('thresholdFileInput').files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function() {
+      try {
+        commitCurrentThresholdToLocalStore();
+        const store = thresholdStore();
+        if (store) store.working_thresholds = {};
+        const n = mergeThresholdTable(csvRowsFromText(String(reader.result || '')));
+        setThresholdForCurrentMarker();
+        renderSavedThresholdTable();
+        drawScatter();
+        renderStatus('Loaded threshold values: ' + String(n) + '\\nCurrent ROI usable thresholds: ' + String(loadedThresholdCountForCurrentRoi()));
+      } catch (err) {
+        showError(String(err && err.message || err));
+        renderStatus(String(err && err.message || err));
+      }
+    };
+    reader.onerror = function() {
+      showError('Could not read threshold CSV.');
+      renderStatus('Could not read threshold CSV.');
+    };
+    reader.readAsText(file);
+    el('thresholdFileInput').value = '';
+  });
+  el('applyAllToggle').addEventListener('change', function() {
+    const boxes = Array.from(document.querySelectorAll('#applyRoiList input[type="checkbox"]'));
+    const checked = boxes.filter(function(box) { return box.checked; }).length;
+    const fill = checked < boxes.length;
+    for (const box of boxes) box.checked = fill;
+    syncApplyToggles();
+  });
+  el('applyRoiList').addEventListener('change', syncApplyToggles);
   el('scaleToggleBtn').addEventListener('click', function() {
     state.logScatter = !state.logScatter;
     syncScaleToggleLabel();
@@ -5310,6 +5852,7 @@ function bindControls() {
 }
 async function boot() {
   await loadPayload();
+  renderStatus('Initializing threshold editor... building controls');
   renderHeader();
   const markers = markerList();
   if (markers.length === 0) {
@@ -5322,10 +5865,14 @@ async function boot() {
   }
   renderMarkerControls();
   syncStateFromControls();
+  renderSavedThresholdTable();
+  renderStatus('Initializing threshold editor... loading image and overlays');
   renderImagePanel();
   bindControls();
   setButtonsDisabled(false);
+  renderStatus('Initializing threshold editor... drawing scatterplot');
   drawScatter();
+  renderStatus('Initializing threshold editor... drawing preview');
   drawPreviewOverlay();
 }
 window.addEventListener('error', function(evt) {

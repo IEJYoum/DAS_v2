@@ -1,0 +1,183 @@
+FCS replacement plan v0
+=======================
+
+Goal
+----
+
+Build a lab-native thresholding path that can replace the FCS Express threshold workflow without forking the viewer. There should be one threshold runtime and one viewer product. DAS and standalone entry paths differ only in IO/setup.
+
+Core contracts
+--------------
+
+- Saved numeric thresholds are always raw expression values.
+- Display transforms are visual only.
+- DAS mailbox remains the per-cell obs update path: column,index,label.
+- studythresholds.csv is the FCS-style numeric threshold store: marker x ROI.
+- When both mailbox and threshold_store are present, saving a threshold should attempt both outputs.
+- The standalone script touches only the playground/input/output paths it is given.
+- The playground Phase 1 contract is strict: Nuclei_*.csv ObjectNumber must match label_*.tif labels.
+
+Pass 0 - preflight and seams
+----------------------------
+
+Purpose: remove ambiguity before runtime changes.
+
+Work:
+- Trace the exact catalog/core_tiles shape expected by visu_html_functions7.build_catalog().
+- Confirm that a direct seed_viewer/core_tiles dict can replace manual asset prompts.
+- Confirm core key choice for standalone: probably 40442ROI01, with obs.slide_scene matching exactly.
+- Confirm prepare_run_context/build_catalog works from a standalone script with an explicit outdir.
+- Decide whether threshold writer route lives in roi_mailbox_helper.py. Current preference: yes, one server, separate route.
+
+Exit check:
+- A short note listing the exact dict shape the adapter will emit.
+
+Pass 1 - standalone IO adapter, no threshold_store yet
+-----------------------------------------------------
+
+Purpose: prove the native data can produce a normal spatial viewer.
+
+New file:
+- visualization/threshold_standalone_fcs.py
+
+Work:
+- Accept input root and output root.
+- Discover Nuclei_*.csv in the root.
+- Infer roi_id like Nuclei_40442ROI01 and slide_scene like 40442ROI01.
+- Find matching ROI## folder.
+- Find exactly one label_*.tif.
+- Find channel TIFFs, excluding label_*.tif and Tiff_*.tiff.
+- Build in-memory df/obs/dfxy:
+  - df: Intensity_MeanIntensity_* columns renamed to markers.
+  - obs: slide_scene, roi_id, ObjectNumber, Number_Object_Number, seg_label, cellid, AreaShape_Area.
+  - dfxy: DAPI_X/DAPI_Y or Location_Center_X/Location_Center_Y.
+  - index: globally unique, e.g. 40442ROI01_cell1.
+- Validate label TIFF overlap with ObjectNumber/seg_label.
+- Build seed_viewer/core_tiles directly.
+- Call the existing viewer builder.
+- Write a debug report with chosen files, marker count, object count, label count, overlap count, output viewer path.
+
+Exit check:
+- Open a generated viewer for Thresholding_Example ROI01.
+- Composite image appears.
+- ROI/threshold buttons appear.
+- Cell payload row count is 23,925.
+- Segmentation/dot overlay aligns.
+
+Pass 2 - threshold_store payload and UI gating
+----------------------------------------------
+
+Purpose: add FCS-style threshold state without disturbing DAS mailbox behavior.
+
+Work:
+- Add optional viewer_data.threshold_store:
+  - mode: study_thresholds
+  - study_thresholds_path
+  - writer_url
+  - roi_ids
+  - marker_list
+  - initial_thresholds
+- Have standalone adapter populate threshold_store.
+- Have currentThreshSnapshotForCore() pass threshold_store into the popup payload when present.
+- Add apply-to panel in thresh_editor_runtime.html:
+  - visible only when threshold_store exists
+  - current ROI checked by default
+  - select all / clear
+  - ROI ids from threshold_store.roi_ids
+- Update saveThreshold():
+  - if threshold_store exists, save marker + raw threshold + source ROI + apply_to.
+  - if mailbox exists, preserve current per-cell label save.
+  - if both exist, attempt both and report partial failures clearly.
+  - if neither exists, download a fallback threshold-update file, not ifa_roi_patch*.csv.
+
+Exit check:
+- DAS viewer without threshold_store behaves exactly as before.
+- Standalone viewer shows apply-to panel.
+- Saving in standalone does not try to create mailbox patches.
+
+Pass 3 - studythresholds writer
+-------------------------------
+
+Purpose: persist numeric thresholds in the FCS/table format.
+
+Likely file:
+- visualization/roi_mailbox_helper.py, adding a separate /study_threshold route.
+
+Work:
+- Add POST route for {study_thresholds_path, marker, threshold, source_roi, apply_to}.
+- Validate native path with existing foreign-OS guard logic.
+- Read existing studythresholds.csv if present.
+- Preserve existing marker row order and ROI column order when possible.
+- Add missing marker rows/ROI columns only when needed.
+- Preserve Area row if present; do not invent area behavior yet.
+- Write atomically via temporary file then replace.
+- Return saved path and updated cells in JSON.
+
+Exit check:
+- Saving ASMA for Nuclei_40442ROI01 updates the correct cell in studythresholds.csv.
+- Existing rows/columns are preserved.
+- CD94/DNA absence from KBPSGL1_V1_studythresholds.csv does not break other marker saves.
+
+Pass 4 - threshold reload
+-------------------------
+
+Purpose: allow resume/check/revise workflow.
+
+Work:
+- Load existing studythresholds.csv into threshold_store.initial_thresholds.
+- Support Model33_predictedThresholds.csv.csv as an optional starting table.
+- Normalize the two schemas:
+  - studythresholds: rows=Markers, columns=Nuclei_*.
+  - predicted: rows=Image, columns=markers.
+- Prepopulate thresholdInput for current marker/current ROI when a value exists.
+- Keep defaultThreshold() fallback when no existing value exists.
+
+Exit check:
+- Reopening viewer shows saved/predicted threshold for ROI01/marker.
+- Changing marker updates thresholdInput to that marker's saved value when available.
+
+Pass 5 - DAS integration
+------------------------
+
+Purpose: make the same threshold_store option available from the DAS path.
+
+Work:
+- Add a lightweight prompt/config path for studythresholds.csv in run_context_mode or upstream IFA handoff.
+- Populate viewer_data.threshold_store when a path is provided.
+- Keep roi_mailbox payload unchanged.
+- When both threshold_store and mailbox are present, one threshold save writes both numeric threshold table and obs labels.
+
+Exit check:
+- Existing DAS ROI threshold save still updates obs through mailbox.
+- With studythresholds.csv configured, the same save also updates the numeric threshold table.
+- Without studythresholds.csv configured, no new UI clutter appears.
+
+Pass 6 - display transform cleanup
+----------------------------------
+
+Purpose: improve threshold usability without affecting saved values.
+
+Work:
+- Add transform selector in threshold runtime: Raw / Log / Arcsinh.
+- Default standalone/FCS payloads to Arcsinh if it clearly improves 0-1 marker display.
+- Saved thresholds remain raw.
+- Histogram and threshold line follow the display transform.
+
+Exit check:
+- Scatter separation is visibly better on ROI01.
+- The raw threshold value saved to studythresholds.csv is unchanged by transform mode.
+
+Deferred
+--------
+
+- GatingCounts.csv output.
+- Area threshold behavior beyond preserving existing Area row.
+- Multi-marker colored segmentation overlays.
+- User-defined marker colors.
+- Dynamic channel colorization from grayscale assets.
+- Full real-folder discovery across multiple slides.
+
+Immediate next action
+---------------------
+
+Start Pass 0, then implement Pass 1 only. Do not touch threshold save logic until the standalone adapter can generate a correct spatial viewer for the playground ROI.

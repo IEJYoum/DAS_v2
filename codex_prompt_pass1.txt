@@ -1,0 +1,247 @@
+TASK: Implement Pass 1 of FCS_plan_v0.txt — standalone IO adapter
+================================================================
+
+Scope: ONE new file, visualization/threshold_standalone_fcs.py.
+Do NOT touch any existing files. Do NOT implement threshold_store,
+save logic, or UI changes — those are Pass 2+.
+
+Read FCS_plan_v0.txt for full context. Read discussion_FCS_v0.txt
+for design rationale. This prompt gives you the exact contracts
+the code must satisfy.
+
+
+CODING RULES
+-------------
+
+1. Plain functions that take arguments and return values. No classes.
+2. Every function has a docstring: one sentence saying what it returns.
+3. Every function validates its inputs at the top. If something is
+   wrong, raise ValueError with a message that names the bad value.
+   Never return None to signal failure — raise.
+4. Use only dicts, lists, and DataFrames. No custom objects.
+5. No optional/keyword-only parameters that change behavior.
+   If two modes need different logic, write two functions.
+6. Print a human-readable summary at each stage so the user can see
+   what was discovered, matched, and built.
+7. No wildcard imports. Import what you use.
+8. Use pathlib.Path for path operations, os.path only when the
+   existing codebase requires it.
+
+
+PLAYGROUND DATA
+---------------
+
+Location: Z:\Multiplex_IHC_studies\Isaac_Youm\Thresholding_Example
+
+Structure:
+  Nuclei_40442ROI01.csv          (23,925 rows × 24 cols)
+  Image_40442ROI01.csv           (CellProfiler image metadata)
+  ROI01/
+    V_reg_ASMA_ROI01.tif         (channel TIFF — one per marker)
+    V_reg_CD11B_ROI01.tif
+    ... (18 channel TIFs total)
+    label_Nuclei_40442ROI01.tif  (segmentation mask)
+    Tiff_40442ROI01.tiff         (multichannel composite — skip)
+
+Nuclei CSV columns:
+  ImageNumber, ObjectNumber, AreaShape_Area,
+  Intensity_MeanIntensity_ASMA, Intensity_MeanIntensity_CD11B, ...
+  Location_Center_X, Location_Center_Y, Number_Object_Number
+
+ObjectNumber values (1–23925) match the integer labels in label_*.tif.
+
+
+WHAT THE SCRIPT MUST DO
+-----------------------
+
+The script has one entry point:
+
+    def run(input_root, output_root):
+        """Build a spatial HTML viewer from CellProfiler output. Returns viewer_data dict."""
+
+It calls helper functions in this order:
+
+1. discover_roi_datasets(input_root) → list of dicts
+   - Glob for Nuclei_*.csv in input_root.
+   - For each, infer roi_id and slide_scene from the filename.
+     Nuclei_40442ROI01.csv → roi_id="Nuclei_40442ROI01", slide_scene="40442ROI01"
+   - Find the matching ROI## subfolder (case-insensitive).
+   - Find exactly one label_*.tif in that folder.
+   - Find channel TIFFs: all *.tif in that folder EXCLUDING label_*.tif
+     and Tiff_*.tiff (the multichannel composite).
+   - Return list of dicts:
+     {
+       "roi_id": "Nuclei_40442ROI01",
+       "slide_scene": "40442ROI01",
+       "nuclei_csv": Path("Z:/.../Nuclei_40442ROI01.csv"),
+       "label_tif": Path("Z:/.../ROI01/label_Nuclei_40442ROI01.tif"),
+       "channel_tifs": [Path("Z:/.../ROI01/V_reg_ASMA_ROI01.tif"), ...],
+       "roi_folder": Path("Z:/.../ROI01"),
+     }
+   - Raise ValueError if zero datasets found.
+   - Print summary: N datasets found, with roi_ids.
+
+2. build_triplet(dataset_dict) → (df, obs, dfxy)
+   - Read the Nuclei CSV.
+   - df: columns = markers extracted from Intensity_MeanIntensity_* columns.
+     Rename by stripping the prefix: Intensity_MeanIntensity_ASMA → ASMA.
+   - obs: columns = slide_scene, roi_id, ObjectNumber, Number_Object_Number,
+     AreaShape_Area, seg_label (copy of ObjectNumber), cellid.
+     cellid = f"{slide_scene}_cell{ObjectNumber}"
+   - dfxy: columns = Location_Center_X, Location_Center_Y.
+     (If DAPI_X/DAPI_Y exist, use those instead.)
+   - index for ALL THREE frames: cellid values (must be unique).
+   - Validate: len(df) == len(obs) == len(dfxy), index is unique.
+   - Print summary: N cells, M markers, XY column names.
+
+3. validate_label_overlap(dataset_dict, obs) → overlap_count
+   - Open label_tif with PIL/tifffile.
+   - Get unique nonzero labels from the TIFF.
+   - Compare to set(obs["ObjectNumber"].astype(int)).
+   - Print: N labels in TIFF, M ObjectNumbers in CSV, K overlap.
+   - Raise ValueError if overlap is zero.
+   - Return overlap count.
+
+4. build_catalog_for_dataset(dataset_dict, df, obs, dfxy, output_root) → catalog dict
+   - Determine core name: use parse_core_series convention.
+     slide_scene "40442ROI01" → core "A1" (ROI number becomes A+number).
+     Implementation: int(re.search(r"ROI0*(\d+)", slide_scene).group(1))
+     then core_name = "A" + str(that_int).
+   - Build the catalog dict (this is the critical contract):
+
+     catalog = {
+         "dataset_label": slide_scene,
+         "viewer_filename_base": slide_scene,
+         "run_name_hint": roi_id,
+         "core_tiles": {
+             core_name: [
+                 {
+                     "tile_kind": "composite",
+                     "core": core_name,
+                     "label": core_name,
+                     "asset_type_id": "composite:tiff_stack",
+                     "asset_type_label": "Composite (channel-selectable)",
+                     "tiff_paths": [str(p) for p in channel_tifs],
+                     "overlay_paths": [str(label_tif)],
+                     "figure_path": None,
+                     "source_paths": [str(p) for p in channel_tifs] + [str(label_tif)],
+                 }
+             ],
+         },
+         "roi_data": {},       # filled below
+         "roi_mailbox": {},
+         "subset_options": {},
+         "subset_overlays": {},
+         "overlay_backend": {},
+         "core_meta": {},
+         "groupings": {},
+         "view_sets": [],
+         "default_view_id": "",
+         "asset_type_catalog": {},
+     }
+
+   - Build roi_data using the EXISTING function:
+     from visualization.call_visu_html_7 import build_roi_data_for_seed
+     fake_seed = {"core_tiles": catalog["core_tiles"]}
+     roi_data = build_roi_data_for_seed(fake_seed, obs, dfxy, df=df, out_root=str(output_root))
+   - Validate roi_data is not empty. If empty, raise ValueError with
+     diagnostic info (core_name, slide_scene, obs.slide_scene.unique()).
+   - catalog["roi_data"] = roi_data
+   - Print summary: core_name, N cells in roi_data, has_expression_data.
+
+5. build_viewer(catalog, output_root) → viewer_data
+   - from visualization.visu_html_functions7 import build_catalog
+   - viewer_data = build_catalog(catalog, outdir=str(output_root))
+   - Print: viewer written to output_root.
+
+6. write_debug_report(output_root, datasets, viewer_data)
+   - Write a plain text file to output_root/fcs_standalone_report.txt.
+   - Contents: input root, output root, per-dataset summary (roi_id,
+     nuclei CSV path, channel count, label TIF, cell count, label
+     overlap count), viewer core count, has_expression_data, marker_list.
+
+7. run(input_root, output_root) orchestrates 1–6:
+   - datasets = discover_roi_datasets(input_root)
+   - For each dataset: build_triplet, validate_label_overlap, build_catalog_for_dataset
+   - For now (Pass 1) handle only the FIRST dataset. Multi-ROI is Pass 2+.
+     Print a note if len(datasets) > 1: "Found N ROI datasets, building viewer for first only."
+   - build_viewer(catalog, output_root)
+   - write_debug_report(output_root, datasets, viewer_data)
+   - Return viewer_data
+
+
+CORE NAME ↔ SLIDE_SCENE MATCHING
+---------------------------------
+
+This is the trickiest seam. Here's how the existing code resolves it:
+
+1. seed_core_slide_scene_map() extracts slide_scene from source_paths
+   using extract_slide_scene_from_path(). For playground paths like
+   Z:/.../Thresholding_Example/ROI01/V_reg_ASMA_ROI01.tif, this
+   returns "ROI01" (no numeric parent folder for slide ID).
+
+2. obs["slide_scene"] will be "40442ROI01" (from Nuclei CSV filename).
+
+3. build_core_position_index() first tries slide_scene match:
+   slide_scene_array == "ROI01" → 0 hits (obs has "40442ROI01").
+   Then falls back to core_array == "A1" → works, because
+   parse_core_series("40442ROI01") → A1.
+
+This fallback works correctly. Do NOT try to fix the mismatch by
+changing obs["slide_scene"] to "ROI01" — preserve the real value.
+The fallback is the designed behavior for this folder layout.
+
+
+EXIT CHECKS — verify all of these before declaring done
+-------------------------------------------------------
+
+Run the script against the playground data:
+  input_root  = Z:\Multiplex_IHC_studies\Isaac_Youm\Thresholding_Example
+  output_root = Z:\Multiplex_IHC_studies\Isaac_Youm\Thresholding_Example\output
+
+1. Script completes without error.
+2. output/viewer_runs/ contains a run folder with viewer_data.json.
+3. output/_asset_pool/ contains rendered channel PNGs.
+4. viewer_data.json has:
+   - core_tiles with key "A1" (or similar, matching parse_core_series output)
+   - roi_data.has_expression_data == true
+   - roi_data.cores["A1"].rows has 23,925 entries
+   - roi_data.marker_list contains the 18 markers
+5. fcs_standalone_report.txt exists with correct counts.
+6. Opening the viewer HTML in a browser shows:
+   - Composite image (channel-selectable)
+   - ROI button works (dot overlay or seg overlay aligns with cells)
+   - Thresh button works (histogram appears with expression data)
+
+
+IMPORT NOTES
+------------
+
+The script lives at visualization/threshold_standalone_fcs.py.
+It imports from sibling modules:
+  from visualization.call_visu_html_7 import build_roi_data_for_seed
+  from visualization.visu_html_functions7 import build_catalog
+
+If running as __main__, add the project root to sys.path:
+  if __name__ == "__main__":
+      import sys
+      sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+      from visualization.call_visu_html_7 import build_roi_data_for_seed
+      from visualization.visu_html_functions7 import build_catalog
+
+Add a __main__ block that takes input_root and output_root from
+sys.argv[1] and sys.argv[2], with sensible defaults pointing at
+the playground location for quick testing.
+
+
+THINGS NOT TO DO
+----------------
+
+- Do NOT implement threshold_store, threshold saving, or any UI changes.
+- Do NOT modify any existing files.
+- Do NOT add DAS/controler dependencies.
+- Do NOT handle multiple ROI datasets in one viewer (just take the first).
+- Do NOT add optional parameters that change behavior.
+- Do NOT catch and silence exceptions — let them propagate with context.
+- Do NOT use print() for errors — use raise ValueError().
+- Do NOT add type annotations beyond what's in docstrings.
