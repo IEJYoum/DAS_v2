@@ -4670,6 +4670,51 @@ def write_thresh_runtime_html(outdir):
     font-size: 12px;
     color: var(--muted);
   }
+  .savedTableWrap {
+    max-height: 260px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255,255,255,0.025);
+  }
+  .savedTable {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .savedTable th,
+  .savedTable td {
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: 4px 6px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .savedTable th {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .savedTable .nan {
+    color: rgba(255,255,255,0.34);
+  }
+  .overlayCtrl {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 6px;
+  }
+  .overlayCtrl input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+  }
+  .overlayCtrl input[type="color"] {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 3px;
+    background: transparent;
+    cursor: pointer;
+  }
   .statusBox {
     border: 1px solid rgba(255,255,255,0.10);
     background: rgba(255,255,255,0.035);
@@ -4799,6 +4844,7 @@ let SLOT_COLORS = [[255,60,60],[60,255,60],[80,140,255],[255,170,50]];
 let slotMarkers = [null, null, null, null];
 let slotNoneLocks = [false, false, false, false];
 let CELL_BOUNDARIES = null;
+let savedOverlayState = {};
 
 function cellIdToSegLabel(rowIndex) {
   const s = String(rowIndex || '');
@@ -5444,13 +5490,28 @@ function commitCurrentThresholdToSavedStore() {
   const roiIds = checkedApplyRois();
   updateThresholdStoreLayer('working_thresholds', marker, value, roiIds);
   updateThresholdStoreLayer('saved_thresholds', marker, value, roiIds);
+  const entry = ensureSavedOverlayEntry(marker, true);
+  entry.visible = true;
   renderSavedThresholdTable();
+  redrawAllSavedOverlays();
   return roiIds.length;
 }
 function savedThresholdValue(roiId, marker) {
   const store = thresholdStore();
   const saved = store && store.saved_thresholds && typeof store.saved_thresholds === 'object' ? store.saved_thresholds[roiId] : null;
   return markerValueCaseInsensitive(saved, marker);
+}
+function savedOverlayKey(marker) {
+  return canonicalMarkerName(marker);
+}
+function ensureSavedOverlayEntry(marker, visible) {
+  const key = savedOverlayKey(marker);
+  if (!savedOverlayState[key]) {
+    const DEFAULT_COLORS = ['#e06060','#60e060','#6090ff','#ffaa30','#e060e0','#60e0e0'];
+    const idx = Object.keys(savedOverlayState).length % DEFAULT_COLORS.length;
+    savedOverlayState[key] = { displayName: marker, visible: !!visible, color: DEFAULT_COLORS[idx] };
+  }
+  return savedOverlayState[key];
 }
 function renderSavedThresholdTable() {
   const wrap = el('savedThresholdTable');
@@ -5461,8 +5522,11 @@ function renderSavedThresholdTable() {
     wrap.innerHTML = '<div class="small">No saved threshold table is available.</div>';
     return;
   }
+  const activeRoi = currentRoiId();
+  const hasBoundaries = !!(CELL_BOUNDARIES && typeof CELL_BOUNDARIES === 'object');
   const parts = ['<table class="savedTable"><thead><tr><th>Marker</th>'];
   for (const roi of roiIds) parts.push('<th>' + esc(roi) + '</th>');
+  if (hasBoundaries) parts.push('<th>Overlay</th>');
   parts.push('</tr></thead><tbody>');
   for (const marker of markers) {
     parts.push('<tr><td>' + esc(marker) + '</td>');
@@ -5471,10 +5535,43 @@ function renderSavedThresholdTable() {
       if (Number.isFinite(v)) parts.push('<td>' + esc(String(v)) + '</td>');
       else parts.push('<td class="nan">NaN</td>');
     }
+    if (hasBoundaries) {
+      const activeVal = savedThresholdValue(activeRoi, marker);
+      if (Number.isFinite(activeVal)) {
+        const entry = ensureSavedOverlayEntry(marker, false);
+        const key = savedOverlayKey(marker);
+        const chk = entry.visible ? ' checked' : '';
+        parts.push('<td><span class="overlayCtrl">');
+        parts.push('<input type="checkbox" data-overlay-key="' + esc(key) + '"' + chk + '>');
+        parts.push('<input type="color" data-overlay-color-key="' + esc(key) + '" value="' + esc(entry.color) + '">');
+        parts.push('</span></td>');
+      } else {
+        parts.push('<td></td>');
+      }
+    }
     parts.push('</tr>');
   }
   parts.push('</tbody></table>');
+  if (!hasBoundaries) {
+    parts.push('<div class="small" style="margin-top:4px;">No segmentation data available for overlays.</div>');
+  }
   wrap.innerHTML = parts.join('');
+  const checkboxes = wrap.querySelectorAll('input[data-overlay-key]');
+  for (const cb of checkboxes) {
+    cb.addEventListener('change', function() {
+      const key = cb.getAttribute('data-overlay-key');
+      if (savedOverlayState[key]) savedOverlayState[key].visible = cb.checked;
+      redrawAllSavedOverlays();
+    });
+  }
+  const colorInputs = wrap.querySelectorAll('input[data-overlay-color-key]');
+  for (const ci of colorInputs) {
+    ci.addEventListener('input', function() {
+      const key = ci.getAttribute('data-overlay-color-key');
+      if (savedOverlayState[key]) savedOverlayState[key].color = ci.value;
+      redrawAllSavedOverlays();
+    });
+  }
 }
 function clearHistogram(message) {
   const canvas = el('histCanvas');
@@ -5670,6 +5767,7 @@ function renderImagePanel() {
   applyStageZoom();
   inner.innerHTML = '';
   const allChans = Array.isArray(DATA.all_channels) ? DATA.all_channels : [];
+  const explicitAllSlotsOff = allChans.length > 0 && slotMarkers.every(function(mk) { return !mk; });
   let rendered = false;
   for (let i = 0; i < SLOT_COLORS.length; i++) {
     const mk = slotMarkers[i];
@@ -5690,7 +5788,7 @@ function renderImagePanel() {
     inner.appendChild(lay);
     rendered = true;
   }
-  if (!rendered) {
+  if (!rendered && !explicitAllSlotsOff) {
     const base = DATA.base_layer && DATA.base_layer.url ? DATA.base_layer.url : '';
     if (base) {
       const img = h('img', {'class': 'imgLayer', 'src': absUrlForRel(base)});
@@ -5703,7 +5801,49 @@ function renderImagePanel() {
   canvas.width = dims[0];
   canvas.height = dims[1];
   inner.appendChild(canvas);
+  const savedCanvas = document.createElement('canvas');
+  savedCanvas.id = 'savedOverlayLayer';
+  savedCanvas.className = 'canvasLayer';
+  savedCanvas.width = dims[0];
+  savedCanvas.height = dims[1];
+  inner.appendChild(savedCanvas);
   syncOverlayVisibility();
+  redrawAllSavedOverlays();
+  if (state.previewed) drawPreviewOverlay();
+}
+function parseHexColor(hex) {
+  const h = String(hex || '').replace(/^#/, '');
+  if (h.length < 6) return [200, 200, 200];
+  return [parseInt(h.substring(0, 2), 16) || 0, parseInt(h.substring(2, 4), 16) || 0, parseInt(h.substring(4, 6), 16) || 0];
+}
+function drawBoundaryPixels(imgData, marker, threshold, r, g, b, alpha) {
+  if (!CELL_BOUNDARIES || typeof CELL_BOUNDARIES !== 'object') return;
+  const w = imgData.width;
+  const ht = imgData.height;
+  const data = imgData.data;
+  for (const row of ROWS) {
+    const v = markerValue(row, marker);
+    if (!Number.isFinite(v) || v <= threshold) continue;
+    const segId = cellIdToSegLabel(row.row_index);
+    if (segId === null) continue;
+    const coords = CELL_BOUNDARIES[String(segId)];
+    if (!coords || !coords.length) continue;
+    for (let k = 0; k < coords.length; k += 2) {
+      const px = coords[k];
+      const py = coords[k + 1];
+      if (px < 0 || py < 0 || px >= w || py >= ht) continue;
+      const idx = (py * w + px) * 4;
+      const srcA = alpha / 255;
+      const dstA = data[idx + 3] / 255;
+      const outA = srcA + dstA * (1 - srcA);
+      if (outA > 0) {
+        data[idx]     = Math.round((r * srcA + data[idx]     * dstA * (1 - srcA)) / outA);
+        data[idx + 1] = Math.round((g * srcA + data[idx + 1] * dstA * (1 - srcA)) / outA);
+        data[idx + 2] = Math.round((b * srcA + data[idx + 2] * dstA * (1 - srcA)) / outA);
+        data[idx + 3] = Math.round(outA * 255);
+      }
+    }
+  }
 }
 function drawPreviewOverlay() {
   clearError();
@@ -5715,33 +5855,18 @@ function drawPreviewOverlay() {
   if (canvas.height !== dims[1]) canvas.height = dims[1];
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const rows = positiveRows();
+  const th = currentThreshold();
+  const marker = String(state.xMarker || '').trim();
+  if (!Number.isFinite(th) || !marker) { state.previewed = true; renderStatus(); return; }
   if (CELL_BOUNDARIES && typeof CELL_BOUNDARIES === 'object') {
-    // Draw segmentation boundaries for positive cells
     const imgData = ctx.createImageData(canvas.width, canvas.height);
-    const data = imgData.data;
-    for (const row of rows) {
-      const segId = cellIdToSegLabel(row.row_index);
-      if (segId === null) continue;
-      const coords = CELL_BOUNDARIES[String(segId)];
-      if (!coords || !coords.length) continue;
-      for (let k = 0; k < coords.length; k += 2) {
-        const px = coords[k];
-        const py = coords[k + 1];
-        if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
-        const idx = (py * canvas.width + px) * 4;
-        data[idx] = 121;
-        data[idx + 1] = 226;
-        data[idx + 2] = 179;
-        data[idx + 3] = 210;
-      }
-    }
+    drawBoundaryPixels(imgData, marker, th, 121, 226, 179, 210);
     ctx.putImageData(imgData, 0, 0);
   } else {
-    // Fallback: draw dots at centroids
     ctx.fillStyle = 'rgba(121,226,179,0.82)';
     ctx.strokeStyle = 'rgba(6,12,10,0.8)';
     ctx.lineWidth = 1;
+    const rows = positiveRows();
     for (const row of rows) {
       const x = Number(row && row.x);
       const y = Number(row && row.y);
@@ -5754,6 +5879,34 @@ function drawPreviewOverlay() {
   }
   state.previewed = true;
   renderStatus();
+}
+function redrawAllSavedOverlays() {
+  const canvas = el('savedOverlayLayer');
+  if (!canvas) return;
+  const dims = stageDims();
+  if (canvas.width !== dims[0]) canvas.width = dims[0];
+  if (canvas.height !== dims[1]) canvas.height = dims[1];
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!CELL_BOUNDARIES || typeof CELL_BOUNDARIES !== 'object') return;
+  const roi = currentRoiId();
+  if (!roi) return;
+  const imgData = ctx.createImageData(canvas.width, canvas.height);
+  let anyDrawn = false;
+  const keys = Object.keys(savedOverlayState);
+  for (const key of keys) {
+    const entry = savedOverlayState[key];
+    if (!entry || !entry.visible) continue;
+    const marker = entry.displayName || key;
+    const th = savedThresholdValue(roi, marker);
+    if (!Number.isFinite(th)) continue;
+    const rgb = parseHexColor(entry.color);
+    drawBoundaryPixels(imgData, marker, th, rgb[0], rgb[1], rgb[2], 180);
+    anyDrawn = true;
+  }
+  if (anyDrawn) {
+    ctx.putImageData(imgData, 0, 0);
+  }
 }
 function thresholdColumnName(marker) {
   return 'thresh_' + String(marker || '').trim();
@@ -6060,6 +6213,7 @@ function bindControls() {
         const n = mergeThresholdTable(csvRowsFromText(String(reader.result || '')));
         setThresholdForCurrentMarker();
         renderSavedThresholdTable();
+        redrawAllSavedOverlays();
         drawScatter();
         renderStatus('Loaded threshold values: ' + String(n) + '\\nCurrent ROI usable thresholds: ' + String(loadedThresholdCountForCurrentRoi()));
       } catch (err) {

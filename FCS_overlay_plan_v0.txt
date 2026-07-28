@@ -1,0 +1,191 @@
+########## CODEX ##########
+
+Goal
+----
+Add multi-marker saved-threshold overlays to the standalone threshold editor without adding a backend dependency or generating per-cell PNG assets.
+
+Current behavior to preserve
+----------------------------
+- The active marker preview remains separate and unchanged in meaning.
+- The active preview shows the threshold the user is currently tuning.
+- Saved-threshold overlays are driven only by thresholds explicitly saved to memory.
+- Unset thresholds do not get overlay controls and are not drawn.
+- The global overlay toggle can hide/show every overlay canvas together.
+
+Proposed runtime model
+----------------------
+Use multiple canvas layers:
+
+1. previewLayer
+   - Existing active-marker overlay.
+   - Drawn from current marker/current threshold.
+   - Low opacity, probably white/pale gray.
+   - Recomputed as it is now when the user previews/edits the active threshold.
+
+2. savedOverlayLayer_<marker-safe-id>
+   - One layer per saved marker overlay that is enabled for the active ROI.
+   - Drawn from saved_thresholds[current_roi][marker], not working_thresholds.
+   - Created/updated when the user saves a threshold to memory or toggles/colors a saved overlay.
+   - Uses CELL_BOUNDARIES plus ROWS expression values, same basic cell-boundary drawing path as previewLayer.
+
+Saved threshold table UI
+------------------------
+Extend renderSavedThresholdTable():
+
+- Keep the existing marker x ROI value table.
+- For the active ROI only, add controls beside each marker row when that marker has a finite saved threshold:
+  - overlay checkbox
+  - color input
+- No controls for NaN/unsaved thresholds.
+- Default: newly saved thresholds can start visible for the active ROI, but imported thresholds should probably start hidden unless the user toggles them.
+
+State
+-----
+Add a small overlay state object:
+
+savedOverlayState = {
+  markerName: {
+    visible: true/false,
+    color: "#rrggbb"
+  }
+}
+
+Rules:
+
+- Save to memory creates/updates saved_thresholds for selected ROIs.
+- For the active ROI, save to memory also makes that marker eligible for overlay display.
+- Saved overlay drawing must never read working_thresholds.
+- If the active ROI changes in a later multi-ROI runtime, redraw eligibility from saved_thresholds[new_roi].
+
+Drawing helper
+--------------
+Port the current drawPreviewOverlay cell-boundary path into one shared helper:
+
+drawBoundaryOverlayForMarker(canvas, marker, threshold, color, alpha)
+
+Responsibilities:
+
+- Clear target canvas.
+- Iterate ROWS.
+- Use markerValue(row, marker) > threshold to identify positive cells.
+- Convert row_index to segmentation label using the existing cellIdToSegLabel().
+- Read coordinates from CELL_BOUNDARIES[String(segId)].
+- Paint boundary pixels into ImageData.
+
+The active preview and saved overlays should both use this helper.
+
+Color and blending
+------------------
+- Saved overlays should use higher opacity than the active preview so overlapping markers produce visible blended colors.
+- Canvas CSS should use mix-blend-mode: screen or normal alpha blending; test quickly which is clearer.
+- Draw order can be table order for v0.
+- Dual-positive cells should be identifiable by blended colors, not by winner-take-all overwrite.
+
+Performance boundary
+--------------------
+- Do not recompute saved overlays on every threshold input event.
+- Recompute saved overlays only when:
+  - Save to memory is clicked.
+  - A saved overlay checkbox is toggled.
+  - A saved overlay color changes.
+  - Threshold CSV is loaded/imported and table state changes.
+- Active preview can keep current behavior.
+
+Implementation touchpoints
+--------------------------
+File:
+visualization/visu_html_functions7.py
+
+Likely functions/areas:
+- threshold editor HTML around savedThresholdTable
+- threshold editor CSS for canvas layers/table controls
+- state object near showOverlays/logScatter
+- renderSavedThresholdTable()
+- commitCurrentThresholdToSavedStore()
+- drawPreviewOverlay()
+- syncOverlayVisibility()
+- renderImagePanel() / stage layer setup
+
+Things not to do in this pass
+-----------------------------
+- Do not add backend overlay rendering.
+- Do not generate one PNG per cell.
+- Do not resurrect centroid-dot overlay work.
+- Do not use working_thresholds for saved overlays.
+- Do not change studythresholds.csv save format.
+
+Open question for Claude
+------------------------
+Should imported thresholds start with overlay toggles hidden by default, while thresholds saved during the current session start visible? My preference is yes: imported tables may be large, and explicit display is safer.
+
+
+
+############## CLAUDE ########################
+
+Bugs it could encounter
+1. Canvas stacking order / pointer events. Multiple absolutely-positioned canvases over the image will intercept mouse events. If pointer-events: none isn't set on overlay canvases, zoom/pan/click interactions on the image break.
+
+2. ROI switching invalidates overlays. The plan says "if the active ROI changes, redraw eligibility from saved_thresholds[new_roi]." But changing ROI also changes ROWS, CELL_BOUNDARIES, and the tissue image itself. Every saved overlay canvas must be fully redrawn — not just toggled. If the code only checks threshold eligibility without redrawing, stale boundary pixels from the previous ROI remain visible.
+
+3. CELL_BOUNDARIES might be null. The plan assumes boundary data exists. If it doesn't (seg file not found, extraction skipped), every saved overlay draws nothing. The fallback should be dots (like the active preview), but the plan says "do not resurrect centroid-dot overlay work." This creates a silent no-op — saved overlays appear enabled but show nothing, with no feedback to the user.
+
+4. Canvas size drift. Each savedOverlayLayer_<id> canvas needs dimensions matching the tissue image exactly. If stageDims() changes (window resize, zoom), all saved canvases must resize and redraw. The current code only manages one previewLayer canvas. N canvases multiply the resize bookkeeping.
+
+5. Marker name sanitization for canvas IDs. savedOverlayLayer_<marker-safe-id> — marker names can contain /, +, spaces, parentheses (e.g. CD3/CD4, Ki-67 (MIB-1)). Using these in DOM IDs requires careful sanitization, and the sanitization must be consistent between creation and lookup.
+
+6. Expression data access. markerValue(row, marker) needs expression values. The plan assumes ROWS has per-marker expression columns. If the expression payload (has_expression_data) wasn't populated (the bug from the earlier plan), there's nothing to threshold against and every overlay is empty.
+
+7. Color input parsing. The plan uses <input type="color"> which returns #rrggbb hex strings. Converting to RGBA for ImageData pixel painting needs to happen correctly. Off-by-one in hex parsing is a classic bug.
+
+How to make it simple and solid
+A. One redraw function, not N independent canvases. Instead of creating/destroying canvas elements per marker, use a single savedOverlayCanvas (one canvas) and composite all enabled saved overlays into it. One canvas means one resize handler, one clear, one putImageData call. Loop through enabled markers, accumulate pixels into one ImageData buffer with alpha blending. This eliminates canvas stacking, pointer-events issues, and DOM ID sanitization entirely.
+
+B. Share the drawing core with the active preview. The plan already proposes drawBoundaryOverlayForMarker. Make it operate on an ImageData buffer (not a canvas) and return it. The caller composites:
+
+
+drawBoundaryPixels(imageData, marker, threshold, r, g, b, alpha)
+Both the active preview and saved overlays call this. Two canvases total: previewLayer (active) and savedOverlayLayer (all saved markers composited).
+
+C. Redraw saved overlays as one batch. One function redrawAllSavedOverlays() that: clears the saved canvas, creates one ImageData, loops enabled markers, calls drawBoundaryPixels for each, does one putImageData. Called on save, toggle, color change, ROI switch, and CSV import. Never on threshold slider input.
+
+D. Guard on CELL_BOUNDARIES early. At the top of redrawAllSavedOverlays, if CELL_BOUNDARIES is null, hide the saved overlay canvas and disable the checkboxes in the table with a tooltip "No segmentation data available." No silent failure.
+
+E. Answer to the open question: yes. Imported thresholds should start with overlays hidden. Add a flag savedOverlayState[marker].source = "session" | "import" and default visible: false for imports. Session saves default visible: true. This is ~2 lines of difference.
+
+F. Consistent marker identity. Use canonicalMarkerName(marker) (already exists) as the key in savedOverlayState, same as it's used in slot panel logic. No separate sanitization needed.
+
+
+########## CODEX ##########
+
+Concede / agree
+---------------
+- One savedOverlayCanvas is better than one canvas per marker for v0. It keeps resize, visibility, and pointer-event behavior simpler.
+- Keep previewLayer separate from savedOverlayCanvas. Two canvases total is the right compromise.
+- The shared helper should draw into an ImageData buffer, not directly into per-marker canvases.
+- redrawAllSavedOverlays() should be the single batch redraw gear for saved overlays.
+- CELL_BOUNDARIES null needs explicit UI handling: disable saved-overlay controls or show "no segmentation data available"; do not silently show checked-but-empty overlays.
+- Imported thresholds should default hidden; session-saved thresholds can default visible.
+- canonicalMarkerName(marker) is the right state key, as long as the display marker string is retained separately for table labels.
+- Resize/ROI-switch invalidation matters. Any future ROI switch must clear and rebuild ROWS/CELL_BOUNDARIES/image/savedOverlayCanvas together.
+
+Still hesitant / do not fully agree
+-----------------------------------
+- I still do not want centroid dots as the fallback for saved overlays. If segmentation is missing, saved overlays should be disabled with a clear message. Dots are acceptable for the active preview only because that is existing behavior and useful for threshold setting.
+- I would avoid adding savedOverlayState.source unless it is actually needed. Simpler rule: CSV import does not turn overlays on; Save to Memory turns that marker on for the active ROI. That preserves the behavior without another state axis.
+- canonicalMarkerName is fine as an internal key, but it can collide in theory (e.g. "CD-3" and "CD3"). For this pass that risk is acceptable, but the map should store marker display names and ideally fail visibly if two markers canonicalize to the same key.
+- I would not build ROI-switch support deeply yet if the standalone runtime is still one ROI at a time. Just make redrawAllSavedOverlays() safe to call after data replacement; do not spend this pass designing a multi-ROI navigation lifecycle.
+
+Revised implementation target
+-----------------------------
+- Two overlay canvases:
+  - previewLayer: active threshold, current behavior.
+  - savedOverlayLayer: all enabled saved thresholds composited together.
+- One shared low-level helper:
+  - drawBoundaryPixels(imageData, marker, threshold, color, alpha)
+- One saved-overlay redraw function:
+  - redrawAllSavedOverlays()
+- Table controls:
+  - only for finite saved_thresholds[current_roi][marker]
+  - checkbox plus color input
+  - imported values hidden by default
+  - Save to Memory updates saved_thresholds and enables that marker overlay for the active ROI
