@@ -4622,11 +4622,48 @@ def write_thresh_runtime_html(outdir):
     position: absolute;
     inset: 0;
   }
+  .layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    object-position: center center;
+  }
+  .slot {
+    mix-blend-mode: screen;
+  }
+  .chgray {
+    mix-blend-mode: multiply;
+  }
   .overlayLayer {
     mix-blend-mode: screen;
   }
   .canvasLayer {
     pointer-events: none;
+  }
+  .slotrow {
+    display: grid;
+    grid-template-columns: 16px 1fr;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .slotrow select {
+    width: 100%;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.08);
+    color: #e7e7ea;
+    border-radius: 6px;
+    padding: 4px 6px;
+    font-size: 12px;
+  }
+  .sw {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    border: 1px solid rgba(255,255,255,0.18);
+    flex: 0 0 auto;
   }
   .small {
     font-size: 12px;
@@ -4715,6 +4752,10 @@ def write_thresh_runtime_html(outdir):
         <button id="scaleToggleBtn" type="button">scatter raw</button>
       </div>
     </div>
+    <div class="section">
+      <div class="label">Channel Display</div>
+      <div id="legendPanel"></div>
+    </div>
     <div class="section scatterWrap">
       <canvas id="scatterCanvas" width="760" height="520"></canvas>
       <canvas id="histCanvas" width="760" height="150"></canvas>
@@ -4753,6 +4794,133 @@ const state = {
   logScatter: false,
   thresholdStore: null
 };
+let SLOT_COLORS = [[255,60,60],[60,255,60],[80,140,255],[255,170,50]];
+let slotMarkers = [null, null, null, null];
+let slotNoneLocks = [false, false, false, false];
+
+function collectThreshMarkers() {
+  const allChans = Array.isArray(DATA.all_channels) ? DATA.all_channels : [];
+  const out = [];
+  const seen = new Set();
+  for (const ch of allChans) {
+    const mk = String(ch.marker || '').trim();
+    if (mk === '' || seen.has(mk)) continue;
+    seen.add(mk);
+    out.push(mk);
+  }
+  out.sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+  return out;
+}
+
+function canonicalMarkerName(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function preferredMarkersForSlots(markers) {
+  const prefs = ['cd31', 'cd45', 'ecad', 'vim'];
+  const out = [];
+  const used = new Set();
+  for (const pref of prefs) {
+    let match = null;
+    for (const mk of markers || []) {
+      if (used.has(mk)) continue;
+      const canon = canonicalMarkerName(mk);
+      if (canon === pref || canon.includes(pref)) {
+        match = mk;
+        break;
+      }
+    }
+    out.push(match);
+    if (match) used.add(match);
+  }
+  return out;
+}
+
+function normalizeSlotMarkers(markers) {
+  const valid = new Set(markers);
+  const used = new Set();
+  for (let i = 0; i < slotMarkers.length; i++) {
+    const mk = slotMarkers[i];
+    if (!mk || !valid.has(mk) || used.has(mk)) {
+      slotMarkers[i] = null;
+      continue;
+    }
+    used.add(mk);
+  }
+  const preferred = preferredMarkersForSlots(markers);
+  for (let i = 0; i < preferred.length && i < slotMarkers.length; i++) {
+    const mk = preferred[i];
+    if (!mk || used.has(mk) || slotMarkers[i] || slotNoneLocks[i]) continue;
+    slotMarkers[i] = mk;
+    used.add(mk);
+  }
+  for (const mk of markers) {
+    if (used.has(mk)) continue;
+    let idx = -1;
+    for (let i = 0; i < slotMarkers.length; i++) {
+      if (!slotMarkers[i] && !slotNoneLocks[i]) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) break;
+    slotMarkers[idx] = mk;
+    used.add(mk);
+  }
+}
+
+function h(tag, attrs, text) {
+  const el = document.createElement(tag);
+  if (attrs) {
+    for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
+  }
+  if (text !== undefined && text !== null) el.textContent = String(text);
+  return el;
+}
+
+function renderSlotPanel(markers) {
+  const box = document.getElementById('legendPanel');
+  box.innerHTML = '';
+  if (!markers || markers.length === 0) {
+    box.appendChild(h('div', {'class': 'small'}, 'No composite markers in current filter.'));
+    return;
+  }
+
+  for (let i = 0; i < SLOT_COLORS.length; i++) {
+    const col = SLOT_COLORS[i];
+    const row = h('div', {'class': 'slotrow'});
+    row.appendChild(h('span', {'class': 'sw', 'style': 'background: rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')'}));
+    const sel = h('select', {'data-slot': String(i)});
+    sel.appendChild(h('option', {'value': ''}, '(none)'));
+    for (const mk of markers) {
+      sel.appendChild(h('option', {'value': mk}, mk));
+    }
+    sel.value = slotMarkers[i] || '';
+    sel.addEventListener('change', () => {
+      const v = String(sel.value || '');
+      const mk = v === '' ? null : v;
+      if (mk) {
+        slotNoneLocks[i] = false;
+        for (let j = 0; j < slotMarkers.length; j++) {
+          if (j !== i && slotMarkers[j] === mk) {
+            slotMarkers[j] = null;
+            slotNoneLocks[j] = false;
+          }
+        }
+      } else {
+        slotNoneLocks[i] = true;
+      }
+      slotMarkers[i] = mk;
+      const m = collectThreshMarkers();
+      normalizeSlotMarkers(m);
+      renderSlotPanel(m);
+      renderImagePanel();
+    });
+    row.appendChild(sel);
+    box.appendChild(row);
+  }
+}
+
 function el(id) { return document.getElementById(id); }
 function esc(s) {
   return String(s || '').replace(/[&<>\"']/g, function(ch) {
@@ -5452,25 +5620,33 @@ function renderImagePanel() {
   const dims = stageDims();
   applyStageZoom();
   inner.innerHTML = '';
-  const base = DATA.base_layer && DATA.base_layer.url ? DATA.base_layer.url : '';
-  const channelLayers = Array.isArray(DATA.channel_layers) ? DATA.channel_layers : [];
-  if (channelLayers.length > 0) {
-    for (const layer of channelLayers) {
-      const wrap = document.createElement('div');
-      wrap.className = 'tintLayer';
-      const tint = document.createElement('div');
-      tint.style.background = String(layer && layer.color || '#ffffff');
-      const img = document.createElement('img');
-      img.src = absUrlForRel(layer && layer.url || '');
-      wrap.appendChild(tint);
-      wrap.appendChild(img);
-      inner.appendChild(wrap);
+  const allChans = Array.isArray(DATA.all_channels) ? DATA.all_channels : [];
+  let rendered = false;
+  for (let i = 0; i < SLOT_COLORS.length; i++) {
+    const mk = slotMarkers[i];
+    if (!mk) continue;
+    let rel = null;
+    for (const ch of allChans) {
+      if (String(ch.marker || '') === mk) {
+        rel = ch.rel;
+        break;
+      }
     }
-  } else if (base) {
-    const img = document.createElement('img');
-    img.className = 'imgLayer';
-    img.src = absUrlForRel(base);
-    inner.appendChild(img);
+    if (!rel) continue;
+    const lay = h('div', {'class': 'layer slot'});
+    const col = SLOT_COLORS[i];
+    lay.style.background = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')';
+    const img = h('img', {'class': 'layer chgray', 'src': absUrlForRel(rel)});
+    lay.appendChild(img);
+    inner.appendChild(lay);
+    rendered = true;
+  }
+  if (!rendered) {
+    const base = DATA.base_layer && DATA.base_layer.url ? DATA.base_layer.url : '';
+    if (base) {
+      const img = h('img', {'class': 'imgLayer', 'src': absUrlForRel(base)});
+      inner.appendChild(img);
+    }
   }
   const canvas = document.createElement('canvas');
   canvas.id = 'previewLayer';
@@ -5851,6 +6027,11 @@ function bindControls() {
 }
 async function boot() {
   await loadPayload();
+  if (DATA && Array.isArray(DATA.slot_colors)) SLOT_COLORS = DATA.slot_colors;
+  const channelLayers = Array.isArray(DATA.channel_layers) ? DATA.channel_layers : [];
+  for (let i = 0; i < channelLayers.length && i < slotMarkers.length; i++) {
+    slotMarkers[i] = String(channelLayers[i].marker || '') || null;
+  }
   renderStatus('Initializing threshold editor... building controls');
   renderHeader();
   const markers = markerList();
@@ -5865,6 +6046,9 @@ async function boot() {
   renderMarkerControls();
   syncStateFromControls();
   renderSavedThresholdTable();
+  const chanMarkers = collectThreshMarkers();
+  normalizeSlotMarkers(chanMarkers);
+  renderSlotPanel(chanMarkers);
   renderStatus('Initializing threshold editor... loading image and overlays');
   renderImagePanel();
   bindControls();
