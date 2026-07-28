@@ -3142,6 +3142,8 @@ function currentThreshSnapshotForCore(core) {
     default_y_marker: defaults[1] || defaults[0] || markerList[0] || '',
     base_layer: baseLayer,
     channel_layers: channelLayers,
+    all_channels: chans.map(function(ch) { return {marker: String(ch.marker || ''), rel: String(ch.rel || '')}; }),
+    slot_colors: SLOT_COLORS,
     overlay_layers: overlayLayers,
     mailbox_dir: String(mailbox.mailbox_dir || ''),
     mailbox_file_name: String(mailbox.patch_file_name || 'ifa_roi_patch.csv'),
@@ -5470,9 +5472,6 @@ function renderImagePanel() {
     img.src = absUrlForRel(base);
     inner.appendChild(img);
   }
-  // Threshold editor: skip segmentation overlay layers — use dots only.
-  // Seg outlines obscure the dot-based preview toggle. ROI editor has its own
-  // renderImagePanel that still loads overlay_layers.
   const canvas = document.createElement('canvas');
   canvas.id = 'previewLayer';
   canvas.className = 'canvasLayer';
