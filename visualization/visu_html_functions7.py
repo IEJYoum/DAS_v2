@@ -3145,6 +3145,7 @@ function currentThreshSnapshotForCore(core) {
     all_channels: chans.map(function(ch) { return {marker: String(ch.marker || ''), rel: String(ch.rel || '')}; }),
     slot_colors: SLOT_COLORS,
     overlay_layers: overlayLayers,
+    cell_boundaries_rel: String(payload.cell_boundaries_rel || ''),
     mailbox_dir: String(mailbox.mailbox_dir || ''),
     mailbox_file_name: String(mailbox.patch_file_name || 'ifa_roi_patch.csv'),
     mailbox_path: String(mailbox.patch_path || ''),
@@ -4797,6 +4798,54 @@ const state = {
 let SLOT_COLORS = [[255,60,60],[60,255,60],[80,140,255],[255,170,50]];
 let slotMarkers = [null, null, null, null];
 let slotNoneLocks = [false, false, false, false];
+let CELL_BOUNDARIES = null;
+
+function cellIdToSegLabel(rowIndex) {
+  const s = String(rowIndex || '');
+  const parts = s.split('_');
+  const last = parts[parts.length - 1] || '';
+  const digits = last.replace(/^cell/i, '');
+  const n = parseInt(digits, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function loadCellBoundaries() {
+  const rel = String(DATA.cell_boundaries_rel || '').trim();
+  if (!rel) return;
+  try {
+    const url = absUrlForRel(rel);
+    if (/\\.js(?:[?#].*)?$/i.test(rel)) {
+      CELL_BOUNDARIES = await new Promise(function(resolve, reject) {
+        window.__CELL_BOUNDARIES__ = null;
+        const script = document.createElement('script');
+        script.async = true;
+        script.src = url;
+        script.onload = function() {
+          const payload = window.__CELL_BOUNDARIES__;
+          window.__CELL_BOUNDARIES__ = null;
+          try { script.remove(); } catch (_err) {}
+          if (!payload || typeof payload !== 'object') {
+            reject(new Error('cell boundary script did not provide boundaries'));
+            return;
+          }
+          resolve(payload);
+        };
+        script.onerror = function() {
+          window.__CELL_BOUNDARIES__ = null;
+          try { script.remove(); } catch (_err) {}
+          reject(new Error('cell boundary script failed to load'));
+        };
+        (document.head || document.documentElement).appendChild(script);
+      });
+      return;
+    }
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    CELL_BOUNDARIES = await resp.json();
+  } catch (_err) {
+    CELL_BOUNDARIES = null;
+  }
+}
 
 function collectThreshMarkers() {
   const allChans = Array.isArray(DATA.all_channels) ? DATA.all_channels : [];
@@ -5667,17 +5716,41 @@ function drawPreviewOverlay() {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const rows = positiveRows();
-  ctx.fillStyle = 'rgba(121,226,179,0.82)';
-  ctx.strokeStyle = 'rgba(6,12,10,0.8)';
-  ctx.lineWidth = 1;
-  for (const row of rows) {
-    const x = Number(row && row.x);
-    const y = Number(row && row.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    ctx.beginPath();
-    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
+  if (CELL_BOUNDARIES && typeof CELL_BOUNDARIES === 'object') {
+    // Draw segmentation boundaries for positive cells
+    const imgData = ctx.createImageData(canvas.width, canvas.height);
+    const data = imgData.data;
+    for (const row of rows) {
+      const segId = cellIdToSegLabel(row.row_index);
+      if (segId === null) continue;
+      const coords = CELL_BOUNDARIES[String(segId)];
+      if (!coords || !coords.length) continue;
+      for (let k = 0; k < coords.length; k += 2) {
+        const px = coords[k];
+        const py = coords[k + 1];
+        if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
+        const idx = (py * canvas.width + px) * 4;
+        data[idx] = 121;
+        data[idx + 1] = 226;
+        data[idx + 2] = 179;
+        data[idx + 3] = 210;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } else {
+    // Fallback: draw dots at centroids
+    ctx.fillStyle = 'rgba(121,226,179,0.82)';
+    ctx.strokeStyle = 'rgba(6,12,10,0.8)';
+    ctx.lineWidth = 1;
+    for (const row of rows) {
+      const x = Number(row && row.x);
+      const y = Number(row && row.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      ctx.beginPath();
+      ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
   }
   state.previewed = true;
   renderStatus();
@@ -6027,6 +6100,7 @@ function bindControls() {
 }
 async function boot() {
   await loadPayload();
+  await loadCellBoundaries();
   if (DATA && Array.isArray(DATA.slot_colors)) SLOT_COLORS = DATA.slot_colors;
   const channelLayers = Array.isArray(DATA.channel_layers) ? DATA.channel_layers : [];
   for (let i = 0; i < channelLayers.length && i < slotMarkers.length; i++) {

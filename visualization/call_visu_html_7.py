@@ -2899,6 +2899,44 @@ def render_segmentation_subset_overlay(seg_roots, slide_scene, ids, out_path):
     return True
 
 
+def extract_cell_boundaries(seg_path):
+    """Extract per-cell boundary pixel coordinates from a label TIFF. Returns dict {cell_int: [x1,y1,x2,y2,...]}."""
+    if seg_path is None or tifffile is None:
+        return {}
+    try:
+        label = tifffile.imread(str(seg_path))
+    except Exception:
+        return {}
+    label = np.asarray(label)
+    label = np.squeeze(label)
+    if label.ndim != 2:
+        return {}
+    # Find boundary pixels — same logic as render_segmentation_subset_overlay
+    if skseg is not None:
+        bounds = skseg.find_boundaries(label, connectivity=1, background=0, mode="thick")
+    else:
+        bounds = np.zeros_like(label, dtype=bool)
+        bounds[1:, :] |= label[1:, :] != label[:-1, :]
+        bounds[:-1, :] |= label[1:, :] != label[:-1, :]
+        bounds[:, 1:] |= label[:, 1:] != label[:, :-1]
+        bounds[:, :-1] |= label[:, 1:] != label[:, :-1]
+        bounds &= (label != 0)
+    boundary_y, boundary_x = np.where(bounds)
+    if len(boundary_y) == 0:
+        return {}
+    boundary_labels = label[boundary_y, boundary_x]
+    # Group by cell ID into flat [x1,y1,x2,y2,...] arrays
+    from collections import defaultdict
+    cells = defaultdict(list)
+    i = 0
+    while i < len(boundary_labels):
+        cell_id = int(boundary_labels[i])
+        cells[cell_id].append(int(boundary_x[i]))
+        cells[cell_id].append(int(boundary_y[i]))
+        i += 1
+    return dict(cells)
+
+
 def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_roots, cache_dir):
     obs = overlay_context["obs"]
     core_series = overlay_context["core_series"]
@@ -3255,6 +3293,41 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
                     default_overlay_layers = [rel]
                 except Exception:
                     default_overlay_layers = [str(overlay_path)]
+        # Extract cell boundary coordinates for threshold overlays
+        cell_boundaries_rel = ""
+        if cache_dir != "":
+            seg_file = None
+            if len(seg_roots) > 0 and slide_scene != "":
+                seg_file = _find_seg_file_multi(seg_roots, slide_scene)
+            if seg_file is None:
+                # Fallback: check tile overlay_paths for label TIFF
+                core_tiles = seed_viewer.get("core_tiles", {})
+                for tile in list(core_tiles.get(core, [])):
+                    if str(tile.get("tile_kind", "")) != "composite":
+                        continue
+                    for op in list(tile.get("overlay_paths", [])):
+                        p = str(op)
+                        if os.path.isfile(p) and p.lower().endswith((".tif", ".tiff")):
+                            seg_file = p
+                            break
+                    if seg_file is not None:
+                        break
+            if seg_file is not None:
+                boundaries = extract_cell_boundaries(seg_file)
+                if len(boundaries) > 0:
+                    import json as _json
+                    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + core + ".js")
+                    payload = _json.dumps(boundaries, separators=(",", ":")).replace("</", "<\\/")
+                    with open(boundaries_path, "w", encoding="utf-8") as f:
+                        f.write("window.__CELL_BOUNDARIES__ = ")
+                        f.write(payload)
+                        f.write(";\n")
+                    try:
+                        brel = os.path.relpath(boundaries_path, os.path.join(str(out_root), "viewer_runs", "_tmp")).replace("\\", "/")
+                        cell_boundaries_rel = "../" + brel if not brel.startswith("..") else brel
+                    except Exception:
+                        cell_boundaries_rel = boundaries_path
+                    print("Cell boundaries extracted:", len(boundaries), "cells from", seg_file)
         rows = []
         subset_presence = {}
         j = 0
@@ -3320,6 +3393,7 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
             "width": int(size[0]),
             "height": int(size[1]),
             "default_overlay_layers": default_overlay_layers,
+            "cell_boundaries_rel": cell_boundaries_rel,
             "subset_presence": subset_presence,
             "rows": rows,
         }
