@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 import math
 import os
+import re
 import shutil
 import textwrap
 
@@ -11,20 +12,24 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import tifffile as tiff
 
 # Keep this import commented out for now; the loss-based flow may still be useful later.
 # from realign_mihc_test import mse_loss, rgb_to_k_channel
 
-ROOT = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\D8_Panel_StudySlides\Slides")
+ROOT = Path(r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\Run")
 CHECK = ROOT / "Registration_Check"
-TRASH = ROOT / "trash"
+TRASH = CHECK / "trash"
+NONREG_XLSX = TRASH / "d10_nonreg_triage.xlsx"
+SELECTION_XLSX = TRASH / "triage_selection.xlsx"
 IMAGE_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 BLACK_FRACTION_THRESHOLD = 0.01
 FIGURE_COLS = 4
 TITLE_FONT_SIZE = 15
 FIGURE_DPI = 100
 TITLE_WRAP_WIDTH = 18
+NONREG_PAT = re.compile(r"^(?P<prefix>nonreg|regck|NUCLEIck)_KB_AG_KPC_(?P<slide>[A-Z0-9]+)_D10_(?P<cycle>C\d\dR\d)_(?P<protein>.+)_ROI(?P<roi>\d+)$")
 
 
 def read_image(path):
@@ -219,6 +224,47 @@ def count_known_failures():
     )
 
 
+def parse_nonreg_row(path):
+    row = NONREG_PAT.match(path.stem).groupdict()
+    row["roi"] = int(row["roi"])
+    row["name"] = path.name
+    row["path"] = str(path)
+    return row
+
+
+def write_nonreg_xlsx():
+    TRASH.mkdir(parents=True, exist_ok=True)
+    paths = sorted(ROOT.rglob("nonreg_*.tif"))
+    rows = [parse_nonreg_row(path) for path in paths]
+    if rows:
+        df = pd.DataFrame(rows).sort_values(["slide", "roi", "protein", "cycle"]).reset_index(drop=True)
+    else:
+        df = pd.DataFrame(columns=["prefix", "slide", "cycle", "protein", "roi", "name", "path"])
+    df.to_excel(NONREG_XLSX, index=False)
+    print("nonreg workbook:", NONREG_XLSX)
+
+
+def write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed_paths):
+    TRASH.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for name in sorted(selected_names):
+        row = by_name[name]
+        rows.append({
+            "name": name,
+            "slide": row["slide"],
+            "roi": row["roi"],
+            "reason": reasons.get(name, ""),
+            "black_pixels": row["black_pixels"],
+            "total_pixels": row["total_pixels"],
+            "black_fraction": row["black_fraction"],
+            "thumbnail_path_before": str(row["path"]),
+            "thumbnail_path_after": str(renamed_paths.get(name, row["path"])),
+            "matched_fullres_file_count": match_counts.get(name, 0),
+        })
+    pd.DataFrame(rows).to_excel(SELECTION_XLSX, index=False)
+    print("selection workbook:", SELECTION_XLSX)
+
+
 def write_log(
     stats,
     candidates,
@@ -276,14 +322,23 @@ def main():
     known_prefixed_before = len(
         [p for p in CHECK.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS and p.name.lower().startswith("trash_")]
     )
+    print("output folder:", TRASH)
+    print("nonreg workbook will be saved to:", NONREG_XLSX)
+    print("selection workbook will be saved to:", SELECTION_XLSX)
+    print("candidate PNGs will be saved in:", TRASH)
+    print("debug logs will be saved in:", TRASH)
     print("known moved failure image files already in trash:", known_failures_before)
     print("known prefixed thumbnails already in Registration_Check:", known_prefixed_before)
+    write_nonreg_xlsx()
     stats, candidates, images, known_prefixed = scan_check_folder()
     print("scanned files:", len(stats))
     print("black-pixel candidates:", len(candidates))
     by_name = {row["name"]: row for row in stats}
     selected_names, reasons = choose_trash_names(candidates, by_name, images)
+    match_counts = {}
+    renamed_paths = {}
     if len(selected_names) == 0:
+        write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed_paths)
         print("trash list is empty, nothing to move")
         return
     moved_lines = []
@@ -292,12 +347,15 @@ def main():
     for name in selected_names:
         row = by_name[name]
         matches = matching_fullres_files(row)
+        match_counts[name] = len(matches)
         if len(matches) == 0:
             missing_lines.append(f"{name}\tno full-res match found")
         for path in matches:
             move_to_trash(path, moved_lines)
         new_path = rename_thumbnail_as_trash(row["path"], renamed_lines)
+        renamed_paths[name] = new_path
         row["path"] = new_path
+    write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed_paths)
     write_log(
         stats,
         candidates,

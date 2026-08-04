@@ -5979,6 +5979,23 @@ function filteredStudyThresholds(applyTo) {
   }
   return out;
 }
+function allStudyThresholds() {
+  const store = thresholdStore();
+  const all = store && store.saved_thresholds && typeof store.saved_thresholds === 'object' ? store.saved_thresholds : {};
+  const out = {};
+  for (const roi of Object.keys(all)) {
+    const roiId = String(roi || '').trim();
+    const byMarker = all[roi];
+    if (!roiId || !byMarker || typeof byMarker !== 'object') continue;
+    for (const marker of Object.keys(byMarker)) {
+      const value = Number(byMarker[marker]);
+      if (!String(marker || '').trim() || !Number.isFinite(value)) continue;
+      if (!out[roiId]) out[roiId] = {};
+      out[roiId][marker] = value;
+    }
+  }
+  return out;
+}
 function _buildStudyThresholdCsv(thresholds) {
   const safe = function(v) { return String(v == null ? '' : v).replace(/"/g, '""'); };
   const roiIds = Object.keys(thresholds || {});
@@ -6016,11 +6033,11 @@ function _downloadThresholdFallback(thresholds) {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
-async function saveStudyThreshold(applyTo) {
+async function saveStudyThreshold() {
   const store = thresholdStore();
   if (!thresholdStoreActive()) return {status: 'skipped'};
   const sourceRoi = currentRoiId();
-  const thresholds = filteredStudyThresholds(applyTo);
+  const thresholds = allStudyThresholds();
   if (Object.keys(thresholds).length === 0) return {status: 'skipped'};
   const writerUrl = String(store.writer_url || '').trim();
   if (!writerUrl) {
@@ -6052,10 +6069,9 @@ async function saveThreshold() {
   const assignments = thresholdAssignments();
   if (assignments.length === 0) throw new Error('no rows are available to save');
   const applyTo = checkedApplyRois();
-  const rawThreshold = requireThreshold();
   const signature = JSON.stringify({
     mailbox: mailboxSaveSignature(assignments),
-    study: thresholdStoreActive() ? {marker: state.xMarker, threshold: String(rawThreshold), apply_to: applyTo} : null
+    study: thresholdStoreActive() ? allStudyThresholds() : null
   });
   if (signature === state.lastSavedSignature) {
     renderStatus('This threshold assignment was already saved.');
@@ -6071,11 +6087,11 @@ async function saveThreshold() {
   const errors = [];
   if (thresholdStoreActive()) {
     try {
-      const studyResult = await saveStudyThreshold(applyTo);
+      const studyResult = await saveStudyThreshold();
       studySaved = studyResult.status === 'saved';
       studyDownloaded = studyResult.status === 'downloaded';
     } catch (e) {
-      _downloadThresholdFallback(filteredStudyThresholds(applyTo));
+      _downloadThresholdFallback(allStudyThresholds());
       studyDownloaded = true;
       errors.push(String(e && e.message || e));
     }
