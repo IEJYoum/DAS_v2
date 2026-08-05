@@ -4772,6 +4772,7 @@ def write_thresh_runtime_html(outdir):
         <button id="saveMemoryBtn" type="button">Save to Memory</button>
         <button id="saveBtn" type="button">Save to CSV</button>
         <button id="loadThresholdsBtn" type="button">Load Thresholds...</button>
+        <button id="clearBrowserMemoryBtn" type="button">Clear Browser Memory</button>
       </div>
       <input id="thresholdFileInput" type="file" accept=".csv" style="display:none;">
     </div>
@@ -5117,6 +5118,105 @@ function thresholdStoreActive() {
   const store = thresholdStore();
   return !!(store && String(store.mode || 'study_thresholds') === 'study_thresholds');
 }
+function normalizeMemoryKeyPart(value) {
+  return String(value || '').trim().split(String.fromCharCode(92)).join('/').toLowerCase();
+}
+function browserThresholdMemoryKey() {
+  const store = thresholdStore();
+  if (!thresholdStoreActive()) return '';
+  const path = normalizeMemoryKeyPart(store.study_thresholds_path || '');
+  if (path) return 'fcs_threshold_memory::' + path;
+  const roiIds = knownRoiIds().slice().sort(function(a, b) { return a.localeCompare(b, undefined, {numeric: true}); }).join('|');
+  const label = normalizeMemoryKeyPart(DATA && DATA.dataset_label || DATA && DATA.slide_scene || 'threshold_viewer');
+  return 'fcs_threshold_memory::' + label + '::' + roiIds;
+}
+function validSavedThresholdsOnly(raw) {
+  const out = {};
+  const roiSet = new Set(knownRoiIds());
+  const markerSet = new Set(markerList());
+  if (!raw || typeof raw !== 'object') return out;
+  for (const roi of Object.keys(raw)) {
+    const roiId = resolveRoiId(roi);
+    if (!roiSet.has(roiId)) continue;
+    const byMarker = raw[roi];
+    if (!byMarker || typeof byMarker !== 'object') continue;
+    for (const marker of Object.keys(byMarker)) {
+      let displayMarker = '';
+      for (const known of markerSet) {
+        if (String(known).toLowerCase() === String(marker).toLowerCase()) {
+          displayMarker = known;
+          break;
+        }
+      }
+      if (!displayMarker) continue;
+      const value = Number(byMarker[marker]);
+      if (!Number.isFinite(value)) continue;
+      if (!out[roiId]) out[roiId] = {};
+      out[roiId][displayMarker] = value;
+    }
+  }
+  return out;
+}
+function loadBrowserThresholdMemory() {
+  const key = browserThresholdMemoryKey();
+  if (!key) return null;
+  try {
+    const text = window.localStorage ? window.localStorage.getItem(key) : '';
+    if (!text) return null;
+    const payload = JSON.parse(text);
+    const saved = validSavedThresholdsOnly(payload && payload.saved_thresholds);
+    if (Object.keys(saved).length === 0) return null;
+    const store = thresholdStore();
+    store.saved_thresholds = saved;
+    return payload && payload.updated_at ? String(payload.updated_at) : '';
+  } catch (_err) {
+    return null;
+  }
+}
+function writeBrowserThresholdMemory() {
+  const key = browserThresholdMemoryKey();
+  const store = thresholdStore();
+  if (!key || !store) return false;
+  try {
+    const payload = {
+      version: 1,
+      updated_at: new Date().toISOString(),
+      study_thresholds_path: String(store.study_thresholds_path || ''),
+      roi_ids: knownRoiIds(),
+      marker_list: markerList(),
+      saved_thresholds: validSavedThresholdsOnly(store.saved_thresholds || {})
+    };
+    window.localStorage.setItem(key, JSON.stringify(payload));
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+function clearBrowserThresholdMemory() {
+  const key = browserThresholdMemoryKey();
+  if (!key) return false;
+  try {
+    window.localStorage.removeItem(key);
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+function handleBrowserThresholdMemoryChange(evt) {
+  const key = browserThresholdMemoryKey();
+  if (!key || !evt || evt.key !== key || !evt.newValue) return;
+  try {
+    const payload = JSON.parse(evt.newValue);
+    const saved = validSavedThresholdsOnly(payload && payload.saved_thresholds);
+    const store = thresholdStore();
+    if (!store || Object.keys(saved).length === 0) return;
+    store.saved_thresholds = saved;
+    renderSavedThresholdTable();
+    redrawAllSavedOverlays();
+    renderStatus('Browser-saved thresholds updated from another tab.');
+  } catch (_err) {
+  }
+}
 function currentRoiId() {
   const store = thresholdStore();
   const direct = String(DATA && DATA.roi_id || '').trim();
@@ -5170,6 +5270,9 @@ function thresholdValueFor(marker) {
   const working = store.working_thresholds && typeof store.working_thresholds === 'object' ? store.working_thresholds[roiId] : null;
   const workingValue = markerValueCaseInsensitive(working, marker);
   if (Number.isFinite(workingValue)) return workingValue;
+  const saved = store.saved_thresholds && typeof store.saved_thresholds === 'object' ? store.saved_thresholds[roiId] : null;
+  const savedValue = markerValueCaseInsensitive(saved, marker);
+  if (Number.isFinite(savedValue)) return savedValue;
   const initial = store.initial_thresholds && typeof store.initial_thresholds === 'object' ? store.initial_thresholds[roiId] : null;
   return markerValueCaseInsensitive(initial, marker);
 }
@@ -5248,6 +5351,7 @@ function mergeThresholdTable(table) {
   const store = thresholdStore();
   if (!store) return 0;
   if (!store.initial_thresholds || typeof store.initial_thresholds !== 'object') store.initial_thresholds = {};
+  if (!store.saved_thresholds || typeof store.saved_thresholds !== 'object') store.saved_thresholds = {};
   let updated = 0;
   if (!Array.isArray(table) || table.length < 2) return updated;
   const header = table[0].map(function(x) { return String(x || '').trim(); });
@@ -5264,7 +5368,9 @@ function mergeThresholdTable(table) {
         const v = Number((table[r] || [])[c]);
         if (!roi || !Number.isFinite(v)) continue;
         if (!store.initial_thresholds[roi]) store.initial_thresholds[roi] = {};
+        if (!store.saved_thresholds[roi]) store.saved_thresholds[roi] = {};
         store.initial_thresholds[roi][marker] = v;
+        store.saved_thresholds[roi][marker] = v;
         updated += 1;
       }
     }
@@ -5276,11 +5382,13 @@ function mergeThresholdTable(table) {
       const roi = resolveRoiId((table[r] || [])[imageCol]);
       if (!roi) continue;
       if (!store.initial_thresholds[roi]) store.initial_thresholds[roi] = {};
+      if (!store.saved_thresholds[roi]) store.saved_thresholds[roi] = {};
       for (let c = 0; c < header.length; c += 1) {
         if (c === imageCol || header[c] === '') continue;
         const v = Number((table[r] || [])[c]);
         if (!Number.isFinite(v)) continue;
         store.initial_thresholds[roi][header[c]] = v;
+        store.saved_thresholds[roi][header[c]] = v;
         updated += 1;
       }
     }
@@ -5390,6 +5498,7 @@ function setButtonsDisabled(disabled) {
   el('previewBtn').disabled = !!disabled;
   el('saveMemoryBtn').disabled = !!disabled || !DATA;
   el('saveBtn').disabled = !!disabled || !DATA;
+  el('clearBrowserMemoryBtn').disabled = !!disabled || !DATA || !thresholdStoreActive();
 }
 function renderStatus(text) {
   if (text) {
@@ -5494,6 +5603,7 @@ function commitCurrentThresholdToSavedStore() {
   entry.visible = true;
   renderSavedThresholdTable();
   redrawAllSavedOverlays();
+  writeBrowserThresholdMemory();
   return roiIds.length;
 }
 function savedThresholdValue(roiId, marker) {
@@ -6217,6 +6327,10 @@ function bindControls() {
   el('loadThresholdsBtn').addEventListener('click', function() {
     el('thresholdFileInput').click();
   });
+  el('clearBrowserMemoryBtn').addEventListener('click', function() {
+    const ok = clearBrowserThresholdMemory();
+    renderStatus(ok ? 'Cleared browser memory for this threshold table.' : 'No browser memory key is available.');
+  });
   el('thresholdFileInput').addEventListener('change', function() {
     const file = el('thresholdFileInput').files && el('thresholdFileInput').files[0];
     if (!file) return;
@@ -6225,8 +6339,13 @@ function bindControls() {
       try {
         commitCurrentThresholdToLocalStore();
         const store = thresholdStore();
-        if (store) store.working_thresholds = {};
+        if (store) {
+          store.working_thresholds = {};
+          store.saved_thresholds = {};
+          store.initial_thresholds = {};
+        }
         const n = mergeThresholdTable(csvRowsFromText(String(reader.result || '')));
+        writeBrowserThresholdMemory();
         setThresholdForCurrentMarker();
         renderSavedThresholdTable();
         redrawAllSavedOverlays();
@@ -6289,6 +6408,7 @@ async function boot() {
   }
   renderMarkerControls();
   syncStateFromControls();
+  const browserMemoryTime = loadBrowserThresholdMemory();
   renderSavedThresholdTable();
   const chanMarkers = collectThreshMarkers();
   normalizeSlotMarkers(chanMarkers);
@@ -6301,7 +6421,11 @@ async function boot() {
   drawScatter();
   renderStatus('Initializing threshold editor... drawing preview');
   drawPreviewOverlay();
+  if (browserMemoryTime !== null) {
+    renderStatus('Loaded browser-saved thresholds' + (browserMemoryTime ? ' from ' + browserMemoryTime : '') + '.');
+  }
 }
+window.addEventListener('storage', handleBrowserThresholdMemoryChange);
 window.addEventListener('error', function(evt) {
   showError('Threshold editor error: ' + String(evt && evt.message || 'unknown error'));
 });
