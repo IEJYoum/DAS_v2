@@ -879,6 +879,9 @@ def _is_technical_line(text: str) -> bool:
         return False
     low = s.lower()
 
+    if re.match(r"^\s*(\d+|x|y|n)\s*:", s, flags=re.IGNORECASE):
+        return False
+
     # Keep prompt/menu context in browser.
     for token in (
         "send non-int",
