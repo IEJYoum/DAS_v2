@@ -158,6 +158,9 @@ TSTEM = 'u54_05'#'W_5_09_w9b'#'W_5_11_ctimp'#'ST_AD_04_allmarkers'#'ST_3_03_tumo
 #'zzz95_U54'#'92_MS'#'KLF_Nov1'#'zzz92_U54'#'94_MS'#'KLF_Nov1'#'z91_MCF7-7'#'pTMA1_6pts_1'#'91_pTMA1'#'z95_MCF7'#'z98_MCF7'#'90_pt4076_pTMA1'#'93_b11_4076_pTMA1'#'93_pTMA1'#'94_pTMA1'#'95_GL'#'z3_GL631'#'93_BR301'#'198_MCF7_blank'#'199_MCF7'#'zzz_hta14'#'PIPELINE_bx2_95'#'zzzzzzz_pipeline_refined_99'#'PIPELINE_92'#'PIPELINE_hta14_bx1_99'#'bx2_training_set'#'PIPELINE_bx2_95'#'PIPELINE_92'#'PIPELINE_hta14_bx1_99'  #'zzzzzzz_pipeline_refined_99 #'bx2_training_set'#
 #rna_2223_A_0
 TPATH =  ''
+RUNMODE = "Koei"
+KOEI_XY_COLUMNS = ["DAPI_X", "DAPI_Y"]
+KOEI_OBS_COLUMNS = ["cellid", "patient", "slide", "slide_scene", "scene"]
 DEVMODE = True
 
 os.chdir(SAVEFOLDER)
@@ -543,9 +546,11 @@ def prepareData(bl1,bl2,bl3):
           buildDataFrame,RAT.main,buildSpectralFlowData]
     return(menu(op,fn,bl1,bl2,bl3,esc = True))
 
-def main(dataFolder=DATAFOLDER,saveFolder=SAVEFOLDER):
+def main(dataFolder=DATAFOLDER,saveFolder=SAVEFOLDER,runmode=None):
     """Top-level orchestrator: initialize (df, obs, dfxy), then dispatch to major modules."""
-    global EXTEND_LOAD_PROGRESS
+    global EXTEND_LOAD_PROGRESS, RUNMODE
+    if runmode is not None:
+        RUNMODE = str(runmode)
     latestStem = ""
     for file in sortByTime(os.listdir(SAVEFOLDER)):
         if file.endswith('_df.csv') and not file.endswith('_logdf.csv'):
@@ -1433,8 +1438,6 @@ def autoClean(df,obs,dfxy): #duplicated in IFA4, IFV2 - except it takes DFs inst
             pts = pd.Series(pts)
             key = pts >= 100-ch
             df = df.loc[:,key]
-            obs = obs.loc[:,key]
-            dfxy = dfxy.loc[:,key]
             cho = 0
             ch -= 1
     #for co in df.columns:
@@ -1817,8 +1820,48 @@ def editObs(df,obs,dfxy):
     obs=unpackObs(obs)
     return(df,obs,dfxy)
 
+def _koei_runmode():
+    return str(globals().get("RUNMODE", "")).strip().lower() == "koei"
+
+def _koei_obs_column(df, col):
+    if col in KOEI_XY_COLUMNS:
+        return False
+    if col in KOEI_OBS_COLUMNS:
+        return True
+    ser = df.loc[:, col]
+    return (
+        pd.api.types.is_bool_dtype(ser)
+        or pd.api.types.is_string_dtype(ser)
+        or pd.api.types.is_object_dtype(ser)
+    )
+
+def _koei_make_obs(df):
+    """Auto-format the fixed Koei pipeline table without manual column prompts."""
+    missing_xy = [col for col in KOEI_XY_COLUMNS if col not in df.columns]
+    if missing_xy:
+        print("Koei runmode: missing expected XY columns", missing_xy, "using manual format prompts.")
+        return None
+    obs_cols = [col for col in df.columns if _koei_obs_column(df, col)]
+    dfxy = df.loc[:, KOEI_XY_COLUMNS].copy()
+    obs = df.loc[:, obs_cols].copy() if len(obs_cols) > 0 else pd.DataFrame(index=df.index)
+    df = df.drop(columns=KOEI_XY_COLUMNS + obs_cols, errors="ignore").copy()
+    print("Koei runmode: auto-selected XY columns:", KOEI_XY_COLUMNS)
+    print("Koei runmode: auto-selected obs columns:", obs_cols if len(obs_cols) > 0 else "[none]")
+    print("Koei runmode: swap X/Y = no")
+    return(df,obs,dfxy)
+
 def makeObs(df):
     """Split a merged table into measurement df, observation obs, and coordinate dfxy tables."""
+    if _koei_runmode():
+        auto = _koei_make_obs(df)
+        if auto is not None:
+            df,obs,dfxy = auto
+            df = makeDtype(df,dtype=float)
+            obs = makeDtype(obs,dtype=str)
+            dfxy = makeDtype(dfxy,dtype=float)
+            for d in [df,obs,dfxy]:
+                print(d,d.shape)
+            return(df,obs,dfxy)
     df,dfxy = splitDF(df,"X and Y coordinate columns")
     if input('swap X and Y? (y)') == 'y':
           nxy = pd.DataFrame()
@@ -2123,7 +2166,9 @@ def getDFs():
     print(names,"loaded files")
     for i,n in enumerate(names):
         print(DFs[i].shape,'shape')
-        if logInput(n+' transpose? (y)') == 'y':
+        if _koei_runmode():
+            print(n+' transpose? (y) -> Koei runmode default: no')
+        elif logInput(n+' transpose? (y)') == 'y':
             DFs[i] = DFs[i].transpose()
 
 

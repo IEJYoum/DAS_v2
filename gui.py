@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional startup stem override.",
     )
     parser.add_argument(
+        "--runmode",
+        default="Koei",
+        help="Run mode. Default Koei uses fixed pipeline assumptions; any other value keeps granular prompts.",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=8765,
@@ -84,6 +89,7 @@ def main() -> int:
         figure_folder=args.figure_folder,
         build_folder=args.build_folder,
         stem=args.stem,
+        runmode=args.runmode,
         open_browser=not args.no_open_browser,
         html_port=int(args.port),
     )

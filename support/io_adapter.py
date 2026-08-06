@@ -9,7 +9,9 @@ Goal:
 
 from __future__ import annotations
 
+from datetime import datetime
 import importlib.util
+from pathlib import Path
 import re
 import sys
 from typing import Any, Optional
@@ -37,6 +39,9 @@ _LOG: list[str] = []
 _SUPPORT_CAPTURE: list[dict[str, Any]] = []
 _PROMPT_STICKY_OPTIONS: dict[str, list[dict[str, str]]] = {}
 _MAX_PROMPT_STICKY = 48
+_SESSION_LOG_PATH: Optional[Path] = None
+_SESSION_LOG_LAST_WRITE_LEN = 0
+_SESSION_LOG_PERMISSION_WARNED = False
 PROGRESS_TICK = 0
 PROGRESS_MAX = 0
 PROGRESS_PHASE = ""
@@ -434,9 +439,94 @@ def clear_log() -> None:
     """
     Reset adapter log.
     """
+    global _SESSION_LOG_PATH, _SESSION_LOG_LAST_WRITE_LEN, _SESSION_LOG_PERMISSION_WARNED
     _LOG.clear()
     _SUPPORT_CAPTURE.clear()
     _PROMPT_STICKY_OPTIONS.clear()
+    _SESSION_LOG_PATH = None
+    _SESSION_LOG_LAST_WRITE_LEN = 0
+    _SESSION_LOG_PERMISSION_WARNED = False
+
+
+def start_session_log(project_folder: str | Path) -> Optional[str]:
+    """
+    Start mirroring the in-memory adapter log into project_folder/session_logs.
+
+    One file is created per controller session:
+      log_YY-MM-DD_01.txt
+      log_YY-MM-DD_02.txt
+      ...
+    """
+    global _SESSION_LOG_PATH, _SESSION_LOG_LAST_WRITE_LEN, _SESSION_LOG_PERMISSION_WARNED
+    project_path = Path(project_folder).expanduser().resolve()
+    log_dir = project_path / "session_logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _SESSION_LOG_PATH = None
+        _SESSION_LOG_LAST_WRITE_LEN = 0
+        _SESSION_LOG_PERMISSION_WARNED = True
+        _BASE_PRINT(f"Session log disabled; could not create {log_dir}: {exc}")
+        return None
+
+    date_token = datetime.now().strftime("%y-%m-%d")
+    next_index = _next_session_log_index(log_dir, date_token)
+    _SESSION_LOG_PATH = log_dir / f"log_{date_token}_{next_index:02d}.txt"
+    _SESSION_LOG_LAST_WRITE_LEN = 0
+    _SESSION_LOG_PERMISSION_WARNED = False
+    _append_log("session_log", f"started {_SESSION_LOG_PATH}")
+    flush_session_log(force=True)
+    return str(_SESSION_LOG_PATH)
+
+
+def flush_session_log(*, force: bool = False) -> Optional[str]:
+    """
+    Write the adapter log to the active session-log text file.
+
+    This is intentionally caller-driven rather than print-driven so controller
+    menus can checkpoint the log without touching disk on every line.
+    """
+    global _SESSION_LOG_LAST_WRITE_LEN, _SESSION_LOG_PERMISSION_WARNED
+    if _SESSION_LOG_PATH is None:
+        return None
+    if not force and len(_LOG) == _SESSION_LOG_LAST_WRITE_LEN:
+        return str(_SESSION_LOG_PATH)
+
+    text = "\n".join(_LOG)
+    if text:
+        text += "\n"
+    try:
+        _SESSION_LOG_PATH.write_text(text, encoding="utf-8")
+    except PermissionError as exc:
+        if not _SESSION_LOG_PERMISSION_WARNED:
+            _BASE_PRINT(f"Session log not updated; file appears locked/open: {_SESSION_LOG_PATH} ({exc})")
+            _SESSION_LOG_PERMISSION_WARNED = True
+        return str(_SESSION_LOG_PATH)
+    except OSError as exc:
+        if not _SESSION_LOG_PERMISSION_WARNED:
+            _BASE_PRINT(f"Session log not updated: {_SESSION_LOG_PATH} ({exc})")
+            _SESSION_LOG_PERMISSION_WARNED = True
+        return str(_SESSION_LOG_PATH)
+
+    _SESSION_LOG_LAST_WRITE_LEN = len(_LOG)
+    _SESSION_LOG_PERMISSION_WARNED = False
+    return str(_SESSION_LOG_PATH)
+
+
+def get_session_log_path() -> str:
+    """
+    Return the active session-log path, or an empty string if not started.
+    """
+    return str(_SESSION_LOG_PATH) if _SESSION_LOG_PATH is not None else ""
+
+
+def _next_session_log_index(log_dir: Path, date_token: str) -> int:
+    highest = 0
+    for path in log_dir.glob(f"log_{date_token}_*.txt"):
+        suffix = path.stem.rsplit("_", 1)[-1]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return highest + 1
 
 
 def _deactivate_ds_session(reason: str) -> None:

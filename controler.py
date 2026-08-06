@@ -75,6 +75,7 @@ SAVEFOLDER = DATAFOLDER.replace("\\", "/")
 FIGUREFOLDER = str((DEFAULT_PROJECT_ROOT / "temp").resolve()).replace("\\", "/")
 TSTEM = "u54_05"
 TPATH = ""
+DEFAULT_RUNMODE = "Koei"
 PROJECTS_FILE = (APP_STATE_DIR / "projects.csv").resolve()
 PROJECT_COLUMNS = ["data_folder", "stem", "changed_at", "source_action", "session"]
 PROJECT_CONFIG_FILE = "project_config.txt"
@@ -106,6 +107,7 @@ class SessionState:
     figure_folder: Path = field(default_factory=lambda: Path(FIGUREFOLDER).resolve())
     segmentation_root: Optional[Path] = None
     suppress_plot_windows: bool = False
+    runmode: str = DEFAULT_RUNMODE
 
     def state_code(self) -> str:
         return get_state_code(self.logdf)
@@ -136,6 +138,7 @@ def main(
     open_browser: bool = False,
     html_port: int = 8765,
     suppress_plot_windows: bool = False,
+    runmode: str = DEFAULT_RUNMODE,
 ) -> SessionState:
     """
     Entry point.
@@ -146,6 +149,7 @@ def main(
         io.init_gui(screen, frontend)
     else:
         io.init_terminal()
+    io.clear_log()
 
     initial = _resolve_initial_context(
         default_folder=default_folder,
@@ -160,6 +164,7 @@ def main(
         data_folder=initial["data_folder"],
         figure_folder=initial["figure_folder"],
         suppress_plot_windows=suppress_plot_windows,
+        runmode=str(runmode or DEFAULT_RUNMODE),
     )
     return _run_session(state, screen=screen)
 
@@ -173,6 +178,7 @@ def main_ds(
     session_root: str | Path | None = None,
     session_id: str | None = None,
     poll_interval_sec: float = 0.25,
+    runmode: str = DEFAULT_RUNMODE,
 ) -> SessionState:
     """
     Convenience entrypoint for the DS-backed file transport.
@@ -184,6 +190,7 @@ def main_ds(
         poll_interval_sec=float(poll_interval_sec),
         session_meta={"launcher": "run_ds"},
     )
+    io.clear_log()
     initial = _resolve_initial_context(
         default_folder=default_folder,
         figure_folder=figure_folder,
@@ -197,6 +204,7 @@ def main_ds(
         data_folder=initial["data_folder"],
         figure_folder=initial["figure_folder"],
         suppress_plot_windows=True,
+        runmode=str(runmode or DEFAULT_RUNMODE),
     )
     return _run_session(state, close_ds_on_exit=True)
 
@@ -212,9 +220,14 @@ def _run_session(
         io.iprint("DAS_v2 controller")
         _first_run_base_folder_setup(state)
         _adopt_project_context(state, data_folder=state.data_folder, build_folder=state.build_folder, figure_folder=state.figure_folder)
+        session_log_path = io.start_session_log(state.project_root)
         io.iprint(f"Project root: {state.project_root}")
         io.iprint(f"Data folder: {state.data_folder}")
         io.iprint(f"Figure folder: {state.figure_folder}")
+        io.iprint(f"Run mode: {state.runmode}")
+        if session_log_path:
+            io.iprint(f"Session log: {session_log_path}")
+        io.flush_session_log()
 
         if not startup_menu(state):
             io.iprint("Session ended.")
@@ -237,6 +250,7 @@ def _run_session(
             close_ds_on_exit = False
         raise
     finally:
+        io.flush_session_log(force=True)
         if screen is not None:
             frontend.stop_server(screen)
         if close_ds_on_exit:
@@ -251,6 +265,7 @@ def main_html(
     stem: str | None = None,
     open_browser: bool = True,
     html_port: int = 8765,
+    runmode: str = DEFAULT_RUNMODE,
 ) -> SessionState:
     """
     Convenience entrypoint for the browser-backed UI.
@@ -264,6 +279,7 @@ def main_html(
         open_browser=open_browser,
         html_port=html_port,
         suppress_plot_windows=True,
+        runmode=runmode,
     )
 
 
@@ -938,6 +954,7 @@ def main_menu(state: SessionState) -> bool:
     """
     Post-load workspace menu.
     """
+    io.flush_session_log()
     options = [
         "data editing",
         "analysis",
@@ -955,6 +972,7 @@ def main_menu(state: SessionState) -> bool:
         open_html_menu,
     ]
     idx = menu_index("Main Menu", options)
+    io.flush_session_log()
     if idx is None:
         return not _confirm_quit()
     functions[idx](state)
@@ -1047,6 +1065,7 @@ def startup_menu(state: SessionState) -> bool:
         startup_load_last,
     ]
     while True:
+        io.flush_session_log()
         latest = find_latest_stem(state.data_folder)
         latest_label = latest if latest is not None else "[none]"
         options = [
@@ -1063,6 +1082,7 @@ def startup_menu(state: SessionState) -> bool:
                 "Load the most recent saved triplet in the current project folder.",
             ],
         )
+        io.flush_session_log()
         if idx is None:
             if _confirm_quit():
                 return False
@@ -1090,6 +1110,7 @@ def loading_menu(state: SessionState) -> None:
         startup_spectral_flow_import,
     ]
     while True:
+        io.flush_session_log()
         latest = find_latest_stem(state.data_folder)
         latest_label = latest if latest is not None else "[none]"
         current_label = str(state.stem).strip() or "[unset]"
@@ -1107,6 +1128,7 @@ def loading_menu(state: SessionState) -> None:
             "Load/Clean Spectral Flow Data",
         ]
         idx = menu_index("Loading / Data Menu", options)
+        io.flush_session_log()
         if idx is None:
             return
         functions[idx](state)
@@ -1611,6 +1633,7 @@ def legacy_ifa5_context(
     old_datafolder = module.DATAFOLDER
     old_savefolder = module.SAVEFOLDER
     old_tstem = module.TSTEM
+    old_runmode = getattr(module, "RUNMODE", DEFAULT_RUNMODE)
     old_ifv_spath = getattr(getattr(module, "ifv", None), "SPATH", None)
     had_ifv_meta = hasattr(getattr(module, "ifv", None), "_new_das_meta") if getattr(module, "ifv", None) is not None else False
     old_ifv_meta = getattr(getattr(module, "ifv", None), "_new_das_meta", None)
@@ -1635,6 +1658,7 @@ def legacy_ifa5_context(
         "figure_folder": str(state.figure_folder),
         "segmentation_root": str(state.segmentation_root) if state.segmentation_root is not None else "",
         "dataset_stem": str(state.stem),
+        "runmode": str(state.runmode),
     }
 
     def _legacy_input(prompt: str = "", default: str = None, *, prompt_meta=None) -> str:
@@ -1724,6 +1748,7 @@ def legacy_ifa5_context(
     module.DATAFOLDER = str(state.build_folder).replace("\\", "/")
     module.SAVEFOLDER = str(state.data_folder).replace("\\", "/")
     module.TSTEM = state.stem
+    module.RUNMODE = str(state.runmode)
     module._new_das_meta = legacy_meta
     if getattr(module, "ifv", None) is not None:
         module.ifv.SPATH = str(state.figure_folder).replace("\\", "/")
@@ -1759,6 +1784,7 @@ def legacy_ifa5_context(
         module.DATAFOLDER = old_datafolder
         module.SAVEFOLDER = old_savefolder
         module.TSTEM = old_tstem
+        module.RUNMODE = old_runmode
         if getattr(module, "ifv", None) is not None and old_ifv_spath is not None:
             module.ifv.SPATH = old_ifv_spath
         if getattr(module, "ifv", None) is not None:

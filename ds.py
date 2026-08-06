@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional startup stem override.",
     )
     parser.add_argument(
+        "--runmode",
+        default="Koei",
+        help="Run mode. Default Koei uses fixed pipeline assumptions; any other value keeps granular prompts.",
+    )
+    parser.add_argument(
         "--session-root",
         default=None,
         help="Folder that will contain DS session subfolders. Defaults to app-data state.",
@@ -89,6 +94,7 @@ def main() -> int:
         figure_folder=args.figure_folder,
         build_folder=args.build_folder,
         stem=args.stem,
+        runmode=args.runmode,
         session_root=args.session_root,
         session_id=args.session_id,
         poll_interval_sec=float(args.poll_interval),
