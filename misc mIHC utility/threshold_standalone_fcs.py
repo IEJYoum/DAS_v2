@@ -63,7 +63,10 @@ def input_root_looks_like_viewer_output(path):
     """Return True when path is probably a generated viewer folder, not source data."""
     p = Path(path)
     has_native_processed = (p / "Processed").is_dir() or p.name.lower() == "processed"
+    has_slide_processed = any((child / "Processed").is_dir() for child in p.iterdir() if child.is_dir())
     if has_native_processed:
+        return False
+    if has_slide_processed:
         return False
     if (p / "viewer_runs").is_dir() or (p / "_asset_pool").is_dir():
         return True
@@ -925,6 +928,9 @@ def main(argv):
     if len(args) >= 2:
         input_root = args[0]
         output_root = args[1]
+    elif len(args) == 1:
+        input_root = args[0]
+        output_root = args[0]
     else:
         input_root = DEFAULT_INPUT_ROOT
         output_root = DEFAULT_OUTPUT_ROOT
