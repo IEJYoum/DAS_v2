@@ -59,6 +59,29 @@ def require_output_directory(path_value, label):
     return path
 
 
+def input_root_looks_like_viewer_output(path):
+    """Return True when path is probably a generated viewer folder, not source data."""
+    p = Path(path)
+    has_native_processed = (p / "Processed").is_dir() or p.name.lower() == "processed"
+    if has_native_processed:
+        return False
+    if (p / "viewer_runs").is_dir() or (p / "_asset_pool").is_dir():
+        return True
+    if (p / "all_slides" / "viewer_runs").is_dir():
+        return True
+    return False
+
+
+def require_source_directory(path_value, label):
+    """Return a source-data directory and reject generated viewer roots."""
+    path = require_directory(path_value, label)
+    if input_root_looks_like_viewer_output(path):
+        raise ValueError(
+            label + " looks like a generated viewer/output folder, not source data: " + str(path)
+        )
+    return path
+
+
 def parse_object_csv_filename(object_csv):
     """Return roi_id, slide_scene, and ROI folder name parsed from a CellProfiler object CSV path."""
     if object_csv in [None, ""]:
@@ -812,7 +835,7 @@ def write_debug_report(output_root, datasets, viewer_data):
 
 def run(input_root, output_root, study_thresholds_path="", predicted_thresholds_path="", roi_values=None):
     """Build a spatial HTML viewer from CellProfiler output and return viewer_data."""
-    input_path = require_directory(input_root, "input_root")
+    input_path = require_source_directory(input_root, "input_root")
     output_path = require_output_directory(output_root, "output_root")
     if study_thresholds_path not in [None, ""] and not Path(study_thresholds_path).parent.exists():
         raise ValueError("study_thresholds_path parent folder does not exist: " + str(study_thresholds_path))
@@ -828,7 +851,7 @@ def run(input_root, output_root, study_thresholds_path="", predicted_thresholds_
 
 def run_slide_batch(input_root, output_root, layout="both", study_thresholds_path="", predicted_thresholds_path="", roi_values=None):
     """Build per-slide and/or combined viewers from a root containing slide/Processed folders."""
-    input_path = require_directory(input_root, "input_root")
+    input_path = require_source_directory(input_root, "input_root")
     output_path = require_output_directory(output_root, "output_root")
     slide_roots = discover_slide_processed_roots(input_path)
     if len(slide_roots) == 0:
@@ -864,7 +887,7 @@ def parse_cli_args(args):
     positional = []
     roi_values = []
     layout = "single"
-    use_default_thresholds = True
+    use_default_thresholds = False
     i = 0
     while i < len(args):
         arg = str(args[i])
@@ -883,6 +906,10 @@ def parse_cli_args(args):
             continue
         if arg == "--no-thresholds":
             use_default_thresholds = False
+            i += 1
+            continue
+        if arg == "--default-thresholds":
+            use_default_thresholds = True
             i += 1
             continue
         positional.append(args[i])

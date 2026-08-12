@@ -3297,21 +3297,19 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
         cell_boundaries_rel = ""
         if cache_dir != "":
             seg_file = None
-            if len(seg_roots) > 0 and slide_scene != "":
-                seg_file = _find_seg_file_multi(seg_roots, slide_scene)
-            if seg_file is None:
-                # Fallback: check tile overlay_paths for label TIFF
-                core_tiles = seed_viewer.get("core_tiles", {})
-                for tile in list(core_tiles.get(core, [])):
-                    if str(tile.get("tile_kind", "")) != "composite":
-                        continue
-                    for op in list(tile.get("overlay_paths", [])):
-                        p = str(op)
-                        if os.path.isfile(p) and p.lower().endswith((".tif", ".tiff")):
-                            seg_file = p
-                            break
-                    if seg_file is not None:
+            core_tiles = seed_viewer.get("core_tiles", {})
+            for tile in list(core_tiles.get(core, [])):
+                if str(tile.get("tile_kind", "")) != "composite":
+                    continue
+                for op in list(tile.get("overlay_paths", [])):
+                    p = str(op)
+                    if os.path.isfile(p) and p.lower().endswith((".tif", ".tiff")):
+                        seg_file = p
                         break
+                if seg_file is not None:
+                    break
+            if seg_file is None and len(seg_roots) > 0 and slide_scene != "":
+                seg_file = _find_seg_file_multi(seg_roots, slide_scene)
             if seg_file is not None:
                 boundaries = extract_cell_boundaries(seg_file)
                 if len(boundaries) > 0:
@@ -4411,6 +4409,8 @@ def infer_core_series_from_obs(obs):
 
 def core_series_candidate_priority(name):
     low = str(name).strip().lower()
+    if low == "core":
+        return 6
     if low == "slide_scene":
         return 5
     if "scene" in low:

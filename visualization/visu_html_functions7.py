@@ -939,6 +939,39 @@ def marker_from_tiff_path(path):
     return name
 
 
+def display_label_from_tile_sources(core_name, source_paths):
+    paths = [str(p) for p in list(source_paths or []) if str(p).strip() != ""]
+    path = paths[0] if len(paths) > 0 else ""
+    parts = [p for p in path.replace("\\", "/").split("/") if p != ""]
+    slide = ""
+    roi = ""
+    for i, part in enumerate(parts):
+        if part.lower() == "processed" and i > 0:
+            slide = parts[i - 1]
+            break
+    for part in reversed(parts):
+        m = re.search(r"(?i)^ROI0*(\d{1,3})$", part)
+        if m is not None:
+            roi = "ROI" + str(int(m.group(1)))
+            break
+    if roi == "":
+        m = re.search(r"(?i)ROI0*(\d{1,3})(?!\d)", path)
+        if m is not None:
+            roi = "ROI" + str(int(m.group(1)))
+    if slide != "" and roi != "":
+        return slide + " " + roi
+
+    tma = infer_tma_tag(path)
+    core = str(core_name).strip()
+    if core != "":
+        m = re.match(r"(?i)^scene[_-]?([A-Za-z])0*(\d{1,3})$", core)
+        if m is not None:
+            core = m.group(1).upper() + str(int(m.group(2)))
+    if tma != "" and core != "":
+        return tma + " " + core
+    return core
+
+
 def color_for_marker(marker):
     mk = str(marker).strip().lower()
     if mk == "":
@@ -1215,6 +1248,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
     label = str(spec.get("label", core))
     asset_type_id = str(spec.get("asset_type_id", "missing"))
     asset_type_label = str(spec.get("asset_type_label", asset_type_id))
+    display_label = display_label_from_tile_sources(core, spec.get("source_paths", [])) or label
 
     if tile_kind == "composite" and len(spec.get("tiff_paths", [])) > 0:
         base_rel, cache_key, overlay_rels, channels = ensure_composite_asset(spec, registry, norm_kw)
@@ -1222,6 +1256,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
             "tile_kind": "composite",
             "core": core,
             "label": label,
+            "display_label": display_label,
             "asset_type_id": asset_type_id,
             "asset_type_label": asset_type_label,
             "base_rel": base_rel,
@@ -1241,6 +1276,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
             "tile_kind": "figure",
             "core": core,
             "label": label,
+            "display_label": display_label,
             "asset_type_id": asset_type_id,
             "asset_type_label": asset_type_label,
             "base_rel": base_rel,
@@ -1258,6 +1294,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
         "tile_kind": "missing",
         "core": core,
         "label": label,
+        "display_label": display_label,
         "asset_type_id": "missing",
         "asset_type_label": "Missing",
         "base_rel": None,
@@ -3254,8 +3291,8 @@ function makeTileEl(tile, view, subsetOpt) {
     d.appendChild(h('img', {'class': 'layer ann', 'src': rel, 'loading': 'lazy', 'decoding': 'async'}));
   }
   let tileLabel = '';
-  if (tile.core) tileLabel = tile.core + ' | ' + (tile.asset_type_label || tile.asset_type_id || 'asset');
-  else tileLabel = tile.label || tile.filename || tile.asset_type_label || tile.asset_type_id || 'figure';
+  if (tile.core) tileLabel = tile.display_label || tile.label || tile.core;
+  else tileLabel = tile.display_label || tile.label || tile.filename || tile.asset_type_label || tile.asset_type_id || 'figure';
   if (!tile.core) {
     const bracketParts = [];
     if (tile.figure_family) bracketParts.push(String(tile.figure_family));
