@@ -8,6 +8,11 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 from PIL import Image
+
+try:
+    from support.filesystem_utils import atomic_write_with_retry
+except Exception:
+    atomic_write_with_retry = None
 try:
     import tifffile as tiff
 except Exception:
@@ -984,8 +989,16 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
     out_dir = os.path.join(ASSETSDIR, "channels")
     safe_mkdir(out_dir)
     out_abs = os.path.join(out_dir, fn)
-    if not os.path.exists(out_abs):
-        Image.fromarray(g, mode="L").save(out_abs)
+    if (not os.path.exists(out_abs)) or os.path.getsize(out_abs) <= 0:
+        if atomic_write_with_retry is not None:
+            atomic_write_with_retry(
+                out_abs,
+                lambda tmp_path: Image.fromarray(g, mode="L").save(tmp_path, format="PNG"),
+                description="channel PNG write",
+                require_nonempty=True,
+            )
+        else:
+            Image.fromarray(g, mode="L").save(out_abs)
     rel = rel_from_out(out_abs)
 
     assets[key] = {

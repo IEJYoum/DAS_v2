@@ -40,7 +40,7 @@ for slide_dir in sorted([sl for sl in glob(os.path.join(indir, '*/'))
 
 	# Loop through DSDNA V_ images in each region
 	print('\nWorking on slide ' + os.path.split(os.path.split(processed_dir)[0])[1])
-	for f in find_files(processed_dir, "V_*_HB2*.tif"):
+	for f in find_files(processed_dir, "V_*_H2B*.tif"):
 		# Get output directory name (same as directory of input file)
 		output = os.path.dirname(f)
 		print(output)

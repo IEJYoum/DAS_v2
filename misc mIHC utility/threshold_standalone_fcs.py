@@ -77,6 +77,24 @@ def parse_object_csv_filename(object_csv):
     return "Nuclei_" + slide_scene, slide_scene, roi_folder_name
 
 
+def slide_roi_scene(slide_name, roi_folder_name):
+    """Return a stable slide-aware ROI scene token."""
+    return str(slide_name).strip() + str(roi_folder_name).strip()
+
+
+def marker_name_from_tif(path):
+    """Return a marker name parsed from a single-channel TIFF name."""
+    name = Path(path).stem
+    m = re.search(r"(?i)_C\d+R\d+_([^_]+)_ROI0*\d{1,3}(?:$|_)", name)
+    if m is not None:
+        marker = m.group(1)
+    else:
+        parts = name.split("_")
+        marker = parts[-2] if len(parts) >= 2 and re.match(r"(?i)^ROI\d+$", parts[-1]) else parts[-1]
+    marker = re.sub(r"-\d{3}$", "", str(marker).strip())
+    return marker if marker != "" else name
+
+
 def find_case_insensitive_child_folder(input_root, folder_name):
     """Return the child folder matching folder_name case-insensitively."""
     root = require_directory(input_root, "input_root")
@@ -176,6 +194,50 @@ def discover_roi_datasets(input_root):
     for dataset in datasets:
         print("  " + dataset["roi_id"] + " -> " + str(dataset["roi_folder"]))
     return datasets
+
+
+def discover_processed_roi_datasets(processed_root, slide_name=None):
+    """Return dataset records from a Processed folder containing ROI subfolders."""
+    root = require_directory(processed_root, "processed_root")
+    slide = str(slide_name or root.parent.name).strip()
+    datasets = []
+    roi_folders = sorted([p for p in root.iterdir() if p.is_dir() and re.match(r"(?i)^ROI0*\d{1,3}$", p.name)], key=lambda p: natural_sort_key(p.name))
+    if len(roi_folders) == 0:
+        return discover_roi_datasets(root)
+    for roi_folder in roi_folders:
+        object_hits = sorted(roi_folder.glob("CellObjects_*.csv"), key=lambda p: natural_sort_key(p.name))
+        if len(object_hits) == 0:
+            object_hits = sorted(roi_folder.glob("Nuclei_*.csv"), key=lambda p: natural_sort_key(p.name))
+        object_csv = object_hits[0] if len(object_hits) > 0 else None
+        if object_csv is not None:
+            roi_id, scene, _folder = parse_object_csv_filename(object_csv)
+        else:
+            scene = slide_roi_scene(slide, roi_folder.name)
+            roi_id = "Nuclei_" + scene
+        datasets.append({
+            "roi_id": roi_id,
+            "slide_scene": scene,
+            "object_csv": object_csv,
+            "label_tif": find_label_tif(roi_folder),
+            "channel_tifs": find_channel_tifs(roi_folder),
+            "roi_folder": roi_folder,
+            "slide_name": slide,
+        })
+    print("Discovered processed ROI datasets:", len(datasets), "from", str(root))
+    for dataset in datasets:
+        print("  " + dataset["roi_id"] + " -> " + str(dataset["roi_folder"]))
+    return datasets
+
+
+def discover_slide_processed_roots(input_root):
+    """Return immediate slide folders that contain a Processed subfolder."""
+    root = require_directory(input_root, "input_root")
+    out = []
+    for child in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: natural_sort_key(p.name)):
+        processed = child / "Processed"
+        if processed.is_dir():
+            out.append((child.name, processed))
+    return out
 
 
 def normalize_roi_token(value):
@@ -347,10 +409,81 @@ def integer_series(values, label):
     return rounded
 
 
+def build_triplet_from_label_images(dataset_dict):
+    """Return df, obs, and dfxy by measuring channel mean intensity per label."""
+    if not isinstance(dataset_dict, dict):
+        raise ValueError("dataset_dict must be a dict")
+    for key in ["roi_id", "slide_scene", "label_tif", "channel_tifs"]:
+        if key not in dataset_dict or dataset_dict[key] in [None, ""]:
+            raise ValueError("dataset_dict is missing " + key)
+    label_tif = Path(dataset_dict["label_tif"])
+    label = np.squeeze(np.asarray(tifffile.imread(str(label_tif))))
+    if label.ndim != 2:
+        raise ValueError("label_tif is not a 2D label image: " + str(label_tif))
+    label_int = label.astype(np.int64, copy=False)
+    ids = np.unique(label_int)
+    ids = ids[ids > 0]
+    if len(ids) == 0:
+        raise ValueError("label_tif has no positive labels: " + str(label_tif))
+    max_id = int(ids.max())
+    counts = np.bincount(label_int.ravel(), minlength=max_id + 1).astype(float)
+    object_numbers = ids.astype(int)
+    slide_scene = str(dataset_dict["slide_scene"])
+    roi_id = str(dataset_dict["roi_id"])
+    cellids = [slide_scene + "_cell" + str(int(x)) for x in object_numbers.tolist()]
+    index = pd.Index(cellids, name="")
+
+    yy, xx = np.nonzero(label_int > 0)
+    pix_ids = label_int[yy, xx]
+    sum_x = np.bincount(pix_ids, weights=xx.astype(float), minlength=max_id + 1)
+    sum_y = np.bincount(pix_ids, weights=yy.astype(float), minlength=max_id + 1)
+
+    df = pd.DataFrame(index=index)
+    markers = []
+    seen_markers = set()
+    for tif_path in [Path(p) for p in list(dataset_dict["channel_tifs"])]:
+        marker = marker_name_from_tif(tif_path)
+        if marker in seen_markers:
+            raise ValueError("duplicate marker name " + marker + " from " + str(tif_path))
+        seen_markers.add(marker)
+        image = np.squeeze(np.asarray(tifffile.imread(str(tif_path)))).astype(float, copy=False)
+        if image.shape != label_int.shape:
+            raise ValueError("channel TIFF shape does not match label TIFF: " + str(tif_path))
+        sums = np.bincount(label_int.ravel(), weights=image.ravel(), minlength=max_id + 1)
+        means = sums[object_numbers] / np.maximum(counts[object_numbers], 1.0)
+        df[marker] = means
+        markers.append(marker)
+
+    obs = pd.DataFrame(index=index)
+    obs["slide_scene"] = slide_scene
+    obs["core"] = str(dataset_dict.get("core_name", ""))
+    obs["roi_id"] = roi_id
+    obs["ObjectNumber"] = object_numbers
+    obs["Number_Object_Number"] = object_numbers
+    obs["seg_label"] = object_numbers
+    obs["cellid"] = cellids
+    obs["AreaShape_Area"] = counts[object_numbers].astype(int)
+    obs["source_object_csv"] = ""
+    obs["source_label_tif"] = str(label_tif)
+
+    dfxy = pd.DataFrame(index=index)
+    dfxy["Location_Center_X"] = sum_x[object_numbers] / np.maximum(counts[object_numbers], 1.0)
+    dfxy["Location_Center_Y"] = sum_y[object_numbers] / np.maximum(counts[object_numbers], 1.0)
+
+    dataset_dict["cell_count"] = int(len(obs))
+    dataset_dict["marker_count"] = int(len(markers))
+    dataset_dict["marker_list"] = list(markers)
+    dataset_dict["xy_columns"] = ["Location_Center_X", "Location_Center_Y"]
+    print("Built image-measured triplet:", roi_id, "-", len(obs), "cells,", len(markers), "markers")
+    return df, obs, dfxy
+
+
 def build_triplet(dataset_dict):
     """Return df, obs, and dfxy frames built from one dataset dictionary."""
     if not isinstance(dataset_dict, dict):
         raise ValueError("dataset_dict must be a dict")
+    if dataset_dict.get("object_csv", None) in [None, ""]:
+        return build_triplet_from_label_images(dataset_dict)
     for key in ["roi_id", "slide_scene", "object_csv"]:
         if key not in dataset_dict or dataset_dict[key] in [None, ""]:
             raise ValueError("dataset_dict is missing " + key)
@@ -388,6 +521,7 @@ def build_triplet(dataset_dict):
 
     obs = pd.DataFrame(index=index)
     obs["slide_scene"] = slide_scene
+    obs["core"] = str(dataset_dict.get("core_name", ""))
     obs["roi_id"] = roi_id
     obs["ObjectNumber"] = object_numbers.to_numpy()
     obs["Number_Object_Number"] = integer_series(table["Number_Object_Number"], "Number_Object_Number").to_numpy()
@@ -523,7 +657,9 @@ def build_catalog_for_datasets(datasets, df, obs, dfxy, output_root, threshold_s
                 raise ValueError("dataset_dict is missing " + key)
         roi_id = str(dataset_dict["roi_id"])
         slide_scene = str(dataset_dict["slide_scene"])
-        core_name = core_name_from_slide_scene(slide_scene)
+        core_name = str(dataset_dict.get("core_name", "")).strip()
+        if core_name == "":
+            core_name = core_name_from_slide_scene(slide_scene)
         if core_name in core_tiles:
             raise ValueError("duplicate viewer core name " + core_name + " from " + slide_scene)
         channel_tifs = [Path(p) for p in list(dataset_dict["channel_tifs"])]
@@ -590,6 +726,32 @@ def build_catalog_for_dataset(dataset_dict, df, obs, dfxy, output_root, threshol
     return build_catalog_for_datasets([dataset_dict], df, obs, dfxy, output_root, threshold_store)
 
 
+def assign_core_names(datasets):
+    """Assign stable sequential viewer core names to dataset records."""
+    for i, dataset in enumerate(list(datasets), start=1):
+        dataset["core_name"] = "A" + str(i)
+    return datasets
+
+
+def build_viewer_from_datasets(datasets, output_root, study_thresholds_path="", predicted_thresholds_path=""):
+    """Build one viewer from already discovered dataset records."""
+    output_path = require_output_directory(output_root, "output_root")
+    datasets = assign_core_names(list(datasets))
+    triplets = []
+    for dataset in datasets:
+        df1, obs1, dfxy1 = build_triplet(dataset)
+        validate_label_overlap(dataset, obs1)
+        triplets.append((df1, obs1, dfxy1))
+    df, obs, dfxy = combine_triplets(triplets)
+    threshold_store = {}
+    if study_thresholds_path not in [None, ""] or predicted_thresholds_path not in [None, ""]:
+        threshold_store = build_threshold_store(datasets, study_thresholds_path, predicted_thresholds_path)
+    catalog = build_catalog_for_datasets(datasets, df, obs, dfxy, output_path, threshold_store)
+    viewer_data = build_viewer(catalog, output_path)
+    write_debug_report(output_path, datasets, viewer_data)
+    return viewer_data
+
+
 def build_viewer(catalog, output_root):
     """Return viewer_data written by the shared viewer catalog builder."""
     if not isinstance(catalog, dict):
@@ -615,7 +777,7 @@ def write_debug_report(output_root, datasets, viewer_data):
     core_tiles = viewer_data.get("core_tiles", {}) if isinstance(viewer_data.get("core_tiles", {}), dict) else {}
     lines = [
         "FCS standalone viewer report",
-        "input root: " + str(Path(datasets[0]["object_csv"]).parent),
+        "input root: " + str(Path(datasets[0]["object_csv"]).parent if datasets[0].get("object_csv", None) not in [None, ""] else Path(datasets[0]["roi_folder"]).parent),
         "output root: " + str(output_path),
         "viewer dataset_label: " + str(viewer_data.get("dataset_label", "")),
         "viewer core count: " + str(len(core_tiles)),
@@ -656,27 +818,53 @@ def run(input_root, output_root, study_thresholds_path="", predicted_thresholds_
         raise ValueError("study_thresholds_path parent folder does not exist: " + str(study_thresholds_path))
     if predicted_thresholds_path not in [None, ""] and not Path(predicted_thresholds_path).is_file():
         raise ValueError("predicted_thresholds_path is not a file: " + str(predicted_thresholds_path))
-    datasets = discover_roi_datasets(input_path)
+    if (input_path / "Processed").is_dir():
+        datasets = discover_processed_roi_datasets(input_path / "Processed", slide_name=input_path.name)
+    else:
+        datasets = discover_processed_roi_datasets(input_path)
     datasets = filter_roi_datasets(datasets, roi_values)
-    triplets = []
-    for dataset in datasets:
-        df1, obs1, dfxy1 = build_triplet(dataset)
-        validate_label_overlap(dataset, obs1)
-        triplets.append((df1, obs1, dfxy1))
-    df, obs, dfxy = combine_triplets(triplets)
-    threshold_store = {}
-    if study_thresholds_path not in [None, ""] or predicted_thresholds_path not in [None, ""]:
-        threshold_store = build_threshold_store(datasets, study_thresholds_path, predicted_thresholds_path)
-    catalog = build_catalog_for_datasets(datasets, df, obs, dfxy, output_path, threshold_store)
-    viewer_data = build_viewer(catalog, output_path)
-    write_debug_report(output_path, datasets, viewer_data)
-    return viewer_data
+    return build_viewer_from_datasets(datasets, output_path, study_thresholds_path, predicted_thresholds_path)
+
+
+def run_slide_batch(input_root, output_root, layout="both", study_thresholds_path="", predicted_thresholds_path="", roi_values=None):
+    """Build per-slide and/or combined viewers from a root containing slide/Processed folders."""
+    input_path = require_directory(input_root, "input_root")
+    output_path = require_output_directory(output_root, "output_root")
+    slide_roots = discover_slide_processed_roots(input_path)
+    if len(slide_roots) == 0:
+        return {"single": run(input_path, output_path, study_thresholds_path, predicted_thresholds_path, roi_values=roi_values)}
+    mode = str(layout or "both").strip().lower()
+    if mode not in ["combined", "per-slide", "per_slide", "both"]:
+        raise ValueError("layout must be combined, per-slide, or both")
+    results = {}
+    all_datasets = []
+    for slide_name, processed in slide_roots:
+        datasets = discover_processed_roi_datasets(processed, slide_name=slide_name)
+        datasets = filter_roi_datasets(datasets, roi_values)
+        all_datasets.extend(datasets)
+        if mode in ["per-slide", "per_slide", "both"]:
+            results[slide_name] = build_viewer_from_datasets(
+                datasets,
+                output_path / slide_name,
+                study_thresholds_path=study_thresholds_path,
+                predicted_thresholds_path=predicted_thresholds_path,
+            )
+    if mode in ["combined", "both"]:
+        results["all_slides"] = build_viewer_from_datasets(
+            all_datasets,
+            output_path / "all_slides",
+            study_thresholds_path=study_thresholds_path,
+            predicted_thresholds_path=predicted_thresholds_path,
+        )
+    return results
 
 
 def parse_cli_args(args):
     """Return positional args and ROI filters parsed from command line args."""
     positional = []
     roi_values = []
+    layout = "single"
+    use_default_thresholds = True
     i = 0
     while i < len(args):
         arg = str(args[i])
@@ -687,16 +875,26 @@ def parse_cli_args(args):
                 roi_values.extend([x for x in parts if x != ""])
                 i += 1
             continue
+        if arg == "--layout":
+            if i + 1 >= len(args):
+                raise ValueError("--layout requires combined, per-slide, or both")
+            layout = str(args[i + 1])
+            i += 2
+            continue
+        if arg == "--no-thresholds":
+            use_default_thresholds = False
+            i += 1
+            continue
         positional.append(args[i])
         i += 1
-    return positional, roi_values
+    return positional, roi_values, layout, use_default_thresholds
 
 
 def main(argv):
     """Return viewer_data after parsing command line arguments."""
     if not isinstance(argv, list):
         raise ValueError("argv must be a list")
-    args, roi_values = parse_cli_args(argv[1:])
+    args, roi_values, layout, use_default_thresholds = parse_cli_args(argv[1:])
     if len(args) >= 2:
         input_root = args[0]
         output_root = args[1]
@@ -705,9 +903,11 @@ def main(argv):
         output_root = DEFAULT_OUTPUT_ROOT
         print("Using default input_root:", str(input_root))
         print("Using default output_root:", str(output_root))
-    study_thresholds_path = args[2] if len(args) >= 3 else DEFAULT_STUDY_THRESHOLDS_PATH
-    predicted_thresholds_path = args[3] if len(args) >= 4 else DEFAULT_PREDICTED_THRESHOLDS_PATH
-    return run(input_root, output_root, study_thresholds_path, predicted_thresholds_path, roi_values=roi_values)
+    study_thresholds_path = args[2] if len(args) >= 3 else (DEFAULT_STUDY_THRESHOLDS_PATH if use_default_thresholds else "")
+    predicted_thresholds_path = args[3] if len(args) >= 4 else (DEFAULT_PREDICTED_THRESHOLDS_PATH if use_default_thresholds else "")
+    if str(layout).strip().lower() == "single":
+        return run(input_root, output_root, study_thresholds_path, predicted_thresholds_path, roi_values=roi_values)
+    return run_slide_batch(input_root, output_root, layout=layout, study_thresholds_path=study_thresholds_path, predicted_thresholds_path=predicted_thresholds_path, roi_values=roi_values)
 
 
 if __name__ == "__main__":

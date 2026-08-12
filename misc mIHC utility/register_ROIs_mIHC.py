@@ -991,6 +991,47 @@ def update_row_from_transform(row, transform):
     row["warning"] = shift_warning(transform["dy"], transform["dx"])
 
 
+def update_row_for_native_crop_fallback(row, exc):
+    # Native crops intentionally use the normal REGISTERED row shape with a
+    # zero transform so manual apply does not need a parallel fallback path.
+    row["status"] = "REGISTERED"
+    row["reason"] = (
+        "auto registration failed; wrote native-coordinate crop for manual rescue; "
+        + type(exc).__name__
+        + ": "
+        + str(exc)
+    )
+    row["dy"] = "0"
+    row["dx"] = "0"
+    row["subpixel_dy"] = "0"
+    row["subpixel_dx"] = "0"
+    row["image_scale"] = "1.000000"
+    row["rotation_deg"] = "0.000000"
+    row["shear_x_deg"] = "0.000000"
+    row["shear_y_deg"] = "0.000000"
+    row["warning"] = "AUTO_REG_FAILED_NATIVE_CROP_WRITTEN"
+
+
+def update_row_for_skip_reg_native_crop(row):
+    # Keep --skip-reg outputs indistinguishable from other saved rows except
+    # for warning/reason text: downstream tools should read dy=0, dx=0.
+    row["status"] = "REGISTERED"
+    row["reason"] = "skip-reg mode; wrote native-coordinate crop for manual rescue"
+    row["dy"] = "0"
+    row["dx"] = "0"
+    row["subpixel_dy"] = "0"
+    row["subpixel_dx"] = "0"
+    row["image_scale"] = "1.000000"
+    row["rotation_deg"] = "0.000000"
+    row["shear_x_deg"] = "0.000000"
+    row["shear_y_deg"] = "0.000000"
+    row["initial_loss"] = ""
+    row["final_loss"] = ""
+    row["initial_overlap"] = ""
+    row["final_overlap"] = ""
+    row["warning"] = "SKIP_REG_NATIVE_CROP_WRITTEN"
+
+
 def register_fixed_row(row, fixed_rgb):
     output_path = Path(row["output_path"])
     print("write fixed:", row_key(row))
@@ -1053,6 +1094,14 @@ def register_moving_row(row, fixed_rgb, fixed_k):
         print("  wrote:", output_path.name, "dy=" + row["dy"], "dx=" + row["dx"])
         if row["warning"] != "":
             print("  warning:", row["warning"])
+    except Exception as exc:
+        if moving_rgb is None:
+            raise
+        cropped = crop_roi_from_padded(moving_rgb, row)
+        write_rgb_tiff(output_path, cropped)
+        update_row_for_native_crop_fallback(row, exc)
+        print("  fallback native crop:", output_path.name)
+        print("  failed:", type(exc).__name__, str(exc))
     finally:
         del moving_rgb
         del moving_k
@@ -1061,15 +1110,35 @@ def register_moving_row(row, fixed_rgb, fixed_k):
         gc.collect()
 
 
-def register_roi_group(group, max_outputs, processed_count):
+def write_skip_reg_native_crop(row):
+    output_path = Path(row["output_path"])
+    print("skip-reg native crop:", row_key(row))
+    moving_rgb = None
+    cropped = None
+    try:
+        moving_rgb = read_padded_row_rgb(row)
+        cropped = crop_roi_from_padded(moving_rgb, row)
+        write_rgb_tiff(output_path, cropped)
+        update_row_for_skip_reg_native_crop(row)
+        print("  wrote native crop:", output_path.name)
+    finally:
+        del moving_rgb
+        del cropped
+        gc.collect()
+
+
+def register_roi_group(group, max_outputs, processed_count, skip_reg=False):
     fixed_row = fixed_row_for_group(group)
     fixed_rgb = None
     fixed_k = None
     try:
-        fixed_rgb = read_padded_row_rgb(fixed_row)
-        fixed_k = realign_mihc_test.rgb_to_k_channel(fixed_rgb)
         if fixed_row["status"] == "NEEDS_REGISTRATION":
+            fixed_rgb = read_padded_row_rgb(fixed_row)
             register_fixed_row(fixed_row, fixed_rgb)
+        if not skip_reg:
+            if fixed_rgb is None:
+                fixed_rgb = read_padded_row_rgb(fixed_row)
+            fixed_k = realign_mihc_test.rgb_to_k_channel(fixed_rgb)
 
         for row in group:
             if row["status"] != "NEEDS_REGISTRATION":
@@ -1080,7 +1149,10 @@ def register_roi_group(group, max_outputs, processed_count):
                 continue
 
             try:
-                register_moving_row(row, fixed_rgb, fixed_k)
+                if skip_reg:
+                    write_skip_reg_native_crop(row)
+                else:
+                    register_moving_row(row, fixed_rgb, fixed_k)
                 processed_count = processed_count + 1
             except Exception as exc:
                 row["status"] = "FAILED_REGISTRATION"
@@ -1094,7 +1166,7 @@ def register_roi_group(group, max_outputs, processed_count):
     return processed_count
 
 
-def register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root, fixed_marker, failures):
+def register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root, fixed_marker, failures, skip_reg=False):
     processed_count = 0
     groups = row_groups(rows)
     for key in sorted(groups):
@@ -1104,18 +1176,18 @@ def register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root,
                 if row["status"] == "NEEDS_REGISTRATION":
                     row["status"] = "SKIP_MAX_OUTPUTS"
                     row["reason"] = "max output limit reached"
-            lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running")
+            lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg)
             write_debug_path(debug_path, lines)
             continue
         try:
-            processed_count = register_roi_group(groups[key], max_outputs, processed_count)
+            processed_count = register_roi_group(groups[key], max_outputs, processed_count, skip_reg)
         except Exception as exc:
             for row in groups[key]:
                 if row["status"] == "NEEDS_REGISTRATION":
                     row["status"] = "FAILED_ROI"
                     row["reason"] = type(exc).__name__ + ": " + str(exc)
             print("roi failed:", key[0], key[1], type(exc).__name__, str(exc))
-        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running")
+        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg)
         write_debug_path(debug_path, lines)
 
 
@@ -1141,7 +1213,7 @@ def status_count_lines(rows):
     return lines
 
 
-def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_status):
+def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_status, skip_reg=False):
     lines = [
         "register_ROIs_mIHC",
         "status\t" + run_status,
@@ -1149,6 +1221,7 @@ def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_stat
         "run_root\t" + str(run_root),
         "output_root\t" + str(output_root),
         "fixed_marker\t" + fixed_marker,
+        "skip_registration\t" + str(skip_reg),
         "buffer_pixels\t" + str(BUFFER_PIXELS),
         "shift_warning_pixels\t" + str(SHIFT_WARNING_PIXELS),
         "missing_target_pixel_penalty\t" + str(MISSING_TARGET_PIXEL_PENALTY),
@@ -1266,13 +1339,15 @@ def print_summary(rows, failures):
     print("skip output exists:", count_rows(rows, "SKIP_OUTPUT_EXISTS"))
     print("registered:", count_rows(rows, "REGISTERED"))
     print("registered fixed:", count_rows(rows, "REGISTERED_FIXED"))
+    print("failed native crop written:", count_rows(rows, "FAILED_NATIVE_CROP_WRITTEN"))
+    print("skip-reg native crop written:", count_rows(rows, "SKIP_REG_NATIVE_CROP_WRITTEN"))
     print("failed registration:", count_rows(rows, "FAILED_REGISTRATION"))
     print("failed ROI:", count_rows(rows, "FAILED_ROI"))
     print("skip max outputs:", count_rows(rows, "SKIP_MAX_OUTPUTS"))
     print("failed discovery:", len(failures))
 
 
-def main(run_root=None, output_root=None, fixed_marker=None, dry_run=False, max_outputs=None):
+def main(run_root=None, output_root=None, fixed_marker=None, dry_run=False, max_outputs=None, skip_reg=False):
     if run_root is None:
         run_root = RUN_ROOT
     else:
@@ -1289,15 +1364,15 @@ def main(run_root=None, output_root=None, fixed_marker=None, dry_run=False, max_
     rows, failures = discover_manifest(run_root, output_root, fixed_marker)
     print_summary(rows, failures)
     if dry_run:
-        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "dry_run")
+        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "dry_run", skip_reg)
         write_debug_path(debug_path, lines)
         print("dry run: no registered TIFFs written")
         return rows, failures
 
-    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running")
+    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg)
     write_debug_path(debug_path, lines)
-    register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root, fixed_marker, failures)
-    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "Done!")
+    register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root, fixed_marker, failures, skip_reg)
+    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "Done!", skip_reg)
     write_debug_path(debug_path, lines)
     print_summary(rows, failures)
     print("Done!")
@@ -1311,6 +1386,7 @@ if __name__ == "__main__":
     parser.add_argument("--fixed-marker", default=None, help="Fixed marker token. Default CD3.")
     parser.add_argument("--dry-run", action="store_true", help="Discover planned outputs without writing TIFFs.")
     parser.add_argument("--max-outputs", type=int, default=None, help="Stop after this many attempted TIFF outputs.")
+    parser.add_argument("--skip-reg", action="store_true", help="For missing moving outputs, write native ROI crops instead of fitting registration.")
     args = parser.parse_args()
     main(
         run_root=args.run_root,
@@ -1318,4 +1394,5 @@ if __name__ == "__main__":
         fixed_marker=args.fixed_marker,
         dry_run=args.dry_run,
         max_outputs=args.max_outputs,
+        skip_reg=args.skip_reg,
     )

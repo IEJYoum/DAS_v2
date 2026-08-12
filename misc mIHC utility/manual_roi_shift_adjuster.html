@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manual ROI Shift Adjuster</title>
+  <script src="https://cdn.jsdelivr.net/npm/utif/UTIF.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --ink: #17212b;
+      --muted: #627083;
+      --line: #d5dce6;
+      --accent: #0f766e;
+      --accent-2: #2563eb;
+      --warn: #a16207;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+      overflow: hidden;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    aside {
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      overflow: auto;
+      padding: 14px;
+      height: 100dvh;
+      min-height: 0;
+    }
+
+    section {
+      min-width: 0;
+      min-height: 0;
+      height: 100dvh;
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      border-radius: 6px;
+      min-height: 34px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    button:disabled {
+      cursor: default;
+      opacity: 0.45;
+    }
+
+    input[type="number"] {
+      width: 74px;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+    }
+
+    select {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: #ffffff;
+    }
+
+    label {
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0 0 12px;
+    }
+
+    .field {
+      margin-bottom: 12px;
+    }
+
+    .field span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .folder-name,
+    .status {
+      color: var(--muted);
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .status.warn {
+      color: var(--warn);
+    }
+
+    .channel-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .channel {
+      display: grid;
+      grid-template-columns: 28px 28px minmax(0, 1fr);
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      background: #ffffff;
+    }
+
+    .channel.selected {
+      border-color: var(--accent-2);
+      box-shadow: inset 3px 0 0 var(--accent-2);
+    }
+
+    .channel-name {
+      min-width: 0;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .channel-meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .nudge-grid {
+      display: grid;
+      grid-template-columns: 42px 42px 42px;
+      grid-template-rows: 38px 38px 38px;
+      gap: 5px;
+      align-items: center;
+      justify-content: start;
+    }
+
+    .nudge-grid button {
+      width: 42px;
+      height: 38px;
+      padding: 0;
+      font-size: 18px;
+    }
+
+    .canvas-wrap {
+      overflow: auto;
+      background: #e8edf3;
+      position: relative;
+      min-height: 0;
+    }
+
+    canvas {
+      display: block;
+      background: #ffffff;
+      image-rendering: auto;
+      margin: 18px;
+      box-shadow: 0 2px 12px rgba(23, 33, 43, 0.16);
+    }
+
+    .bottom {
+      border-top: 1px solid var(--line);
+      background: var(--panel);
+      padding: 10px 12px;
+      color: var(--muted);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 104px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      font-family: Consolas, Menlo, monospace;
+      font-size: 12px;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <aside>
+      <h1>Manual ROI Shift</h1>
+
+      <div class="field">
+        <button class="primary" id="loadButton" type="button">Load folder</button>
+        <input id="folderInput" class="hidden" type="file" webkitdirectory multiple
+          accept=".tif,.tiff,.png,.jpg,.jpeg">
+      </div>
+
+      <div class="field">
+        <span>Folder</span>
+        <div id="folderName" class="folder-name">none</div>
+      </div>
+
+      <div class="field">
+        <span>Step</span>
+        <input id="stepInput" type="number" value="1" min="0.1" step="0.1">
+      </div>
+
+      <div class="field">
+        <span>Nudge selected</span>
+        <div class="nudge-grid">
+          <div></div>
+          <button id="upButton" type="button">↑</button>
+          <div></div>
+          <button id="leftButton" type="button">←</button>
+          <button id="zeroButton" type="button">0</button>
+          <button id="rightButton" type="button">→</button>
+          <div></div>
+          <button id="downButton" type="button">↓</button>
+          <div></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <span>View</span>
+        <label><input id="fitToggle" type="checkbox" checked> fit</label>
+        <label>zoom <input id="zoomInput" type="number" value="1" min="0.05" step="0.05"></label>
+      </div>
+
+      <div class="field">
+        <span>Blend</span>
+        <select id="blendSelect">
+          <option value="multiply" selected>multiply</option>
+          <option value="source-over">normal</option>
+          <option value="difference">difference</option>
+          <option value="screen">screen</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <span>Opacity</span>
+        <label>other <input id="otherOpacity" type="number" value="0.28" min="0" max="1" step="0.05"></label>
+        <label>selected <input id="selectedOpacity" type="number" value="0.82" min="0" max="1" step="0.05"></label>
+      </div>
+
+      <div class="field">
+        <button id="copyButton" type="button" disabled>Copy TSV</button>
+        <button id="downloadButton" type="button" disabled>Submit</button>
+      </div>
+
+      <div class="field">
+        <span>Visibility</span>
+        <div class="button-row">
+          <button id="showAllButton" type="button">Show all</button>
+          <button id="hideAllButton" type="button">Hide all</button>
+        </div>
+      </div>
+
+      <div id="status" class="status">Ready.</div>
+      <div id="channelList" class="channel-list"></div>
+    </aside>
+
+    <section>
+      <div class="topbar">
+        <button id="resetSelectedButton" type="button">Reset selected</button>
+        <button id="resetAllButton" type="button">Reset all</button>
+        <label><input id="showMovedOnly" type="checkbox"> moved only</label>
+      </div>
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="canvas" width="1200" height="800"></canvas>
+      </div>
+      <div class="bottom">
+        <span id="imageInfo">No images loaded.</span>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      channels: [],
+      selectedIndex: -1,
+      folderLabel: "",
+      baseWidth: 1200,
+      baseHeight: 800
+    };
+
+    const els = {
+      loadButton: document.getElementById("loadButton"),
+      folderInput: document.getElementById("folderInput"),
+      folderName: document.getElementById("folderName"),
+      status: document.getElementById("status"),
+      channelList: document.getElementById("channelList"),
+      canvas: document.getElementById("canvas"),
+      canvasWrap: document.getElementById("canvasWrap"),
+      stepInput: document.getElementById("stepInput"),
+      fitToggle: document.getElementById("fitToggle"),
+      zoomInput: document.getElementById("zoomInput"),
+      blendSelect: document.getElementById("blendSelect"),
+      otherOpacity: document.getElementById("otherOpacity"),
+      selectedOpacity: document.getElementById("selectedOpacity"),
+      upButton: document.getElementById("upButton"),
+      downButton: document.getElementById("downButton"),
+      leftButton: document.getElementById("leftButton"),
+      rightButton: document.getElementById("rightButton"),
+      zeroButton: document.getElementById("zeroButton"),
+      resetSelectedButton: document.getElementById("resetSelectedButton"),
+      resetAllButton: document.getElementById("resetAllButton"),
+      showMovedOnly: document.getElementById("showMovedOnly"),
+      showAllButton: document.getElementById("showAllButton"),
+      hideAllButton: document.getElementById("hideAllButton"),
+      copyButton: document.getElementById("copyButton"),
+      downloadButton: document.getElementById("downloadButton"),
+      imageInfo: document.getElementById("imageInfo")
+    };
+
+    function imageExtensions() {
+      return [".tif", ".tiff", ".png", ".jpg", ".jpeg"];
+    }
+
+    function hasImageExtension(name) {
+      const lower = name.toLowerCase();
+      return imageExtensions().some(ext => lower.endsWith(ext));
+    }
+
+    function isTiff(name) {
+      const lower = name.toLowerCase();
+      return lower.endsWith(".tif") || lower.endsWith(".tiff");
+    }
+
+    function simpleName(file) {
+      return file.name.replace(/\.(ome\.)?tiff?$/i, "");
+    }
+
+    function markerLabel(file) {
+      const stem = simpleName(file);
+      const beforeRoi = stem.split(/_ROI/i)[0];
+      const parts = beforeRoi.split("_").filter(part => part !== "");
+      if (parts.length === 0 || beforeRoi === stem) {
+        return stem;
+      }
+      return parts[parts.length - 1];
+    }
+
+    function setStatus(text, warn=false) {
+      els.status.textContent = text;
+      els.status.className = warn ? "status warn" : "status";
+    }
+
+    function stepValue() {
+      const value = Number(els.stepInput.value);
+      if (Number.isFinite(value) && value > 0) {
+        return value;
+      }
+      return 1;
+    }
+
+    function selectedChannel() {
+      if (state.selectedIndex < 0) {
+        return null;
+      }
+      return state.channels[state.selectedIndex];
+    }
+
+    function roundShift(value) {
+      const rounded = Math.round(value * 1000) / 1000;
+      if (Number.isInteger(rounded)) {
+        return String(rounded);
+      }
+      return rounded.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    }
+
+    async function loadBitmap(file) {
+      if (isTiff(file.name)) {
+        if (!window.UTIF) {
+          throw new Error("UTIF decoder was not loaded");
+        }
+        const buffer = await file.arrayBuffer();
+        const ifds = UTIF.decode(buffer);
+        if (!ifds.length) {
+          throw new Error("TIFF has no image frames: " + file.name);
+        }
+        UTIF.decodeImage(buffer, ifds[0]);
+        const rgba = UTIF.toRGBA8(ifds[0]);
+        const width = ifds[0].width;
+        const height = ifds[0].height;
+        const scratch = document.createElement("canvas");
+        scratch.width = width;
+        scratch.height = height;
+        scratch.getContext("2d").putImageData(
+          new ImageData(new Uint8ClampedArray(rgba), width, height),
+          0,
+          0
+        );
+        return scratch;
+      }
+
+      const url = URL.createObjectURL(file);
+      try {
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        return img;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    function sortFiles(files) {
+      return files.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
+    }
+
+    function chooseInitialSelection(channels) {
+      const moving = channels.findIndex(ch => !/^NUCLEI_/i.test(ch.file.name) && !/_CD3_/i.test(ch.file.name));
+      if (moving !== -1) {
+        return moving;
+      }
+      return channels.length ? 0 : -1;
+    }
+
+    async function loadFolder(files) {
+      const imageFiles = sortFiles(Array.from(files).filter(file => hasImageExtension(file.name)));
+      if (!imageFiles.length) {
+        setStatus("No image files found.", true);
+        return;
+      }
+
+      state.channels = [];
+      state.selectedIndex = -1;
+      renderChannels();
+      draw();
+      setStatus("Loading 0/" + imageFiles.length + "...");
+
+      for (let i = 0; i < imageFiles.length; i++) {
+        const file = imageFiles[i];
+        setStatus("Loading " + (i + 1) + "/" + imageFiles.length + ": " + file.name);
+        const image = await loadBitmap(file);
+        state.channels.push({
+          file,
+          name: simpleName(file),
+          label: markerLabel(file),
+          image,
+          width: image.naturalWidth || image.width,
+          height: image.naturalHeight || image.height,
+          dx: 0,
+          dy: 0,
+          visible: true
+        });
+      }
+
+      state.baseWidth = Math.max(...state.channels.map(ch => ch.width));
+      state.baseHeight = Math.max(...state.channels.map(ch => ch.height));
+      els.canvas.width = state.baseWidth;
+      els.canvas.height = state.baseHeight;
+      state.selectedIndex = chooseInitialSelection(state.channels);
+      state.folderLabel = imageFiles[0].webkitRelativePath.split("/").slice(0, -1).join("/") || "selected files";
+      els.folderName.textContent = state.folderLabel;
+      els.copyButton.disabled = false;
+      els.downloadButton.disabled = false;
+      renderChannels();
+      updateCanvasScale();
+      draw();
+      setStatus("Loaded " + state.channels.length + " images.");
+    }
+
+    function renderChannels() {
+      els.channelList.innerHTML = "";
+      state.channels.forEach((ch, index) => {
+        const row = document.createElement("div");
+        row.className = "channel" + (index === state.selectedIndex ? " selected" : "");
+        row.title = ch.file.name;
+
+        const visible = document.createElement("input");
+        visible.type = "checkbox";
+        visible.checked = ch.visible;
+        visible.addEventListener("change", () => {
+          ch.visible = visible.checked;
+          draw();
+        });
+
+        const selected = document.createElement("input");
+        selected.type = "checkbox";
+        selected.checked = index === state.selectedIndex;
+        selected.addEventListener("change", () => {
+          setShiftSelection(index);
+        });
+
+        const text = document.createElement("div");
+        const name = document.createElement("div");
+        name.className = "channel-name";
+        name.title = ch.file.name;
+        name.textContent = ch.label;
+        const meta = document.createElement("div");
+        meta.className = "channel-meta";
+        meta.textContent = "dy " + roundShift(ch.dy) + " / dx " + roundShift(ch.dx);
+        text.appendChild(name);
+        text.appendChild(meta);
+
+        row.appendChild(visible);
+        row.appendChild(selected);
+        row.appendChild(text);
+        els.channelList.appendChild(row);
+      });
+      updateInfo();
+    }
+
+    function updateInfo() {
+      if (!state.channels.length) {
+        els.imageInfo.textContent = "No images loaded.";
+        return;
+      }
+      const selected = selectedChannel();
+      const moved = state.channels.filter(ch => ch.dx !== 0 || ch.dy !== 0).length;
+      let label = state.baseWidth + " x " + state.baseHeight + " px";
+      label += " / " + state.channels.length + " channels";
+      label += " / " + moved + " moved";
+      if (selected) {
+        label += " / selected " + selected.name;
+      }
+      els.imageInfo.textContent = label;
+    }
+
+    function draw() {
+      const ctx = els.canvas.getContext("2d");
+      ctx.save();
+      ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
+      ctx.globalCompositeOperation = els.blendSelect.value;
+
+      state.channels.forEach((ch, index) => {
+        if (!ch.visible) {
+          return;
+        }
+        if (els.showMovedOnly.checked && ch.dx === 0 && ch.dy === 0) {
+          return;
+        }
+        ctx.globalAlpha = index === state.selectedIndex
+          ? Number(els.selectedOpacity.value)
+          : Number(els.otherOpacity.value);
+        ctx.drawImage(ch.image, ch.dx, ch.dy);
+      });
+
+      ctx.restore();
+      updateInfo();
+    }
+
+    function fitScale() {
+      if (!state.baseWidth || !state.baseHeight) {
+        return 1;
+      }
+      const pad = 44;
+      const w = Math.max(200, els.canvasWrap.clientWidth - pad);
+      const h = Math.max(200, els.canvasWrap.clientHeight - pad);
+      return Math.min(w / state.baseWidth, h / state.baseHeight, 1);
+    }
+
+    function updateCanvasScale() {
+      let scale = Number(els.zoomInput.value);
+      if (!Number.isFinite(scale) || scale <= 0) {
+        scale = 1;
+      }
+      if (els.fitToggle.checked) {
+        scale = fitScale() * scale;
+      }
+      els.canvas.style.width = Math.max(1, Math.round(state.baseWidth * scale)) + "px";
+      els.canvas.style.height = Math.max(1, Math.round(state.baseHeight * scale)) + "px";
+    }
+
+    function nudge(dy, dx) {
+      const ch = selectedChannel();
+      if (!ch) {
+        return;
+      }
+      ch.dy += dy;
+      ch.dx += dx;
+      renderChannels();
+      draw();
+    }
+
+    function setShiftSelection(index) {
+      if (state.selectedIndex === index) {
+        state.channels[index].visible = false;
+        state.selectedIndex = -1;
+      } else {
+        const previousIndex = state.selectedIndex;
+        if (previousIndex >= 0 && previousIndex < state.channels.length) {
+          state.channels[previousIndex].visible = false;
+        }
+        state.selectedIndex = index;
+        state.channels[index].visible = true;
+      }
+      renderChannels();
+      draw();
+    }
+
+    function setAllVisible(visible) {
+      state.channels.forEach(ch => {
+        ch.visible = visible;
+      });
+      renderChannels();
+      draw();
+    }
+
+    function resetSelected() {
+      const ch = selectedChannel();
+      if (!ch) {
+        return;
+      }
+      ch.dy = 0;
+      ch.dx = 0;
+      renderChannels();
+      draw();
+    }
+
+    function resetAll() {
+      state.channels.forEach(ch => {
+        ch.dy = 0;
+        ch.dx = 0;
+      });
+      renderChannels();
+      draw();
+    }
+
+    function tsvText() {
+      const rows = ["filename\tmanual_dy\tmanual_dx"];
+      state.channels.forEach(ch => {
+        if (ch.dy !== 0 || ch.dx !== 0) {
+          rows.push(ch.file.name + "\t" + roundShift(ch.dy) + "\t" + roundShift(ch.dx));
+        }
+      });
+      return rows.join("\n") + "\n";
+    }
+
+    async function copyTsv() {
+      const text = tsvText();
+      await navigator.clipboard.writeText(text);
+      setStatus("Copied TSV.");
+    }
+
+    function downloadTsv() {
+      const text = tsvText();
+      const blob = new Blob([text], {type: "text/tab-separated-values"});
+      const a = document.createElement("a");
+      const firstStem = state.channels.length ? state.channels[0].name : "manual_roi_adjustments";
+      const safeFolder = (state.folderLabel + "_" + firstStem)
+        .replace(/[^A-Za-z0-9_-]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 120);
+      const now = new Date();
+      const stamp = [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, "0"),
+        String(now.getDate()).padStart(2, "0"),
+        "_",
+        String(now.getHours()).padStart(2, "0"),
+        String(now.getMinutes()).padStart(2, "0"),
+        String(now.getSeconds()).padStart(2, "0")
+      ].join("");
+      a.href = URL.createObjectURL(blob);
+      a.download = (safeFolder || "manual_roi_adjustments") + "_" + stamp + "_manual_roi_adjustments.tsv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+      setStatus("Downloaded TSV.");
+    }
+
+    els.loadButton.addEventListener("click", () => els.folderInput.click());
+    els.folderInput.addEventListener("change", () => loadFolder(els.folderInput.files).catch(err => {
+      console.error(err);
+      setStatus(err.message, true);
+    }));
+
+    els.upButton.addEventListener("click", () => nudge(-stepValue(), 0));
+    els.downButton.addEventListener("click", () => nudge(stepValue(), 0));
+    els.leftButton.addEventListener("click", () => nudge(0, -stepValue()));
+    els.rightButton.addEventListener("click", () => nudge(0, stepValue()));
+    els.zeroButton.addEventListener("click", resetSelected);
+    els.resetSelectedButton.addEventListener("click", resetSelected);
+    els.resetAllButton.addEventListener("click", resetAll);
+    els.showAllButton.addEventListener("click", () => setAllVisible(true));
+    els.hideAllButton.addEventListener("click", () => setAllVisible(false));
+    els.copyButton.addEventListener("click", () => copyTsv().catch(err => setStatus(err.message, true)));
+    els.downloadButton.addEventListener("click", downloadTsv);
+
+    [els.fitToggle, els.zoomInput].forEach(el => el.addEventListener("input", updateCanvasScale));
+    [els.blendSelect, els.otherOpacity, els.selectedOpacity, els.showMovedOnly].forEach(el => {
+      el.addEventListener("input", draw);
+      el.addEventListener("change", draw);
+    });
+    window.addEventListener("resize", updateCanvasScale);
+
+    window.addEventListener("keydown", event => {
+      if (event.target && ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) {
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        nudge(-stepValue(), 0);
+        event.preventDefault();
+      } else if (event.key === "ArrowDown") {
+        nudge(stepValue(), 0);
+        event.preventDefault();
+      } else if (event.key === "ArrowLeft") {
+        nudge(0, -stepValue());
+        event.preventDefault();
+      } else if (event.key === "ArrowRight") {
+        nudge(0, stepValue());
+        event.preventDefault();
+      }
+    });
+
+    updateCanvasScale();
+    draw();
+  </script>
+</body>
+</html>
