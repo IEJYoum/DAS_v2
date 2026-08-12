@@ -25,6 +25,7 @@ from visualization.call_visu_html_7 import add_scene_grouping
 from visualization.call_visu_html_7 import build_roi_data_for_seed
 from visualization.call_visu_html_7 import build_view_sets
 from visualization.call_visu_html_7 import choose_default_view
+from visualization.call_visu_html_7 import derive_groupings_from_obs
 from visualization.call_visu_html_7 import natural_sort_key
 from visualization.call_visu_html_7 import prune_and_sort_groupings
 from visualization.visu_html_functions7 import build_catalog
@@ -33,9 +34,8 @@ from visualization.visu_html_functions7 import build_catalog
 NUCLEI_PREFIX = "Intensity_MeanIntensity_"
 DEFAULT_INPUT_ROOT = Path(r"Z:\Multiplex_IHC_studies\Isaac_Youm\Thresholding_Example")
 DEFAULT_OUTPUT_ROOT = DEFAULT_INPUT_ROOT / "output"
-DEFAULT_STUDY_THRESHOLDS_PATH = DEFAULT_INPUT_ROOT / "KBPSGL1_V1_studythresholds.csv"
-DEFAULT_PREDICTED_THRESHOLDS_PATH = DEFAULT_INPUT_ROOT / "Model33_predictedThresholds.csv.csv"
 STUDY_THRESHOLD_WRITER_URL = "http://127.0.0.1:38765/study_threshold"
+TRIPLET_STEM = "fcs_thresholding"
 
 
 def require_directory(path_value, label):
@@ -364,14 +364,12 @@ def load_predicted_thresholds(csv_path, roi_id):
     return out
 
 
-def build_threshold_store(datasets, study_thresholds_path, predicted_thresholds_path):
-    """Return a threshold_store payload for discovered ROI datasets."""
+def build_threshold_store(datasets, output_root, study_thresholds_path="", predicted_thresholds_path=""):
+    """Return a save-capable threshold_store payload for discovered ROI datasets."""
     if not isinstance(datasets, list) or len(datasets) == 0:
         raise ValueError("datasets must be a non-empty list")
     study_path = Path(study_thresholds_path) if study_thresholds_path not in [None, ""] else None
     predicted_path = Path(predicted_thresholds_path) if predicted_thresholds_path not in [None, ""] else None
-    if study_path is None and predicted_path is None:
-        raise ValueError("study_thresholds_path or predicted_thresholds_path is required")
     initial = {}
     if study_path is not None and study_path.is_file():
         initial = load_study_thresholds(study_path)
@@ -397,7 +395,7 @@ def build_threshold_store(datasets, study_thresholds_path, predicted_thresholds_
         core_to_roi_id[core_name] = str(dataset["roi_id"])
     target_path = study_path
     if target_path is None:
-        target_path = Path(DEFAULT_INPUT_ROOT) / "studythresholds.csv"
+        target_path = Path(output_root) / "studythresholds.csv"
     out = {
         "mode": "study_thresholds",
         "study_thresholds_path": str(target_path),
@@ -405,6 +403,8 @@ def build_threshold_store(datasets, study_thresholds_path, predicted_thresholds_
         "roi_ids": roi_ids,
         "marker_list": markers,
         "initial_thresholds": initial,
+        "working_thresholds": {},
+        "saved_thresholds": {},
         "core_to_roi_id": core_to_roi_id,
     }
     print("Built threshold_store:", len(roi_ids), "ROIs,", len(markers), "markers, path:", str(target_path))
@@ -592,6 +592,21 @@ def combine_triplets(triplets):
     return df, obs, dfxy
 
 
+def write_triplet_project(output_root, df, obs, dfxy, stem=TRIPLET_STEM):
+    """Write a DAS-readable df/obs/dfxy triplet and return its folder path."""
+    if not isinstance(df, pd.DataFrame) or not isinstance(obs, pd.DataFrame) or not isinstance(dfxy, pd.DataFrame):
+        raise ValueError("df, obs, and dfxy must be pandas DataFrames")
+    if not df.index.equals(obs.index) or not df.index.equals(dfxy.index):
+        raise ValueError("cannot write triplet because df, obs, and dfxy indexes do not match")
+    project_dir = Path(output_root) / "DAS_project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    df.to_csv(project_dir / (stem + "_df.csv"))
+    obs.to_csv(project_dir / (stem + "_obs.csv"))
+    dfxy.to_csv(project_dir / (stem + "_dfxy.csv"))
+    print("Wrote DAS triplet:", str(project_dir))
+    return project_dir
+
+
 def validate_label_overlap(dataset_dict, obs):
     """Return the overlap count between CSV ObjectNumber values and label TIFF values."""
     if not isinstance(dataset_dict, dict):
@@ -648,8 +663,12 @@ def build_minimal_view_fields(core_names, obs):
         raise ValueError("core_names is empty")
     if not isinstance(obs, pd.DataFrame):
         raise ValueError("obs must be a pandas DataFrame")
-    core_meta = {}
-    groupings = {}
+    core_positions = {}
+    if "core" in obs.columns:
+        core_array = obs["core"].astype(str).to_numpy()
+        for core in core_names:
+            core_positions[core] = np.flatnonzero(core_array == str(core))
+    core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
     add_scene_grouping(core_names, core_meta, groupings)
     add_default_full_dataset_grouping(obs, core_names, groupings)
     groupings = prune_and_sort_groupings(groupings, core_names)
@@ -769,9 +788,8 @@ def build_viewer_from_datasets(datasets, output_root, study_thresholds_path="", 
         validate_label_overlap(dataset, obs1)
         triplets.append((df1, obs1, dfxy1))
     df, obs, dfxy = combine_triplets(triplets)
-    threshold_store = {}
-    if study_thresholds_path not in [None, ""] or predicted_thresholds_path not in [None, ""]:
-        threshold_store = build_threshold_store(datasets, study_thresholds_path, predicted_thresholds_path)
+    write_triplet_project(output_path, df, obs, dfxy)
+    threshold_store = build_threshold_store(datasets, output_path, study_thresholds_path, predicted_thresholds_path)
     catalog = build_catalog_for_datasets(datasets, df, obs, dfxy, output_path, threshold_store)
     viewer_data = build_viewer(catalog, output_path)
     write_debug_report(output_path, datasets, viewer_data)
@@ -890,7 +908,6 @@ def parse_cli_args(args):
     positional = []
     roi_values = []
     layout = "single"
-    use_default_thresholds = False
     i = 0
     while i < len(args):
         arg = str(args[i])
@@ -908,23 +925,18 @@ def parse_cli_args(args):
             i += 2
             continue
         if arg == "--no-thresholds":
-            use_default_thresholds = False
-            i += 1
-            continue
-        if arg == "--default-thresholds":
-            use_default_thresholds = True
             i += 1
             continue
         positional.append(args[i])
         i += 1
-    return positional, roi_values, layout, use_default_thresholds
+    return positional, roi_values, layout
 
 
 def main(argv):
     """Return viewer_data after parsing command line arguments."""
     if not isinstance(argv, list):
         raise ValueError("argv must be a list")
-    args, roi_values, layout, use_default_thresholds = parse_cli_args(argv[1:])
+    args, roi_values, layout = parse_cli_args(argv[1:])
     if len(args) >= 2:
         input_root = args[0]
         output_root = args[1]
@@ -936,8 +948,8 @@ def main(argv):
         output_root = DEFAULT_OUTPUT_ROOT
         print("Using default input_root:", str(input_root))
         print("Using default output_root:", str(output_root))
-    study_thresholds_path = args[2] if len(args) >= 3 else (DEFAULT_STUDY_THRESHOLDS_PATH if use_default_thresholds else "")
-    predicted_thresholds_path = args[3] if len(args) >= 4 else (DEFAULT_PREDICTED_THRESHOLDS_PATH if use_default_thresholds else "")
+    study_thresholds_path = args[2] if len(args) >= 3 else ""
+    predicted_thresholds_path = args[3] if len(args) >= 4 else ""
     if str(layout).strip().lower() == "single":
         return run(input_root, output_root, study_thresholds_path, predicted_thresholds_path, roi_values=roi_values)
     return run_slide_batch(input_root, output_root, layout=layout, study_thresholds_path=study_thresholds_path, predicted_thresholds_path=predicted_thresholds_path, roi_values=roi_values)

@@ -1349,6 +1349,7 @@ def build_viewer_from_seed(seed_viewer, catalog_patch=None, outdir=None, norm_kw
         "overlay_backend",
         "roi_data",
         "roi_mailbox",
+        "threshold_store",
     ]:
         if key in patch:
             viewer_data[key] = patch[key]
@@ -3291,8 +3292,13 @@ function makeTileEl(tile, view, subsetOpt) {
     d.appendChild(h('img', {'class': 'layer ann', 'src': rel, 'loading': 'lazy', 'decoding': 'async'}));
   }
   let tileLabel = '';
-  if (tile.core) tileLabel = tile.display_label || tile.label || tile.core;
-  else tileLabel = tile.display_label || tile.label || tile.filename || tile.asset_type_label || tile.asset_type_id || 'figure';
+  if (tile.tile_kind === 'composite' && tile.core) {
+    tileLabel = tile.display_label || tile.label || tile.core;
+  } else if (tile.core) {
+    tileLabel = (tile.display_label || tile.label || tile.core) + ' | ' + (tile.asset_type_label || tile.asset_type_id || 'asset');
+  } else {
+    tileLabel = tile.display_label || tile.label || tile.filename || tile.asset_type_label || tile.asset_type_id || 'figure';
+  }
   if (!tile.core) {
     const bracketParts = [];
     if (tile.figure_family) bracketParts.push(String(tile.figure_family));
@@ -5166,7 +5172,7 @@ function thresholdStore() {
 }
 function thresholdStoreActive() {
   const store = thresholdStore();
-  return !!(store && String(store.mode || 'study_thresholds') === 'study_thresholds');
+  return !!(store && String(store.mode || '') === 'study_thresholds');
 }
 function normalizeMemoryKeyPart(value) {
   return String(value || '').trim().split(String.fromCharCode(92)).join('/').toLowerCase();

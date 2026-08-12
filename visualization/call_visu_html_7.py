@@ -3426,6 +3426,83 @@ def build_roi_mailbox_payload(roi_mailbox):
     }
 
 
+def study_threshold_writer_url_from_mailbox(roi_mailbox):
+    if not isinstance(roi_mailbox, dict):
+        return ""
+    writer_url = str(roi_mailbox.get("writer_url", "")).strip()
+    suffix = "/ifa_roi_patch"
+    if writer_url.endswith(suffix):
+        return writer_url[: -len(suffix)] + "/study_threshold"
+    return ""
+
+
+def threshold_roi_id_for_core(obs, positions, core, slide_scene=""):
+    if not isinstance(obs, pd.DataFrame):
+        return str(core)
+    for col in ["roi_id", "ROI_ID", "Image", "image"]:
+        if col not in obs.columns:
+            continue
+        vals = sorted(
+            [str(x).strip() for x in obs.iloc[positions][col].dropna().unique().tolist() if str(x).strip() != ""],
+            key=natural_sort_key,
+        )
+        if len(vals) == 1:
+            return vals[0]
+    scene = str(slide_scene or "").strip()
+    if scene != "":
+        if scene.lower().startswith("nuclei_"):
+            return scene
+        return "Nuclei_" + scene
+    return str(core)
+
+
+def build_threshold_store_payload(obs, df, core_names, core_positions, meta=None, roi_mailbox=None, out_root=""):
+    expr_df, marker_list, _expr_reason = build_expression_payload_frame(df, obs)
+    if expr_df is None or len(marker_list) == 0:
+        return {}
+    if not isinstance(core_positions, dict) or len(core_positions) == 0:
+        return {}
+    base_dir = ""
+    if isinstance(meta, dict):
+        base_dir = normalize_stored_path(meta.get("data_folder", ""))
+    if base_dir == "":
+        base_dir = normalize_stored_path(out_root)
+    if base_dir == "":
+        base_dir = str(out_root or "").strip()
+    slide_scene_series = None
+    if isinstance(obs, pd.DataFrame) and "slide_scene" in obs.columns:
+        slide_scene_series = obs["slide_scene"].astype(str)
+    roi_ids = []
+    core_to_roi_id = {}
+    for core in list(core_names or []):
+        core = str(core)
+        positions = np.asarray(core_positions.get(core, []), dtype=int)
+        if positions.size == 0:
+            continue
+        slide_scene = ""
+        if isinstance(slide_scene_series, pd.Series):
+            vals = sorted(list(set(slide_scene_series.iloc[positions].astype(str).tolist())), key=natural_sort_key)
+            if len(vals) == 1:
+                slide_scene = str(vals[0])
+        roi_id = threshold_roi_id_for_core(obs, positions, core, slide_scene=slide_scene)
+        core_to_roi_id[core] = roi_id
+        if roi_id not in roi_ids:
+            roi_ids.append(roi_id)
+    if len(roi_ids) == 0:
+        return {}
+    return {
+        "mode": "study_thresholds",
+        "study_thresholds_path": os.path.join(base_dir, "studythresholds.csv") if base_dir != "" else "studythresholds.csv",
+        "writer_url": study_threshold_writer_url_from_mailbox(roi_mailbox),
+        "roi_ids": roi_ids,
+        "marker_list": marker_list,
+        "initial_thresholds": {},
+        "working_thresholds": {},
+        "saved_thresholds": {},
+        "core_to_roi_id": core_to_roi_id,
+    }
+
+
 def make_missing_tile(core):
     return {
         "tile_kind": "missing",
@@ -3586,6 +3663,8 @@ def build_catalog(by_core, obs):
 
 
 def add_scene_grouping(core_names, core_meta, groupings):
+    if "slide_scene" in groupings:
+        return
     if "scene" not in groupings:
         groupings["scene"] = {}
     i = 0
@@ -3779,8 +3858,30 @@ def derive_groupings_from_obs(obs, allowed_cores, core_positions=None):
     valid_cores = [str(core) for core in allowed_cores if len(core_positions.get(str(core), [])) > 0]
     if len(valid_cores) == 0:
         return core_meta, groupings
+    if "slide_scene" in obs_values.columns:
+        cleaned_scene = _clean_obs_values(obs_values["slide_scene"])
+        if "slide_scene" not in groupings:
+            groupings["slide_scene"] = {}
+        for core in valid_cores:
+            positions = np.asarray(core_positions.get(core, []), dtype=int)
+            try:
+                vals = cleaned_scene.iloc[positions].dropna().unique().tolist()
+            except Exception:
+                vals = []
+            if len(vals) != 1:
+                continue
+            val = str(vals[0])
+            if val not in groupings["slide_scene"]:
+                groupings["slide_scene"][val] = []
+            if core not in groupings["slide_scene"][val]:
+                groupings["slide_scene"][val].append(core)
+            if core not in core_meta:
+                core_meta[core] = {}
+            core_meta[core]["slide_scene"] = val
     pair_map, _subset_source = classify_obs_columns_by_core_positions(obs_values, {core: core_positions.get(core, []) for core in valid_cores})
     for cname in pair_map:
+        if str(cname) == "slide_scene":
+            continue
         pairs = list(pair_map.get(cname, []))
         if len(pairs) == 0:
             continue
@@ -3979,6 +4080,7 @@ def assemble_project_catalog(core_tiles, patch, figure_entries, subset_options, 
         "overlay_backend": patch.get("overlay_backend", {}),
         "roi_data": patch.get("roi_data", {}),
         "roi_mailbox": patch.get("roi_mailbox", {}),
+        "threshold_store": patch.get("threshold_store", {}),
         "core_meta": patch.get("core_meta", {}),
         "groupings": patch.get("groupings", {}),
         "view_sets": patch.get("view_sets", []),
@@ -4027,6 +4129,15 @@ def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_roo
     patch["figure_entries"] = figure_entries
     patch["roi_data"] = build_roi_data_for_seed(base_viewer, obs, dfxy, df=df, meta=meta, out_root=out_root)
     patch["roi_mailbox"] = build_roi_mailbox_payload(roi_mailbox)
+    patch["threshold_store"] = build_threshold_store_payload(
+        obs,
+        df,
+        [str(x) for x in core_tiles.keys()],
+        core_positions,
+        meta=meta,
+        roi_mailbox=roi_mailbox,
+        out_root=out_root,
+    )
     patch["overlay_backend"] = {
         "segmentation_root": str(overlay_report.get("segmentation_root", "")),
         "segmentation_roots": list(overlay_report.get("segmentation_roots", [])),
