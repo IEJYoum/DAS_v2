@@ -1,0 +1,309 @@
+viewer slide_scene identity plan v1
+===================================
+
+Problem
+-------
+
+The viewer still has several overlapping identity systems:
+
+- slide_scene from obs
+- core / A1 / sceneA1-style labels
+- roi_id / Nuclei_<slide_scene>
+- segmentation path lookup by ROI token
+- asset-registry reconstruction from TIFF paths
+- display labels inferred separately from paths
+
+This makes multislide behavior fragile. In particular, ROI1 in two slides can
+look the same to some code paths even when obs has distinct slide_scene values.
+
+Desired contract
+----------------
+
+slide_scene is the single identity key for one spatial unit.
+
+It should be human friendly and opaque to the engine. Valid examples:
+
+- 40393_ROI1
+- BTK153_ROI1
+- TMA1_A1
+- pTMA1_A1
+- Pt.2_scene2
+- 43499_ROI1
+
+The core viewer engine should not care how this string was constructed. It
+should only require:
+
+- obs["slide_scene"] exists
+- values are non-empty strings
+- each ROI/core/scene has exactly one slide_scene
+- slide_scene values are unique at the spatial-unit level
+- all downstream matching is exact string matching
+
+Important distinction
+---------------------
+
+Input adapters may parse folders and filenames.
+The DAS/viewer engine should not.
+
+Examples:
+
+- Standalone FCS wrapper can decide that folder 40393 + ROI01 becomes
+  slide_scene = 40393_ROI1.
+- A TMA adapter can decide that pTMA1 + A1 becomes slide_scene = pTMA1_A1.
+- A legacy cmIF adapter can decide that Pt.2_scene2 is the slide_scene.
+
+After that point, downstream code should not parse ROI numbers, scene letters,
+or TMA labels for identity.
+
+Target schema
+-------------
+
+Dataset/input record, built upstream:
+
+  {
+    "slide_scene": "BTK153_ROI1",
+    "display_label": "BTK153 ROI1",
+    "channel_tifs": [...],
+    "segmentation_tif": ".../label_...ROI01.tif",
+    "threshold_id": "BTK153_ROI1",
+    "layout_hint": optional
+  }
+
+obs:
+
+  obs["slide_scene"] = exact same string for every cell in that unit
+
+viewer tile:
+
+  {
+    "core": "BTK153_ROI1",
+    "slide_scene": "BTK153_ROI1",
+    "display_label": "BTK153 ROI1",
+    "tiff_paths": [...],
+    "overlay_paths": ["...label tif..."]
+  }
+
+For transition, the JSON field can still be called "core" because the JS runtime
+is wired around core keys. But going forward, core should equal slide_scene
+unless a narrow legacy adapter explicitly opts into temporary aliases.
+
+Pass 1: contract helpers
+------------------------
+
+Add a small set of boring helpers in call_visu_html_7.py or a support module:
+
+- normalize_slide_scene(value)
+  - strip whitespace
+  - reject empty / nan / none
+  - do not parse or rewrite internal punctuation
+
+- require_slide_scene_column(obs)
+  - raises clear ValueError if missing
+  - raises if any empty values
+
+- validate_slide_scene_identity(obs)
+  - duplicate cell index check stays
+  - slide_scene must be present
+  - does not require any naming convention
+
+- core_key_from_slide_scene(slide_scene)
+  - for new code, return slide_scene
+  - transitional point if old code still needs a wrapper
+
+- display_label_from_slide_scene(slide_scene)
+  - cosmetic only
+  - may turn 40393_ROI1 into 40393 ROI1
+  - must not feed back into identity
+
+This gives the codebase one place to enforce the contract.
+
+Pass 2: asset registry identity
+-------------------------------
+
+When channel assets are created, store slide_scene in each registry asset entry.
+
+Current problem:
+
+- build_core_tiles_from_asset_registry() re-identifies assets from TIFF paths.
+- That is fragile and folder-convention dependent.
+
+Desired behavior:
+
+- ensure_channel_asset(..., slide_scene=...)
+- registry entry includes:
+
+    "slide_scene": "BTK153_ROI1"
+
+- build_core_tiles_from_asset_registry() groups assets by stored slide_scene.
+- If an old registry entry has no slide_scene, either:
+  - skip it with a clear message, or
+  - use legacy path parsing only inside a named legacy fallback helper.
+
+Forward preference:
+
+- new registries should never need path parsing for identity.
+- path parsing is adapter territory, not engine territory.
+
+Pass 3: segmentation exact mapping
+----------------------------------
+
+Build segmentation lookup as:
+
+  segmentation_by_slide_scene = {
+    "BTK153_ROI1": ".../label_...ROI01.tif"
+  }
+
+Use this mapping everywhere segmentation overlays are built.
+
+Replace broad calls like:
+
+  _find_seg_file_multi(seg_roots, slide_scene)
+
+with:
+
+  seg_path = segmentation_by_slide_scene.get(slide_scene)
+
+Fallback policy:
+
+- exact mapping is required for multislide builds
+- ROI-token-only fallback can remain only for legacy single-slide/manual mode
+- if more than one possible segmentation file exists, raise or skip with a
+  loud debug message; do not pick the shortest filename
+
+This should eliminate ghost overlays caused by ROI01 matching the wrong slide.
+
+Pass 4: groupings and view values
+---------------------------------
+
+View/group values should expose slide_scene directly.
+
+Desired:
+
+- Group = slide_scene
+- Value = 40393_ROI1, BTK153_ROI1, TMA1_A1, etc.
+
+Avoid:
+
+- Group = scene
+- Value = sceneA1
+
+The synthetic scene group should become legacy fallback only:
+
+- if obs has no slide_scene and old manual mode is active, allow sceneA1
+- if obs has slide_scene, never synthesize sceneA1 as the primary view identity
+
+Pass 5: ROI and threshold payloads
+----------------------------------
+
+ROI and threshold payloads should use slide_scene as the default key.
+
+Suggested threshold fields:
+
+  {
+    "roi_ids": ["BTK153_ROI1", "BTK153_ROI2"],
+    "core_to_roi_id": {
+      "BTK153_ROI1": "BTK153_ROI1"
+    }
+  }
+
+If an external table truly requires Nuclei_<slide_scene>, treat that as an
+export alias:
+
+  threshold_export_id = "Nuclei_" + slide_scene
+
+but do not let that alias become the internal identity.
+
+Pass 6: TMA layout as optional display/layout behavior
+-----------------------------------------------------
+
+Do not build the core identity architecture around TMA layout.
+
+If slide_scene values look like TMA/core positions, e.g.
+
+- TMA1_A1
+- pTMA1_A1
+- A1, A2, B3 inside one known TMA
+
+then a layout helper can derive row/column positions for display:
+
+  layout_hint = {"kind": "tma", "row": "A", "col": 1}
+
+If no such pattern exists, use compact/square layout.
+
+This keeps TMA layout as a nice special case instead of the backbone of
+identity.
+
+Pass 7: deletion / trimming targets
+-----------------------------------
+
+Likely removable or shrinkable after the contract is enforced:
+
+- seed_core_slide_scene_map(), or reduce it to reading tile["slide_scene"]
+- extract_slide_scene_from_path() from engine paths
+- ROI-token fallback inside _find_seg_file()
+- parse_core_series() use in project-aware matching
+- core_series_candidate_priority()
+- short_core_label_from_slide_scene() if replaced by display_label helper
+- core_to_roi_id suffix matching in JS threshold popup
+- scattered "Nuclei_" prefix fallback logic
+- manual scene expansion fallback paths, if old manual viewer mode is retired
+
+Do not delete first. First make new contract fields visible in viewer_data.json,
+then remove old inference paths once they are unused.
+
+Open question for Claude
+------------------------
+
+Can we safely set viewer core keys equal to slide_scene now?
+
+This would simplify the most code:
+
+- VIEWER.core_tiles keys are slide_scene
+- roi_data.cores keys are slide_scene
+- subset_overlays maps use slide_scene
+- threshold_store.core_to_roi_id is almost unnecessary
+- buttons open ROI/Thresh by slide_scene directly
+
+If this breaks too much JS at once, use a short transition:
+
+- keep field name "core"
+- set core value to slide_scene for new builds
+- keep old A1 aliases only in legacy/manual wrappers
+
+Recommended implementation order
+--------------------------------
+
+1. Add contract helpers and validation.
+2. Update standalone FCS wrapper to produce slide_scene strings like
+   <slide>_ROI<n>, and set core_name = slide_scene.
+3. Update DAS project path to require/use obs["slide_scene"] for matching.
+4. Store slide_scene in asset registry entries.
+5. Rebuild asset-registry discovery around stored slide_scene.
+6. Replace segmentation lookup with an exact slide_scene -> seg path map.
+7. Remove or isolate old parse-core/path-guess helpers.
+
+Exit checks
+-----------
+
+Use small generated viewers, not full production runs first.
+
+Check:
+
+- viewer_data.json core_tiles keys are slide_scene strings
+- every composite tile has tile["slide_scene"]
+- roi_data.cores has the same keys
+- threshold_store.roi_ids are slide_scene strings unless an explicit export
+  alias was requested
+- Group Value menu shows slide_scene values, not sceneA1
+- ROI and Thresh buttons appear for every slide_scene in multislide viewers
+- segmentation overlays use the correct label TIFF for duplicate ROI numbers
+  across slides
+- asset reuse after regeneration discovers the same slide_scene values from
+  registry metadata without reparsing TIFF paths
+
+Bottom line
+-----------
+
+Yes, the architecture can probably shrink substantially, but only if slide_scene
+becomes the actual key, not just one column among several. The goal is to move
+all parsing to adapters and make the viewer engine a dumb exact-string matcher.

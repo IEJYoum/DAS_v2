@@ -1,0 +1,633 @@
+viewer slide_scene identity plan v2
+===================================
+
+Phase 1: core = slide_scene everywhere
+---------------------------------------
+
+This is the high-value change. After Phase 1, the core_tiles dict keys,
+tile["core"], roi_data keys, threshold_store roi_ids, and obs-derived
+groupings all use the same slide_scene string. No new abstractions, no
+manifest object, no resolver function. Just wire existing code to use
+slide_scene as the core key instead of deriving A1/B2 labels.
+
+Phase 2 rewires segmentation lookup. Phase 3 deletes dead code. Phase 4
+handles the FCS adapter. Each phase produces a working viewer.
+
+
+Current identity flow (what breaks)
+------------------------------------
+
+Manual mode (call_visu_html_7.py):
+
+  build_templates()            line 1371   extracts (letter, number) tuples via regex
+    -> collect_scene_keys()    line 1508   enumerates all (letter, number) pairs
+    -> build_core_buckets()    line 1722   organizes assets by (letter, number) key
+    -> build_catalog()         line 3618   calls core_name_from_key() to get "A1"
+       -> build_core_tile_specs()  line 3520   sets tile["core"] = "A1"
+       -> derive_groupings_from_obs()  line 3828  matches obs rows to "A1" cores
+       -> add_scene_grouping()     line 3665  synthesizes "sceneA1" if no slide_scene
+
+  The problem: core_tiles keys are "A1", "A2", etc. But obs["slide_scene"]
+  values are "40393ROI01", "40393ROI02", etc. The engine then needs
+  seed_core_slide_scene_map(), parse_core_series(), and
+  core_series_candidate_priority() to bridge between the two.
+
+Project mode (call_visu_html_7.py):
+
+  run_context_mode()           line 4272
+    -> seed_core_slide_scene_map()  line 2556  extracts slide_scene from source_paths
+    -> build_project_core_positions()  line 2717  matches obs to cores via slide_scene
+    -> trim_seed_viewer_to_obs()    line 3932  drops cores with no obs match
+    -> build_roi_data_for_seed()    line 3234  builds per-core expression/boundary data
+    -> build_threshold_store_payload()  line 3459  builds roi_ids with Nuclei_ prefix
+
+  The problem: seed_core_slide_scene_map re-derives slide_scene from
+  source_paths (calling extract_slide_scene_from_path). If this fails or
+  produces a different string than obs["slide_scene"], cores get dropped
+  and run_context_mode returns None silently.
+
+FCS adapter (threshold_standalone_fcs.py):
+
+  parse_object_csv_filename()  line 88    extracts slide_scene from CSV name
+  core_name_from_slide_scene() line 649   converts slide_scene to "A1"
+  build_catalog_for_datasets() line 682   keys core_tiles by "A1"
+  build_threshold_store()      line 367   roi_ids are "Nuclei_" + slide_scene
+
+  The problem: core = "A1" != slide_scene = "40393ROI01". The Nuclei_ prefix
+  exists only for studythresholds.csv compatibility.
+
+
+Phase 1: core = slide_scene
+=============================
+
+Goal: core_tiles keys are slide_scene strings. tile["core"] = slide_scene.
+No (letter, number) tuples in the identity path. Same viewers, same buttons,
+same output.
+
+1a. build_catalog() stops using core_name_from_key()
+-----------------------------------------------------
+
+File: call_visu_html_7.py
+Function: build_catalog() line 3618
+Agent: Codex (mechanical edit, touches one function)
+
+Current:
+  core_keys = sorted_core_keys(by_core.keys())        # sorts (letter, number) tuples
+  core_names = [core_name_from_key(k) for k in core_keys]
+  ...
+  core = core_name_from_key(key)                       # "A1"
+  tiles = build_core_tile_specs(core, by_core[key])
+
+Change to:
+  core_keys = sorted(by_core.keys(), key=lambda k: natural_sort_key(str(k)))
+  core_names = [str(k) for k in core_keys]
+  ...
+  core = str(key)
+  tiles = build_core_tile_specs(core, by_core[key])
+
+But this requires by_core to be keyed by slide_scene strings, not tuples.
+That means build_core_buckets() must change its keys. See 1b.
+
+
+1b. build_core_buckets() uses slide_scene keys
+-----------------------------------------------
+
+File: call_visu_html_7.py
+Function: build_core_buckets() line 1722
+Agent: Codex (medium edit)
+
+Currently by_core is keyed by (letter, number) tuples from
+collect_scene_keys(). The tuple is used as a dict key and passed to
+resolve_template_for_scene() which substitutes it into path templates.
+
+The path template system needs the (letter, number) decomposition to build
+file paths (e.g. "sceneA001" from template + key). This is adapter-level
+work that must stay.
+
+Change: build_core_buckets() still uses tuples internally for template
+resolution, but its return dict uses slide_scene strings as keys:
+
+  # After building bucket for scene_key (letter, number):
+  slide_scene = derive_slide_scene_from_scene_key(scene_key, templates)
+  by_core[slide_scene] = bucket
+  # instead of: by_core[scene_key] = bucket
+
+New helper (5 lines):
+
+  def derive_slide_scene_from_scene_key(scene_key, templates):
+      # If obs provides slide_scene for this key, use it.
+      # Otherwise construct from the first resolved source path.
+      # Fallback: core_name_from_key(scene_key) for backwards compat.
+      ...
+
+Actually, simpler: if obs has slide_scene, build a mapping at the top of
+build_catalog() from core_name -> slide_scene. Then re-key by_core before
+building tiles.
+
+Simplest approach (recommended):
+
+  In build_catalog(), after building by_core with tuple keys, re-key:
+
+    by_slide_scene = {}
+    for key in by_core:
+        core_name = core_name_from_key(key)  # still used here temporarily
+        slide_scene = obs_slide_scene_for_core.get(core_name, core_name)
+        by_slide_scene[slide_scene] = by_core[key]
+
+  Where obs_slide_scene_for_core is built from obs["slide_scene"] + the
+  existing infer_core_series_from_obs pathway. This avoids changing
+  build_core_buckets internals.
+
+Decision needed: Codex, pick whichever approach touches less code. The goal
+is that build_catalog() returns core_tiles keyed by slide_scene strings.
+
+
+1c. build_core_tile_specs() receives slide_scene as core_name
+--------------------------------------------------------------
+
+File: call_visu_html_7.py
+Function: build_core_tile_specs() line 3520
+Agent: automatic (no change needed)
+
+This function already takes core_name as a string parameter and sets
+tile["core"] = core_name. Once build_catalog() passes slide_scene as
+core_name, tile["core"] becomes slide_scene. No edit needed.
+
+
+1d. derive_groupings_from_obs() handles slide_scene-keyed cores
+----------------------------------------------------------------
+
+File: call_visu_html_7.py
+Function: derive_groupings_from_obs() line 3828
+Agent: Codex (small edit)
+
+Currently: core_positions maps "A1" -> row indices.
+After Phase 1: core_positions maps "40393ROI01" -> row indices.
+
+The slide_scene grouping block (lines 3861-3880) compares
+obs["slide_scene"] values against cores. When core = slide_scene, every core
+maps 1:1 to its slide_scene value. This still works correctly. The grouping
+just becomes trivially {slide_scene_val: [slide_scene_val]}.
+
+No code change needed here, but verify: add_scene_grouping() (line 3665)
+checks `if "slide_scene" in groupings` and skips synthetic scene generation.
+Since slide_scene grouping will always exist when obs has slide_scene, the
+synthetic sceneA1 path is never reached. This is the desired outcome.
+
+
+1e. add_scene_grouping() becomes dead for slide_scene data
+-----------------------------------------------------------
+
+File: call_visu_html_7.py
+Function: add_scene_grouping() line 3665
+Agent: no change needed yet (deletion in Phase 3)
+
+When obs has slide_scene, this function returns early at line 3666-3667.
+When obs has no slide_scene (legacy data), it synthesizes "sceneA1" labels.
+Leave it for now. Delete in Phase 3 if manual mode always provides
+slide_scene.
+
+
+1f. build_roi_data_for_seed() uses slide_scene cores
+------------------------------------------------------
+
+File: call_visu_html_7.py
+Function: build_roi_data_for_seed() line 3234
+Agent: Codex (small edit)
+
+Currently:
+  core_names = sorted(list(seed_viewer["core_tiles"].keys()), ...)
+  # core_names are "A1", "A2", etc.
+  # Then for each core, extracts slide_scene from obs to find seg files
+
+After Phase 1:
+  core_names = sorted(list(seed_viewer["core_tiles"].keys()), ...)
+  # core_names are "40393ROI01", "40393ROI02", etc. (already slide_scene)
+  # slide_scene extraction from obs at lines 3270-3274 becomes redundant
+  # because core IS slide_scene
+
+Change: after the core loop header, replace:
+
+  slide_scene = ""
+  if isinstance(slide_scene_series, pd.Series):
+      scenes = sorted(...)
+      if len(scenes) == 1:
+          slide_scene = str(scenes[0])
+
+with:
+
+  slide_scene = str(core)  # core is already slide_scene
+
+This eliminates the obs-column lookup that could fail when slide_scene values
+don't exactly match the inferred core series.
+
+
+1g. build_threshold_store_payload() and threshold_roi_id_for_core()
+--------------------------------------------------------------------
+
+File: call_visu_html_7.py
+Functions: build_threshold_store_payload() line 3459
+           threshold_roi_id_for_core() line 3439
+Agent: Codex (small edit)
+
+Current: threshold_roi_id_for_core() prepends "Nuclei_" to slide_scene.
+This produces roi_ids like "Nuclei_40393ROI01".
+
+After Phase 1: core = slide_scene = "40393ROI01". The roi_id should be
+slide_scene directly, not Nuclei_-prefixed.
+
+Change threshold_roi_id_for_core():
+
+  Current (line 3451-3455):
+    scene = str(slide_scene or "").strip()
+    if scene != "":
+        if scene.lower().startswith("nuclei_"):
+            return scene
+        return "Nuclei_" + scene
+    return str(core)
+
+  New:
+    return str(core)  # core is already slide_scene
+
+  Or more conservatively:
+    scene = str(slide_scene or "").strip()
+    if scene != "":
+        return scene
+    return str(core)
+
+The Nuclei_ prefix generation is deleted. Existing studythresholds.csv files
+with Nuclei_ headers are handled at CSV import time (see 1h).
+
+core_to_roi_id becomes identity: {"40393ROI01": "40393ROI01"}.
+In Phase 3, collapse this field entirely.
+
+
+1h. CSV import strips Nuclei_ prefix
+--------------------------------------
+
+File: visu_html_functions7.py
+Location: threshold editor JS, CSV import handler
+Agent: Claude (JS edit)
+
+When importing studythresholds.csv, column headers may have "Nuclei_" prefix.
+Strip on import before matching against roi_ids:
+
+  // In CSV parse loop where headers are matched to roi_ids:
+  let cleanHeader = header.startsWith("Nuclei_") ? header.slice(7) : header;
+  // match cleanHeader against threshold_store.roi_ids
+
+This is one line plus a string operation. No normalize_roi_id() helper needed.
+
+
+1i. seed_core_slide_scene_map() becomes unnecessary
+-----------------------------------------------------
+
+File: call_visu_html_7.py
+Function: seed_core_slide_scene_map() line 2556
+Agent: no change yet (deletion in Phase 3)
+
+After Phase 1, core_tiles keys are already slide_scene strings. The function
+that extracts slide_scene from source_paths to bridge between A1 keys and
+slide_scene values is no longer needed. But don't delete yet — verify it's
+unreachable first.
+
+
+1j. build_project_core_positions() simplifies
+-----------------------------------------------
+
+File: call_visu_html_7.py
+Function: build_project_core_positions() line 2717
+Agent: Codex (small edit)
+
+Currently: uses seed_core_slide_scenes to translate "A1" -> "40393ROI01",
+then matches obs["slide_scene"] == "40393ROI01".
+
+After Phase 1: core IS "40393ROI01". The seed_core_slide_scenes lookup is
+unnecessary. Direct matching: obs["slide_scene"] == core.
+
+Change: remove the seed_core_slide_scenes parameter and the translation
+step. Match directly:
+
+  for core in allowed_cores:
+      positions = np.flatnonzero(slide_scene_array == core)
+      if positions.size > 0:
+          out[core] = positions
+
+
+1k. Sort order
+--------------
+
+Everywhere that currently calls sorted_core_keys() (tuple sort) should
+switch to:
+
+  sorted(core_names, key=natural_sort_key)
+
+natural_sort_key already exists at line 1814. It handles embedded numbers
+correctly (ROI2 before ROI10). No new code needed.
+
+
+Phase 1 call site summary
+--------------------------
+
+Functions that need edits:
+
+  build_catalog()                   line 3618   re-key by_core to slide_scene
+  build_roi_data_for_seed()         line 3234   slide_scene = core (1 line)
+  build_threshold_store_payload()   line 3459   remove Nuclei_ prefix
+  threshold_roi_id_for_core()       line 3439   return core directly
+  build_project_core_positions()    line 2717   remove seed_core_slide_scenes
+  trim_seed_viewer_to_obs()         line 3932   remove seed_core_slide_scene_map call
+  build_seed_grouping_patch()       line 3905   remove seed_core_slide_scene_map call
+
+Functions that need no edits (work automatically):
+
+  build_core_tile_specs()           line 3520   receives core_name param
+  derive_groupings_from_obs()       line 3828   string comparison still works
+  add_scene_grouping()              line 3665   skipped when slide_scene exists
+
+JS edit (visu_html_functions7.py):
+
+  CSV import handler                             strip Nuclei_ on import
+
+
+Phase 2: segmentation lookup
+==============================
+
+Goal: seg file lookup is a dict.get(), not a regex search. The search still
+exists inside adapters for initial discovery, but the engine only reads a
+pre-built map.
+
+2a. Build segmentation_by_slide_scene at manifest time
+-------------------------------------------------------
+
+File: call_visu_html_7.py
+Location: wherever the seed viewer or catalog is being prepared, before
+          build_roi_data_for_seed() is called
+Agent: Codex
+
+For manual mode: after build_core_buckets() resolves seg files via
+build_templates(), collect the mapping:
+
+  segmentation_by_slide_scene = {}
+  for slide_scene, bucket in by_core.items():
+      # overlay_paths from the composite tile contain label TIFFs
+      seg_tiff = first label TIFF from bucket overlays
+      if seg_tiff:
+          segmentation_by_slide_scene[slide_scene] = seg_tiff
+
+For project mode: extract from seed viewer's core_tiles:
+
+  for core, tiles in seed_viewer["core_tiles"].items():
+      for tile in tiles:
+          if tile["tile_kind"] == "composite":
+              for op in tile["overlay_paths"]:
+                  if os.path.isfile(op) and op.endswith((".tif", ".tiff")):
+                      segmentation_by_slide_scene[core] = op
+                      break
+
+If neither source has a seg file, fall back to _find_seg_file_multi with
+seg_roots. This fallback is adapter-level: it runs once, stores the result,
+and never runs again inside the engine.
+
+2b. Pass segmentation_by_slide_scene through to build_roi_data_for_seed()
+--------------------------------------------------------------------------
+
+File: call_visu_html_7.py
+Function: build_roi_data_for_seed() line 3234
+Agent: Codex
+
+Add parameter: segmentation_by_slide_scene=None
+
+Replace lines 3299-3312 (the seg file discovery block):
+
+  Current:
+    seg_file = None
+    for tile in core_tiles.get(core, []):
+        for op in tile.get("overlay_paths", []):
+            if os.path.isfile(p) and ...:
+                seg_file = p
+                break
+    if seg_file is None and len(seg_roots) > 0:
+        seg_file = _find_seg_file_multi(seg_roots, slide_scene)
+
+  New:
+    seg_file = None
+    if isinstance(segmentation_by_slide_scene, dict):
+        seg_file = segmentation_by_slide_scene.get(core)
+    # no fallback search — if not in the map, no segmentation
+
+This eliminates _find_seg_file_multi from the engine loop entirely.
+
+2c. Keep _find_seg_file inside adapter code
+--------------------------------------------
+
+_find_seg_file() and _find_seg_file_multi() stay in the codebase but are
+called only during initial map construction (step 2a), not inside
+build_roi_data_for_seed().
+
+For DAS project mode: the adapter calls _find_seg_file_multi once per
+slide_scene to build the segmentation_by_slide_scene dict.
+
+For FCS adapter: seg paths come from dataset dicts (already resolved per
+ROI folder). No search needed.
+
+
+Phase 3: deletion
+===================
+
+After Phases 1-2 are verified working, delete or quarantine:
+
+Functions to delete from engine paths (call_visu_html_7.py):
+
+  parse_core_name()                 line 1798   unused — cores are strings now
+  core_name_from_key()              line 1810   unused — no tuple keys
+  sorted_core_keys()                line 1805   unused — natural_sort_key used
+  parse_core_series()               line 4540   unused — direct slide_scene match
+  core_series_candidate_priority()  line 4521   unused — no column guessing
+  extract_slide_scene_from_path()   line 2522   unused — core = slide_scene
+  seed_core_slide_scene_map()       line 2556   unused — no core-to-scene bridge
+  _find_seg_file()                  line 2231   move to adapter if still needed
+  _find_seg_file_multi()            line 2313   move to adapter if still needed
+
+Functions to simplify:
+
+  threshold_roi_id_for_core()       line 3439   collapse to return str(core)
+  add_scene_grouping()              line 3665   delete if slide_scene always present
+  infer_core_series_from_obs()      line 4473   may still be needed for legacy obs
+
+Fields to collapse:
+
+  core_to_roi_id = identity mapping  ->  delete field or make it {}
+  roi_id = slide_scene               ->  no Nuclei_ prefix
+  threshold_store.roi_ids            ->  list of slide_scene strings
+
+JS to simplify (visu_html_functions7.py):
+
+  core_to_roi_id suffix matching in threshold popup  ->  exact match
+  Nuclei_ prefix fallback logic anywhere             ->  delete
+
+
+Phase 4: FCS adapter
+======================
+
+File: threshold_standalone_fcs.py
+Agent: Claude or Codex (self-contained, parallel with Phase 1)
+
+4a. core_name = slide_scene
+-----------------------------
+
+Function: build_catalog_for_datasets() line 682
+Change: core_name = slide_scene (currently = "A1")
+
+  Current (line 705-707):
+    core_name = dataset_dict.get("core_name", "")
+    if core_name == "":
+        core_name = core_name_from_slide_scene(slide_scene)  # -> "A1"
+
+  New:
+    core_name = str(slide_scene)
+
+  core_tiles["40393ROI01"] = [tile] instead of core_tiles["A1"] = [tile]
+
+4b. roi_id = slide_scene
+--------------------------
+
+Function: build_threshold_store() line 367
+Change: roi_id = slide_scene, not "Nuclei_" + slide_scene
+
+  Current (line 384):
+    roi_ids = [str(d["roi_id"]) for d in datasets]
+    # roi_id = "Nuclei_40393ROI01"
+
+  Change parse_object_csv_filename() (line 88) to return roi_id = slide_scene
+  instead of "Nuclei_" + slide_scene. Or change build_threshold_store() to
+  use slide_scene directly.
+
+  core_to_roi_id becomes {"40393ROI01": "40393ROI01"} — identity.
+
+4c. Delete core_name_from_slide_scene()
+-----------------------------------------
+
+Function: core_name_from_slide_scene() line 649
+Delete after 4a is done. No callers remain.
+
+4d. Freeze FCS slide_scene format
+-----------------------------------
+
+Per discussion: the FCS adapter produces slide_scene strings like
+"40393ROI01" (no underscore, zero-padded ROI number from the CSV filename).
+This is whatever parse_object_csv_filename() extracts. Don't change the
+format — just stop converting it to "A1" for core keys.
+
+If obs already has slide_scene from DAS, preserve it exactly. Do not
+canonicalize.
+
+
+What NOT to change
+===================
+
+- build_templates(), collect_scene_keys(), build_core_buckets() internals:
+  These functions discover and resolve file paths using filesystem patterns.
+  They are adapter-level code. They still use (letter, number) tuples
+  internally. The only change is how their output is keyed when passed to
+  build_catalog().
+
+- Template resolution: resolve_template_for_scene() still substitutes
+  scene keys into path templates. This is filesystem adapter work.
+
+- Viewer JS runtime: the JS treats "core" as an opaque string key. Changing
+  its value from "A1" to "40393ROI01" doesn't break any lookup. The only
+  visible change is sort order and display labels in the tile grid.
+
+- display_label: slide_scene.replace("_", " ") or just slide_scene. Don't
+  add formatting rules. The JS can display whatever string it receives.
+
+- TMA layout: if core keys change from "A1"/"B3" to slide_scene strings,
+  the JS grid parser may fall back to compact layout. That's fine for v1.
+
+- Subset overlay generation pipeline.
+
+- Channel asset rendering pipeline.
+
+- localStorage threshold persistence.
+
+- Overlay canvas architecture (previewLayer + savedOverlayLayer).
+
+
+Agent assignment
+=================
+
+Codex:
+  - Phase 1 (a, b, f, g, j): re-key core_tiles, simplify roi_id, remove
+    seed_core_slide_scene_map dependency. These are mechanical edits in
+    call_visu_html_7.py with clear before/after.
+  - Phase 2 (a, b): build segmentation map, pass through to engine.
+  - Phase 3: deletion after verification.
+
+Claude:
+  - Phase 1h: CSV import Nuclei_ stripping (JS edit in visu_html_functions7.py)
+  - Phase 4: FCS adapter changes (threshold_standalone_fcs.py)
+  - Verification testing
+
+Either:
+  - Phase 2c: move _find_seg_file to adapter if needed.
+
+
+Verification checklist
+=======================
+
+After Phase 1:
+
+  [ ] viewer_data.json core_tiles keys are slide_scene strings
+  [ ] every composite tile has tile["core"] == slide_scene value
+  [ ] roi_data.cores keys are slide_scene strings
+  [ ] threshold_store.roi_ids are slide_scene strings (no Nuclei_ prefix)
+  [ ] threshold_store.core_to_roi_id maps slide_scene -> slide_scene
+  [ ] Group Value menu shows slide_scene values, not sceneA1
+  [ ] ROI and Thresh buttons appear for every slide_scene
+  [ ] Tiles sort correctly (natural_sort_key: ROI2 before ROI10)
+  [ ] Importing old studythresholds.csv with Nuclei_ headers works
+  [ ] Single-slide-scene dataset: core key = slide_scene, one tile, one ROI
+  [ ] Multi-slide-scene dataset: N distinct core keys, N tiles, N ROIs
+
+After Phase 2:
+
+  [ ] Segmentation overlays use correct label TIFF per slide_scene
+  [ ] No _find_seg_file call inside build_roi_data_for_seed
+  [ ] Ghost overlay bug eliminated for duplicate ROI numbers across slides
+
+After Phase 3:
+
+  [ ] parse_core_series, core_series_candidate_priority unreferenced
+  [ ] extract_slide_scene_from_path, seed_core_slide_scene_map unreferenced
+  [ ] sorted_core_keys, core_name_from_key, parse_core_name unreferenced
+  [ ] No Nuclei_ prefix generation in engine code
+  [ ] No sceneA1 synthesis when slide_scene exists
+
+After Phase 4:
+
+  [ ] FCS viewer core_tiles keys are slide_scene strings
+  [ ] FCS threshold_store.roi_ids are slide_scene strings
+  [ ] FCS core_name_from_slide_scene() deleted
+  [ ] Existing FCS studythresholds.csv files still load (Nuclei_ stripped)
+
+
+Open question for Codex
+=========================
+
+In step 1b, the re-keying of by_core from tuple keys to slide_scene keys:
+should this happen inside build_core_buckets() (cleaner but touches more
+template resolution code) or as a post-processing step in build_catalog()
+(simpler, fewer lines touched)?
+
+My recommendation: post-processing in build_catalog(). build_core_buckets()
+continues to use tuples internally for template resolution. build_catalog()
+re-keys the output before building tiles. This keeps the filesystem adapter
+code (template resolution) untouched.
+
+The mapping from tuple key to slide_scene comes from:
+  1. obs["slide_scene"] if available (preferred — exact match)
+  2. extract_slide_scene_from_path() on the first resolved TIFF (fallback)
+  3. core_name_from_key() (ultimate fallback — preserves old behavior)
+
+After Phase 3, fallback 2 and 3 are deleted. Only obs["slide_scene"] remains.

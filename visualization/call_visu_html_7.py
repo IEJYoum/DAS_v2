@@ -437,14 +437,6 @@ def load_asset_registry(out_root):
     return reg if isinstance(reg, dict) else {}
 
 
-def short_core_label_from_slide_scene(slide_scene):
-    text = str(slide_scene or "").strip()
-    m = SCENE_RE.search(text)
-    if m is None:
-        return text
-    return str(m.group(2)).upper() + str(int(m.group(3)))
-
-
 def build_core_tiles_from_asset_registry(out_root):
     registry = load_asset_registry(out_root)
     assets = registry.get("assets", {}) if isinstance(registry, dict) else {}
@@ -461,7 +453,7 @@ def build_core_tiles_from_asset_registry(out_root):
         tiff_path = str(item.get("tiff", "")).strip()
         if tiff_path == "":
             continue
-        slide_scene = extract_slide_scene_from_path(tiff_path)
+        slide_scene = normalize_slide_scene(item.get("slide_scene", ""))
         if slide_scene == "":
             continue
         if slide_scene not in by_scene:
@@ -479,7 +471,9 @@ def build_core_tiles_from_asset_registry(out_root):
             core_tiles[slide_scene] = [{
                 "tile_kind": "composite",
                 "core": slide_scene,
-                "label": short_core_label_from_slide_scene(slide_scene),
+                "slide_scene": slide_scene,
+                "label": display_label_from_slide_scene(slide_scene) or slide_scene,
+                "display_label": display_label_from_slide_scene(slide_scene) or slide_scene,
                 "asset_type_id": "composite:tiff_stack",
                 "asset_type_label": "Composite (channel-selectable)",
                 "tiff_paths": list(tiffs),
@@ -497,6 +491,8 @@ def has_reusable_viewer_assets(out_root, obs=None):
     if seed_path not in [None, ""] and os.path.isfile(seed_path):
         return True
     core_tiles = build_core_tiles_from_asset_registry(out_root)
+    if obs is not None and len(core_tiles) > 0:
+        return seed_viewer_compatible_with_obs({"core_tiles": core_tiles}, obs)
     return len(core_tiles) > 0
 
 
@@ -1817,6 +1813,224 @@ def natural_sort_key(text):
     return [convert(c) for c in re.split(r"([0-9]+)", s)]
 
 
+def normalize_slide_scene(value):
+    text = str(value or "").strip()
+    if text.lower() in MISSING_LABELS:
+        return ""
+    return text
+
+
+def display_label_from_slide_scene(slide_scene):
+    text = normalize_slide_scene(slide_scene)
+    if text == "":
+        return ""
+    m = re.match(r"(?i)^(.+?)[_-]?ROI0*(\d{1,3})$", text)
+    if m is not None:
+        return str(m.group(1)).strip("_- ") + " ROI" + str(int(m.group(2)))
+    m = re.match(r"(?i)^(.+?)[_-]?scene[_-]?([A-Za-z])0*(\d{1,3})$", text)
+    if m is not None:
+        return str(m.group(1)).strip("_- ") + " " + m.group(2).upper() + str(int(m.group(3)))
+    return text.replace("_", " ")
+
+
+def _bucket_paths(bucket):
+    paths = []
+    if not isinstance(bucket, dict):
+        return paths
+    for key in ["tiffs", "transparent_pngs", "opaque_pngs", "other_files", "overlay_paths", "source_paths"]:
+        for fp in list(bucket.get(key, []) or []):
+            append_unique(paths, str(fp))
+    return paths
+
+
+def _first_segmentation_tif(paths):
+    candidates = []
+    for fp in list(paths or []):
+        low = str(fp).lower()
+        if not low.endswith((".tif", ".tiff")):
+            continue
+        name = os.path.basename(low)
+        if name.startswith("label_") or "cellsegmentation" in name or "segmentation" in name:
+            candidates.append(str(fp))
+    return candidates[0] if len(candidates) > 0 else ""
+
+
+def _obs_slide_scene_values(obs):
+    if not isinstance(obs, pd.DataFrame) or "slide_scene" not in obs.columns:
+        return []
+    vals = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()
+    vals = [normalize_slide_scene(v) for v in vals]
+    return sorted(list(set([v for v in vals if v != ""])), key=natural_sort_key)
+
+
+def _identity_key_text(key):
+    if isinstance(key, tuple) and len(key) >= 2:
+        try:
+            return core_name_from_key(key)
+        except Exception:
+            return ""
+    return normalize_slide_scene(key)
+
+
+def _slide_scene_candidates_for_bucket(key, bucket):
+    out = []
+    key_text = _identity_key_text(key)
+    key_is_tuple = isinstance(key, tuple)
+    if key_text != "" and not key_is_tuple:
+        append_unique(out, key_text)
+    if isinstance(bucket, dict):
+        for field in ["slide_scene", "core", "scene"]:
+            value = normalize_slide_scene(bucket.get(field, ""))
+            if value != "":
+                append_unique(out, value)
+    for fp in _bucket_paths(bucket):
+        value = extract_slide_scene_from_path(fp)
+        if value != "":
+            append_unique(out, value)
+    if key_text != "" and key_is_tuple:
+        append_unique(out, key_text)
+    return out
+
+
+def build_identity_manifest_from_core_buckets(by_core, obs=None):
+    manifest = {}
+    if not isinstance(by_core, dict):
+        return manifest
+    obs_scenes = _obs_slide_scene_values(obs)
+    obs_scene_set = set(obs_scenes)
+    one_obs_scene = obs_scenes[0] if len(obs_scenes) == 1 and len(by_core) == 1 else ""
+    for key in by_core:
+        bucket = dict(by_core.get(key, {}) or {})
+        candidates = _slide_scene_candidates_for_bucket(key, bucket)
+        slide_scene = ""
+        if len(obs_scene_set) > 0:
+            for value in candidates:
+                if value in obs_scene_set:
+                    slide_scene = value
+                    break
+            if slide_scene == "" and one_obs_scene != "":
+                slide_scene = one_obs_scene
+            if slide_scene == "":
+                raise ValueError("Could not map viewer asset bucket to obs slide_scene: " + str(key))
+        else:
+            for value in candidates:
+                if value != "":
+                    slide_scene = value
+                    break
+        if slide_scene == "":
+            raise ValueError("Viewer asset bucket has no slide_scene identity: " + str(key))
+        if slide_scene in manifest:
+            raise ValueError("Duplicate viewer asset bucket for slide_scene: " + slide_scene)
+        bucket["slide_scene"] = slide_scene
+        bucket["display_label"] = display_label_from_slide_scene(slide_scene)
+        bucket["segmentation_tif"] = _first_segmentation_tif(_bucket_paths(bucket))
+        manifest[slide_scene] = bucket
+    validate_slide_scene_manifest(manifest)
+    return manifest
+
+
+def build_identity_manifest_from_seed_viewer(seed_viewer):
+    manifest = {}
+    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
+    if not isinstance(core_tiles, dict):
+        return manifest
+    for core in core_tiles:
+        slide_scene = ""
+        tiffs = []
+        overlays = []
+        figs = []
+        sources = []
+        tiles = list(core_tiles.get(core, []) or [])
+        for tile in tiles:
+            if not isinstance(tile, dict):
+                continue
+            if slide_scene == "":
+                slide_scene = normalize_slide_scene(tile.get("slide_scene", "")) or normalize_slide_scene(core)
+            for fp in list(tile.get("tiff_paths", []) or []):
+                append_unique(tiffs, str(fp))
+                append_unique(sources, str(fp))
+            for fp in list(tile.get("overlay_paths", []) or []):
+                append_unique(overlays, str(fp))
+                append_unique(sources, str(fp))
+            for fp in list(tile.get("source_paths", []) or []):
+                append_unique(sources, str(fp))
+            fig = str(tile.get("figure_path", "") or "").strip()
+            if fig != "":
+                append_unique(figs, fig)
+                append_unique(sources, fig)
+        if slide_scene == "":
+            for fp in sources:
+                slide_scene = extract_slide_scene_from_path(fp)
+                if slide_scene != "":
+                    break
+        if slide_scene == "":
+            continue
+        if slide_scene in manifest:
+            raise ValueError("Duplicate seed viewer tile set for slide_scene: " + slide_scene)
+        manifest[slide_scene] = {
+            "slide_scene": slide_scene,
+            "display_label": display_label_from_slide_scene(slide_scene),
+            "tiffs": tiffs,
+            "transparent_pngs": overlays,
+            "opaque_pngs": figs,
+            "other_files": [],
+            "source_paths": sources,
+            "segmentation_tif": _first_segmentation_tif(sources + overlays),
+        }
+    validate_slide_scene_manifest(manifest)
+    return manifest
+
+
+def validate_slide_scene_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise ValueError("slide_scene manifest is not a dict")
+    seen = set()
+    for slide_scene in manifest:
+        key = normalize_slide_scene(slide_scene)
+        if key == "":
+            raise ValueError("slide_scene manifest contains a blank key")
+        if key in seen:
+            raise ValueError("slide_scene manifest contains duplicate key: " + key)
+        seen.add(key)
+        rec = manifest.get(slide_scene, {})
+        if isinstance(rec, dict):
+            rec["slide_scene"] = key
+    return True
+
+
+def build_segmentation_map_from_manifest(manifest):
+    out = {}
+    if not isinstance(manifest, dict):
+        return out
+    for slide_scene in manifest:
+        rec = manifest.get(slide_scene, {})
+        seg = str(rec.get("segmentation_tif", "") if isinstance(rec, dict) else "").strip()
+        if seg != "" and os.path.isfile(seg):
+            out[normalize_slide_scene(slide_scene)] = seg
+    return out
+
+
+def build_segmentation_map_from_seed_viewer(seed_viewer, meta=None):
+    manifest = build_identity_manifest_from_seed_viewer(seed_viewer)
+    out = build_segmentation_map_from_manifest(manifest)
+    roots = resolve_segmentation_roots(meta if isinstance(meta, dict) else {})
+    if len(roots) > 0:
+        for slide_scene in manifest:
+            key = normalize_slide_scene(slide_scene)
+            if key == "" or key in out:
+                continue
+            seg = _find_seg_file_multi(roots, key)
+            if seg is not None:
+                out[key] = seg
+    return out
+
+
+def viewer_slide_scene_values(seed_viewer):
+    manifest = build_identity_manifest_from_seed_viewer(seed_viewer)
+    vals = [normalize_slide_scene(v) for v in manifest.keys()]
+    return sorted(list(set([v for v in vals if v != ""])), key=natural_sort_key)
+
+
 def infer_figure_type(fp):
     low = os.path.normpath(fp).lower().replace("\\", "/")
     bn = os.path.basename(low)
@@ -2553,28 +2767,6 @@ def extract_slide_scene_from_path(path):
     return slide_id + roi_tag
 
 
-def seed_core_slide_scene_map(seed_viewer):
-    out = {}
-    core_tiles = seed_viewer.get("core_tiles", {})
-    if not isinstance(core_tiles, dict):
-        return out
-    for core in core_tiles:
-        tiles = list(core_tiles.get(core, []))
-        i = 0
-        while i < len(tiles):
-            tile = tiles[i]
-            if str(tile.get("tile_kind", "")) == "composite":
-                for src in list(tile.get("source_paths", [])):
-                    slide_scene = extract_slide_scene_from_path(src)
-                    if slide_scene != "":
-                        out[str(core)] = slide_scene
-                        break
-            if str(core) in out:
-                break
-            i += 1
-    return out
-
-
 def seed_core_tiff_map(seed_viewer):
     out = {}
     core_tiles = seed_viewer.get("core_tiles", {})
@@ -2623,7 +2815,15 @@ def choose_xy_columns(dfxy):
 def prepare_overlay_context(obs, dfxy, seed_viewer):
     if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
         return None
-    core_series = infer_core_series_from_obs(obs)
+    slide_scene_series = None
+    if "slide_scene" in obs.columns:
+        slide_scene_series = _clean_obs_values(obs["slide_scene"])
+        if not bool(slide_scene_series.notna().any()):
+            slide_scene_series = None
+    if isinstance(slide_scene_series, pd.Series):
+        core_series = slide_scene_series.astype(str)
+    else:
+        core_series = infer_core_series_from_obs(obs)
     if core_series is None:
         return None
     def _series_to_cell_int(series):
@@ -2673,7 +2873,6 @@ def prepare_overlay_context(obs, dfxy, seed_viewer):
     if cell_int is not None and "cellid" not in obs.columns:
         obs = obs.copy()
         obs["cellid"] = cell_int.astype(int).astype(str)
-    slide_scene_series = obs["slide_scene"].astype(str) if "slide_scene" in obs.columns else None
     xvals = None
     yvals = None
     if isinstance(xy, pd.DataFrame) and xcol in xy.columns and ycol in xy.columns:
@@ -2691,7 +2890,6 @@ def prepare_overlay_context(obs, dfxy, seed_viewer):
         "xvals": xvals,
         "yvals": yvals,
         "cell_int": cell_int,
-        "seed_core_slide_scenes": seed_core_slide_scene_map(seed_viewer),
         "seed_tiffs": seed_core_tiff_map(seed_viewer),
     }
 
@@ -2721,19 +2919,14 @@ def build_project_core_positions(obs, allowed_cores=None, seed_core_slide_scenes
     core_names = [str(x) for x in list(allowed_cores or [])]
     if len(core_names) == 0:
         return out
-    if "slide_scene" in obs.columns and isinstance(seed_core_slide_scenes, dict) and len(seed_core_slide_scenes) > 0:
-        slide_scene_array = obs["slide_scene"].astype(str).to_numpy()
+    if "slide_scene" in obs.columns:
+        slide_scene_array = _clean_obs_values(obs["slide_scene"]).astype(str).to_numpy()
         i = 0
         while i < len(core_names):
             core = str(core_names[i])
-            scene = str(seed_core_slide_scenes.get(core, "")).strip()
-            if scene != "":
-                out[core] = np.flatnonzero(slide_scene_array == scene)
+            out[core] = np.flatnonzero(slide_scene_array == core)
             i += 1
-        total_hits = sum(len(out.get(c, [])) for c in core_names)
-        if total_hits > 0:
-            return out
-        out = {}
+        return out
 
     core_series = infer_core_series_from_obs(obs)
     if core_series is None:
@@ -2751,17 +2944,15 @@ def build_core_position_index(core_names, overlay_context):
     out = {}
     core_array = overlay_context.get("core_array")
     slide_scene_array = overlay_context.get("slide_scene_array")
-    seed_scenes = overlay_context.get("seed_core_slide_scenes", {})
     if core_array is None and slide_scene_array is None:
         return out
     i = 0
     while i < len(core_names):
         core = str(core_names[i])
-        seed_scene = str(seed_scenes.get(core, "")).strip()
         positions = np.array([], dtype=int)
-        if seed_scene != "" and slide_scene_array is not None:
-            positions = np.flatnonzero(slide_scene_array == seed_scene)
-        if positions.size == 0 and core_array is not None:
+        if slide_scene_array is not None:
+            positions = np.flatnonzero(slide_scene_array == core)
+        elif core_array is not None:
             positions = np.flatnonzero(core_array == core)
         out[core] = positions
         i += 1
@@ -2852,15 +3043,13 @@ def render_point_subset_overlay(xvals, yvals, size, out_path):
     return True
 
 
-def render_segmentation_subset_overlay(seg_roots, slide_scene, ids, out_path):
-    roots = _normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])
-    if len(roots) == 0 or len(ids) == 0 or tifffile is None:
+def render_segmentation_subset_overlay_from_file(segfile, ids, out_path):
+    if str(segfile or "").strip() == "" or len(ids) == 0 or tifffile is None:
         return False
-    segfile = _find_seg_file_multi(roots, slide_scene)
-    if segfile is None:
+    if not os.path.isfile(str(segfile)):
         return False
     try:
-        label = tifffile.imread(segfile)
+        label = tifffile.imread(str(segfile))
     except Exception:
         return False
     label = np.asarray(label)
@@ -2897,6 +3086,14 @@ def render_segmentation_subset_overlay(seg_roots, slide_scene, ids, out_path):
     rgba[bounds, 3] = 255
     Image.fromarray(rgba, mode="RGBA").save(out_path, "PNG")
     return True
+
+
+def render_segmentation_subset_overlay(seg_roots, slide_scene, ids, out_path):
+    roots = _normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])
+    if len(roots) == 0:
+        return False
+    segfile = _find_seg_file_multi(roots, slide_scene)
+    return render_segmentation_subset_overlay_from_file(segfile, ids, out_path)
 
 
 def extract_cell_boundaries(seg_path):
@@ -2937,14 +3134,11 @@ def extract_cell_boundaries(seg_path):
     return dict(cells)
 
 
-def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_roots, cache_dir):
+def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_roots, cache_dir, segmentation_by_slide_scene=None):
     obs = overlay_context["obs"]
     core_series = overlay_context["core_series"]
     core_mask = core_series == str(core)
     mask = core_mask.copy()
-    seed_slide_scene = str(overlay_context.get("seed_core_slide_scenes", {}).get(str(core), "")).strip()
-    if seed_slide_scene != "" and "slide_scene" in obs.columns:
-        mask = mask & (obs["slide_scene"].astype(str) == seed_slide_scene)
     col = str(subset_option.get("column", "")).strip()
     value = str(subset_option.get("value", "")).strip()
     if col == "" or value == "" or col not in obs.columns:
@@ -2953,19 +3147,21 @@ def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_root
     if not bool(mask.any()):
         return ""
 
-    slide_scene = ""
+    slide_scene = normalize_slide_scene(core)
     if "slide_scene" in obs.columns:
         scenes = sorted(list(set(obs.loc[mask, "slide_scene"].astype(str).tolist())), key=natural_sort_key)
         if len(scenes) == 1:
             slide_scene = scenes[0]
     subset_id = str(subset_option.get("id", "")).strip()
     scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
-    seg_tag = _seg_roots_cache_tag(seg_roots)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
+    seg_file = str(seg_map.get(slide_scene, "") or "").strip()
+    seg_tag = _seg_roots_cache_tag([seg_file] if seg_file != "" else seg_roots)
     base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
     seg_out_path = base + "__seg.png"
     centroid_out_path = base + "__centroid.png"
     expected_size = overlay_canvas_size(core, overlay_context, core_mask)
-    has_seg_roots = len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
+    has_seg_roots = seg_file != "" or len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
     if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
         return seg_out_path
     if (not has_seg_roots) and _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
@@ -2975,7 +3171,9 @@ def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_root
     if isinstance(cell_int, pd.Series):
         ids = list(cell_int.loc[mask].dropna().astype(int).tolist())
     if slide_scene != "" and len(ids) > 0 and has_seg_roots:
-        if render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path):
+        if (seg_file != "" and render_segmentation_subset_overlay_from_file(seg_file, ids, seg_out_path)) or (
+            seg_file == "" and render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path)
+        ):
             if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
                 return seg_out_path
 
@@ -3008,12 +3206,12 @@ def report_overlay_result(report, mode, slide_scene=""):
         report["none"] = int(report.get("none", 0)) + 1
 
 
-def build_subset_overlay_for_positions(core, subset_option, positions, overlay_context, cache_dir, seg_roots, report=None):
+def build_subset_overlay_for_positions(core, subset_option, positions, overlay_context, cache_dir, seg_roots, report=None, segmentation_by_slide_scene=None):
     if positions is None or len(positions) == 0:
         return ""
     core_mask = overlay_context["core_series"] == str(core)
     expected_size = overlay_canvas_size(core, overlay_context, core_mask)
-    slide_scene = ""
+    slide_scene = normalize_slide_scene(core)
     slide_scene_series = overlay_context.get("slide_scene_series")
     if isinstance(slide_scene_series, pd.Series):
         scenes = sorted(list(set(slide_scene_series.iloc[positions].astype(str).tolist())), key=natural_sort_key)
@@ -3021,7 +3219,9 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
             slide_scene = scenes[0]
     subset_id = str(subset_option.get("id", "")).strip()
     scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
-    seg_tag = _seg_roots_cache_tag(seg_roots)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
+    seg_file = str(seg_map.get(slide_scene, "") or "").strip()
+    seg_tag = _seg_roots_cache_tag([seg_file] if seg_file != "" else seg_roots)
     base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
     seg_out_path = base + "__seg.png"
     centroid_out_path = base + "__centroid.png"
@@ -3030,20 +3230,16 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     cell_int = overlay_context.get("cell_int")
     if isinstance(cell_int, pd.Series):
         ids = list(cell_int.iloc[positions].dropna().astype(int).tolist())
-    has_seg_roots = len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
+    has_seg_roots = seg_file != "" or len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
     if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
         report_overlay_result(report, "segmentation", slide_scene)
         return seg_out_path
     if slide_scene != "" and len(ids) > 0 and has_seg_roots:
-        if render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path):
+        if (seg_file != "" and render_segmentation_subset_overlay_from_file(seg_file, ids, seg_out_path)) or (
+            seg_file == "" and render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path)
+        ):
             if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
                 report_overlay_result(report, "segmentation", slide_scene)
-                return seg_out_path
-    seed_slide_scene = str(overlay_context.get("seed_core_slide_scenes", {}).get(str(core), "")).strip()
-    if seed_slide_scene != "" and seed_slide_scene != slide_scene and len(ids) > 0 and has_seg_roots:
-        if render_segmentation_subset_overlay(seg_roots, seed_slide_scene, ids, seg_out_path):
-            if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
-                report_overlay_result(report, "segmentation", seed_slide_scene)
                 return seg_out_path
 
     xvals = overlay_context.get("xvals")
@@ -3062,7 +3258,7 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     return ""
 
 
-def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None):
+def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None, segmentation_by_slide_scene=None):
     overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
     if overlay_context is None:
         return {}, {}
@@ -3071,6 +3267,7 @@ def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, m
     cache_dir = os.path.join(out_root, "_subset_overlay_cache")
     os.makedirs(cache_dir, exist_ok=True)
     seg_roots = resolve_segmentation_roots(meta)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else build_segmentation_map_from_seed_viewer(seed_viewer, meta)
     out = {}
     report = {
         "segmentation_root": str(seg_roots[0] if len(seg_roots) > 0 else ""),
@@ -3127,6 +3324,7 @@ def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, m
                     cache_dir,
                     seg_roots,
                     report=report,
+                    segmentation_by_slide_scene=seg_map,
                 )
             rendered_cache[(subset_id, core)] = overlay_path
             i += 1
@@ -3231,7 +3429,7 @@ def build_expression_payload_frame(df, obs):
     return expr_df, marker_list, ""
 
 
-def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root=""):
+def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root="", segmentation_by_slide_scene=None):
     overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
     if overlay_context is None:
         return {}
@@ -3258,6 +3456,7 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
         os.makedirs(cache_dir, exist_ok=True)
     if isinstance(meta, dict):
         seg_roots = resolve_segmentation_roots(meta)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else build_segmentation_map_from_seed_viewer(seed_viewer, meta)
     cores = {}
 
     i = 0
@@ -3267,11 +3466,7 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
         if positions.size == 0:
             i += 1
             continue
-        slide_scene = ""
-        if isinstance(slide_scene_series, pd.Series):
-            scenes = sorted(list(set(slide_scene_series.iloc[positions].astype(str).tolist())), key=natural_sort_key)
-            if len(scenes) == 1:
-                slide_scene = str(scenes[0])
+        slide_scene = normalize_slide_scene(core)
         core_mask = np.zeros(obs.shape[0], dtype=bool)
         core_mask[positions] = True
         size = overlay_canvas_size(core, overlay_context, core_mask)
@@ -3285,6 +3480,7 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
                 cache_dir,
                 seg_roots,
                 report=None,
+                segmentation_by_slide_scene=seg_map,
             )
             if str(overlay_path or "").strip() != "":
                 try:
@@ -3296,25 +3492,12 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
         # Extract cell boundary coordinates for threshold overlays
         cell_boundaries_rel = ""
         if cache_dir != "":
-            seg_file = None
-            core_tiles = seed_viewer.get("core_tiles", {})
-            for tile in list(core_tiles.get(core, [])):
-                if str(tile.get("tile_kind", "")) != "composite":
-                    continue
-                for op in list(tile.get("overlay_paths", [])):
-                    p = str(op)
-                    if os.path.isfile(p) and p.lower().endswith((".tif", ".tiff")):
-                        seg_file = p
-                        break
-                if seg_file is not None:
-                    break
-            if seg_file is None and len(seg_roots) > 0 and slide_scene != "":
-                seg_file = _find_seg_file_multi(seg_roots, slide_scene)
-            if seg_file is not None:
+            seg_file = str(seg_map.get(slide_scene, "") or "").strip()
+            if seg_file is not None and str(seg_file).strip() != "":
                 boundaries = extract_cell_boundaries(seg_file)
                 if len(boundaries) > 0:
                     import json as _json
-                    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + core + ".js")
+                    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + safe_tag(core, 80) + ".js")
                     payload = _json.dumps(boundaries, separators=(",", ":")).replace("</", "<\\/")
                     with open(boundaries_path, "w", encoding="utf-8") as f:
                         f.write("window.__CELL_BOUNDARIES__ = ")
@@ -3437,23 +3620,8 @@ def study_threshold_writer_url_from_mailbox(roi_mailbox):
 
 
 def threshold_roi_id_for_core(obs, positions, core, slide_scene=""):
-    if not isinstance(obs, pd.DataFrame):
-        return str(core)
-    for col in ["roi_id", "ROI_ID", "Image", "image"]:
-        if col not in obs.columns:
-            continue
-        vals = sorted(
-            [str(x).strip() for x in obs.iloc[positions][col].dropna().unique().tolist() if str(x).strip() != ""],
-            key=natural_sort_key,
-        )
-        if len(vals) == 1:
-            return vals[0]
-    scene = str(slide_scene or "").strip()
-    if scene != "":
-        if scene.lower().startswith("nuclei_"):
-            return scene
-        return "Nuclei_" + scene
-    return str(core)
+    scene = normalize_slide_scene(slide_scene)
+    return scene if scene != "" else str(core)
 
 
 def build_threshold_store_payload(obs, df, core_names, core_positions, meta=None, roi_mailbox=None, out_root=""):
@@ -3469,9 +3637,6 @@ def build_threshold_store_payload(obs, df, core_names, core_positions, meta=None
         base_dir = normalize_stored_path(out_root)
     if base_dir == "":
         base_dir = str(out_root or "").strip()
-    slide_scene_series = None
-    if isinstance(obs, pd.DataFrame) and "slide_scene" in obs.columns:
-        slide_scene_series = obs["slide_scene"].astype(str)
     roi_ids = []
     core_to_roi_id = {}
     for core in list(core_names or []):
@@ -3479,12 +3644,7 @@ def build_threshold_store_payload(obs, df, core_names, core_positions, meta=None
         positions = np.asarray(core_positions.get(core, []), dtype=int)
         if positions.size == 0:
             continue
-        slide_scene = ""
-        if isinstance(slide_scene_series, pd.Series):
-            vals = sorted(list(set(slide_scene_series.iloc[positions].astype(str).tolist())), key=natural_sort_key)
-            if len(vals) == 1:
-                slide_scene = str(vals[0])
-        roi_id = threshold_roi_id_for_core(obs, positions, core, slide_scene=slide_scene)
+        roi_id = threshold_roi_id_for_core(obs, positions, core, slide_scene=core)
         core_to_roi_id[core] = roi_id
         if roi_id not in roi_ids:
             roi_ids.append(roi_id)
@@ -3507,6 +3667,7 @@ def make_missing_tile(core):
     return {
         "tile_kind": "missing",
         "core": core,
+        "slide_scene": core,
         "label": core + " missing",
         "asset_type_id": "missing",
         "asset_type_label": "Missing",
@@ -3521,6 +3682,8 @@ def build_core_tile_specs(core_name, bucket):
     tiffs = list(bucket.get("tiffs", []))
     overlays = list(bucket.get("transparent_pngs", []))
     figs = list(bucket.get("opaque_pngs", [])) + list(bucket.get("other_files", []))
+    slide_scene = normalize_slide_scene(bucket.get("slide_scene", "")) or normalize_slide_scene(core_name)
+    display_label = str(bucket.get("display_label", "") or "").strip() or display_label_from_slide_scene(slide_scene) or slide_scene
 
     tiles = []
     if len(tiffs) > 0:
@@ -3528,8 +3691,10 @@ def build_core_tile_specs(core_name, bucket):
         src_paths = list(tiffs) + list(overlays)
         tiles.append({
             "tile_kind": "composite",
-            "core": core_name,
-            "label": core_name,
+            "core": slide_scene,
+            "slide_scene": slide_scene,
+            "label": display_label,
+            "display_label": display_label,
             "asset_type_id": "composite:tiff_stack",
             "asset_type_label": "Composite (channel-selectable)",
             "tiff_paths": list(tiffs),
@@ -3545,8 +3710,10 @@ def build_core_tile_specs(core_name, bucket):
         ftype, flabel = infer_figure_type(fp)
         tiles.append({
             "tile_kind": "figure",
-            "core": core_name,
-            "label": core_name,
+            "core": slide_scene,
+            "slide_scene": slide_scene,
+            "label": display_label,
+            "display_label": display_label,
             "asset_type_id": "figure:" + ftype,
             "asset_type_label": "Figure " + flabel,
             "tiff_paths": [],
@@ -3562,8 +3729,10 @@ def build_core_tile_specs(core_name, bucket):
             fp = overlays[k]
             tiles.append({
                 "tile_kind": "figure",
-                "core": core_name,
-                "label": core_name,
+                "core": slide_scene,
+                "slide_scene": slide_scene,
+                "label": display_label,
+                "display_label": display_label,
                 "asset_type_id": "figure:overlay",
                 "asset_type_label": "Figure Overlay",
                 "tiff_paths": [],
@@ -3574,7 +3743,7 @@ def build_core_tile_specs(core_name, bucket):
             k += 1
 
     if len(tiles) == 0:
-        tiles.append(make_missing_tile(core_name))
+        tiles.append(make_missing_tile(slide_scene))
 
     return tiles
 
@@ -3615,18 +3784,16 @@ def infer_tma_label_for_core(bucket):
     return sorted(list(counts.items()), key=lambda x: (-x[1], natural_sort_key(x[0])))[0][0]
 
 
-def build_catalog(by_core, obs):
-    core_keys = sorted_core_keys(by_core.keys())
-    core_names = [core_name_from_key(k) for k in core_keys]
-
+def build_catalog_from_identity_manifest(manifest, obs):
+    validate_slide_scene_manifest(manifest)
+    core_names = sorted(list(manifest.keys()), key=natural_sort_key)
     core_tiles = {}
     asset_type_catalog = {}
 
     i = 0
-    while i < len(core_keys):
-        key = core_keys[i]
-        core = core_name_from_key(key)
-        tiles = build_core_tile_specs(core, by_core[key])
+    while i < len(core_names):
+        core = str(core_names[i])
+        tiles = build_core_tile_specs(core, manifest[core])
         core_tiles[core] = tiles
 
         j = 0
@@ -3638,9 +3805,25 @@ def build_catalog(by_core, obs):
             j += 1
         i += 1
 
-    core_meta, groupings = derive_groupings_from_obs(obs, core_names)
-    add_scene_grouping(core_names, core_meta, groupings)
-    add_slide_grouping(by_core, core_meta, groupings)
+    core_positions = build_project_core_positions(obs, core_names)
+    core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
+    if "slide_scene" not in groupings:
+        groupings["slide_scene"] = {}
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        rec = manifest.get(core, {})
+        display_label = str(rec.get("display_label", "") if isinstance(rec, dict) else "").strip()
+        if core not in groupings["slide_scene"]:
+            groupings["slide_scene"][core] = [core]
+        elif core not in groupings["slide_scene"][core]:
+            groupings["slide_scene"][core].append(core)
+        if core not in core_meta:
+            core_meta[core] = {}
+        core_meta[core]["slide_scene"] = core
+        if display_label != "":
+            core_meta[core]["display_label"] = display_label
+        i += 1
     add_default_full_dataset_grouping(obs, core_names, groupings)
     groupings = prune_and_sort_groupings(groupings, core_names)
 
@@ -3660,6 +3843,11 @@ def build_catalog(by_core, obs):
         "asset_type_catalog": asset_type_catalog,
         "default_asset_types": default_types
     }
+
+
+def build_catalog(by_core, obs):
+    manifest = build_identity_manifest_from_core_buckets(by_core, obs=obs)
+    return build_catalog_from_identity_manifest(manifest, obs)
 
 
 def add_scene_grouping(core_names, core_meta, groupings):
@@ -3833,25 +4021,36 @@ def derive_groupings_from_obs(obs, allowed_cores, core_positions=None):
     if obs.shape[0] == 0:
         return core_meta, groupings
     if not isinstance(core_positions, dict) or len(core_positions) == 0:
-        core_series = infer_core_series_from_obs(obs)
-        if core_series is None:
-            return core_meta, groupings
-        allowed = set(allowed_cores)
-        valid_mask = core_series.notna()
-        if len(allowed) > 0:
-            valid_mask = valid_mask & core_series.isin(allowed)
-        if not bool(valid_mask.any()):
-            return core_meta, groupings
-        core_values = core_series.loc[valid_mask].astype(str)
         core_positions = {}
-        core_array = core_values.to_numpy()
-        unique_cores = sorted(list(set(core_values.tolist())), key=natural_sort_key)
-        i = 0
-        while i < len(unique_cores):
-            core = str(unique_cores[i])
-            core_positions[core] = np.flatnonzero(core_array == core)
-            i += 1
-        obs_values = obs.loc[valid_mask, :]
+        allowed = set([str(c) for c in allowed_cores])
+        if "slide_scene" in obs.columns:
+            scene_series = _clean_obs_values(obs["slide_scene"]).astype(str)
+            scene_array = scene_series.to_numpy()
+            core_source = sorted(list(allowed), key=natural_sort_key) if len(allowed) > 0 else sorted(list(set(scene_series.tolist())), key=natural_sort_key)
+            i = 0
+            while i < len(core_source):
+                core = str(core_source[i])
+                core_positions[core] = np.flatnonzero(scene_array == core)
+                i += 1
+            obs_values = obs
+        else:
+            core_series = infer_core_series_from_obs(obs)
+            if core_series is None:
+                return core_meta, groupings
+            valid_mask = core_series.notna()
+            if len(allowed) > 0:
+                valid_mask = valid_mask & core_series.isin(allowed)
+            if not bool(valid_mask.any()):
+                return core_meta, groupings
+            core_values = core_series.loc[valid_mask].astype(str)
+            core_array = core_values.to_numpy()
+            unique_cores = sorted(list(set(core_values.tolist())), key=natural_sort_key)
+            i = 0
+            while i < len(unique_cores):
+                core = str(unique_cores[i])
+                core_positions[core] = np.flatnonzero(core_array == core)
+                i += 1
+            obs_values = obs.loc[valid_mask, :]
     else:
         obs_values = obs
 
@@ -3909,8 +4108,7 @@ def build_seed_grouping_patch(seed_viewer, obs):
     if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
         return {}
     core_names = sorted(list(core_tiles.keys()), key=natural_sort_key)
-    seed_core_scenes = seed_core_slide_scene_map(seed_viewer)
-    core_positions = build_project_core_positions(obs, core_names, seed_core_scenes)
+    core_positions = build_project_core_positions(obs, core_names)
     core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
     add_default_full_dataset_grouping(obs, core_names, groupings)
     groupings = prune_and_sort_groupings(groupings, core_names)
@@ -3936,8 +4134,7 @@ def trim_seed_viewer_to_obs(seed_viewer, obs):
     if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
         return seed_viewer
     core_names = sorted(list(core_tiles.keys()), key=natural_sort_key)
-    seed_core_scenes = seed_core_slide_scene_map(seed_viewer)
-    core_positions = build_project_core_positions(obs, core_names, seed_core_scenes)
+    core_positions = build_project_core_positions(obs, core_names)
     keep = []
     i = 0
     while i < len(core_names):
@@ -4023,12 +4220,21 @@ def build_figure_entries_from_specs(specs, view, subset_option=None):
     return out
 
 
-def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions):
+def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions, segmentation_by_slide_scene=None):
     ifprog.tick_progress("Project viewer: building subset options and overlays.")
     print("Project viewer: building subset options and overlays.")
     subset_options, subset_source = build_subset_options_by_view(view_sets, obs, core_positions=core_positions, return_source=True)
     report_project_subset_debug(view_sets, obs, core_positions, subset_source, subset_options)
-    subset_overlays, overlay_report = build_subset_overlay_specs(base_viewer, subset_options, obs, dfxy, meta, out_root, view_sets=view_sets)
+    subset_overlays, overlay_report = build_subset_overlay_specs(
+        base_viewer,
+        subset_options,
+        obs,
+        dfxy,
+        meta,
+        out_root,
+        view_sets=view_sets,
+        segmentation_by_slide_scene=segmentation_by_slide_scene,
+    )
     return subset_options, subset_overlays, overlay_report
 
 
@@ -4110,14 +4316,19 @@ def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_roo
         patch["seed_viewer_label"] = ""
 
     view_sets = patch.get("view_sets", [])
-    core_positions = build_project_core_positions(
-        obs,
-        [str(x) for x in core_tiles.keys()],
-        seed_core_slide_scene_map(base_viewer),
-    )
+    core_names = [str(x) for x in core_tiles.keys()]
+    core_positions = build_project_core_positions(obs, core_names)
+    segmentation_by_slide_scene = build_segmentation_map_from_seed_viewer(base_viewer, meta)
 
     subset_options, subset_overlays, overlay_report = build_project_subset_artifacts(
-        base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions
+        base_viewer,
+        view_sets,
+        obs,
+        dfxy,
+        meta,
+        out_root,
+        core_positions,
+        segmentation_by_slide_scene=segmentation_by_slide_scene,
     )
     figure_entries = build_project_figure_artifacts(view_sets, subset_options, meta)
 
@@ -4127,12 +4338,20 @@ def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_roo
     patch["subset_options"] = subset_options
     patch["subset_overlays"] = subset_overlays
     patch["figure_entries"] = figure_entries
-    patch["roi_data"] = build_roi_data_for_seed(base_viewer, obs, dfxy, df=df, meta=meta, out_root=out_root)
+    patch["roi_data"] = build_roi_data_for_seed(
+        base_viewer,
+        obs,
+        dfxy,
+        df=df,
+        meta=meta,
+        out_root=out_root,
+        segmentation_by_slide_scene=segmentation_by_slide_scene,
+    )
     patch["roi_mailbox"] = build_roi_mailbox_payload(roi_mailbox)
     patch["threshold_store"] = build_threshold_store_payload(
         obs,
         df,
-        [str(x) for x in core_tiles.keys()],
+        core_names,
         core_positions,
         meta=meta,
         roi_mailbox=roi_mailbox,
@@ -4162,7 +4381,7 @@ def missing_obs_slide_scenes(base_viewer, obs):
         return []
     if "slide_scene" not in obs.columns:
         return []
-    available = set([str(v).strip() for v in seed_core_slide_scene_map(base_viewer).values() if str(v).strip() != ""])
+    available = set(viewer_slide_scene_values(base_viewer))
     if len(available) == 0:
         return []
     wanted = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()
@@ -4181,7 +4400,7 @@ def covered_obs_slide_scenes(base_viewer, obs):
         return []
     if "slide_scene" not in obs.columns:
         return []
-    available = set([str(v).strip() for v in seed_core_slide_scene_map(base_viewer).values() if str(v).strip() != ""])
+    available = set(viewer_slide_scene_values(base_viewer))
     if len(available) == 0:
         return []
     wanted = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()

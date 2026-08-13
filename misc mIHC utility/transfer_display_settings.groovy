@@ -28,7 +28,7 @@ def MODE = "APPLY"
 // Name your preset so you can have multiple saved configurations.
 // Examples: "default", "TLS_view", "immune_panel", "BCL6_focus"
 
-def PRESET_NAME = "default"
+def PRESET_NAME = "TLS_SS2"
 
 // ===================== END USER SETTINGS ====================
 
@@ -36,8 +36,38 @@ def PRESET_NAME = "default"
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
+import qupath.lib.common.ColorTools
+import qupath.lib.images.servers.ImageChannel
+import qupath.lib.images.servers.ImageServerMetadata
 
 def gson = new GsonBuilder().setPrettyPrinting().create()
+
+/** Pack RGB components into a hex string like "#00FFFF" */
+def rgbToHex(int packed) {
+    def r = (packed >> 16) & 0xFF
+    def g = (packed >> 8) & 0xFF
+    def b = packed & 0xFF
+    return String.format("#%02X%02X%02X", r, g, b)
+}
+
+/** Parse a hex string like "#00FFFF" into a packed RGB int */
+def hexToPackedRGB(String hex) {
+    hex = hex.replace("#", "")
+    def r = Integer.parseInt(hex.substring(0, 2), 16)
+    def g = Integer.parseInt(hex.substring(2, 4), 16)
+    def b = Integer.parseInt(hex.substring(4, 6), 16)
+    return ColorTools.packRGB(r, g, b)
+}
+
+/** Convert hex "#RRGGBB" to the {red, green, blue} map QuPath presets use */
+def hexToRgbMap(String hex) {
+    hex = hex.replace("#", "")
+    return [
+        red:   Integer.parseInt(hex.substring(0, 2), 16),
+        green: Integer.parseInt(hex.substring(2, 4), 16),
+        blue:  Integer.parseInt(hex.substring(4, 6), 16)
+    ]
+}
 
 /**
  * Extracts the marker name from a full channel name.
@@ -106,6 +136,7 @@ if (MODE.toUpperCase() == "CAPTURE") {
         def showing = selectedChannels.contains(ch)
         def minVal  = ch.getMinDisplay()
         def maxVal  = ch.getMaxDisplay()
+        def hexColor = rgbToHex(ch.getColor())
 
         // If a marker appears more than once (e.g. HEM), number them
         def key = marker
@@ -115,9 +146,10 @@ if (MODE.toUpperCase() == "CAPTURE") {
         }
 
         channelSettings[key] = [
-            min:  Math.round(minVal  * 100.0) / 100.0,
-            max:  Math.round(maxVal  * 100.0) / 100.0,
-            show: showing
+            min:   Math.round(minVal  * 100.0) / 100.0,
+            max:   Math.round(maxVal  * 100.0) / 100.0,
+            show:  showing,
+            color: hexColor
         ]
     }
 
@@ -132,7 +164,7 @@ if (MODE.toUpperCase() == "CAPTURE") {
     println "Channels captured:"
     channelSettings.each { key, val ->
         def flag = val.show ? "ON " : "off"
-        println "  [${flag}]  ${key}:  ${val.min} - ${val.max}"
+        println "  [${flag}]  ${key}:  ${val.min} - ${val.max}  ${val.color}"
     }
     println ""
     println "Next steps:"
@@ -186,13 +218,55 @@ if (MODE.toUpperCase() == "CAPTURE") {
         if (s != null) {
             imageDisplay.setMinMaxDisplay(ch, s.min as float, s.max as float)
             imageDisplay.setChannelSelected(ch, s.show as boolean)
+            def colorStr = s.color ?: ""
             def flag = s.show ? "ON " : "off"
-            println "  [${flag}]  ${ch.getName()}  <-  ${key}  [${s.min} - ${s.max}]"
+            println "  [${flag}]  ${ch.getName()}  <-  ${key}  [${s.min} - ${s.max}]  ${colorStr}"
             applied++
         } else {
             println "  [ ? ]  ${ch.getName()}  (${key})  -- no matching preset entry, skipped"
             skipped++
         }
+    }
+
+    // --- Apply channel colors via server metadata ---
+    def imageData = getCurrentImageData()
+    def serverMetadata = imageData.getServer().getMetadata()
+    def oldChannelList = serverMetadata.getChannels()
+
+    // Re-count markers for the metadata channel list
+    def metaMarkerCounts = [:]
+    oldChannelList.each { ch ->
+        def m = extractMarker(ch.getName())
+        metaMarkerCounts[m] = (metaMarkerCounts[m] ?: 0) + 1
+    }
+
+    def metaMarkerSeen = [:]
+    boolean colorsChanged = false
+    def newChannelList = oldChannelList.collect { ch ->
+        def marker = extractMarker(ch.getName())
+        def key = marker
+        if (metaMarkerCounts[marker] > 1) {
+            metaMarkerSeen[marker] = (metaMarkerSeen[marker] ?: 0) + 1
+            key = "${marker}_${metaMarkerSeen[marker]}"
+        }
+
+        def s = preset.channels[key]
+        if (s == null) s = preset.channels[marker]
+
+        if (s != null && s.color != null) {
+            def newColor = hexToPackedRGB(s.color as String)
+            colorsChanged = true
+            return ImageChannel.getInstance(ch.getName(), newColor)
+        }
+        return ch
+    }
+
+    if (colorsChanged) {
+        def newMetadata = new ImageServerMetadata.Builder(serverMetadata)
+            .channels(newChannelList)
+            .build()
+        imageData.updateServerMetadata(newMetadata)
+        println "\nChannel colors updated."
     }
 
     // Force the viewer to redraw
@@ -272,18 +346,22 @@ if (MODE.toUpperCase() == "CAPTURE") {
             def s = preset.channels[key]
             if (s == null) s = preset.channels[marker]
 
-            // Unpack the original color from the project metadata
+            // Fallback color: unpack from project metadata
             def packed = (ch.color as Number).intValue()
-            def r = (packed >> 16) & 0xFF
-            def g = (packed >> 8) & 0xFF
-            def b = packed & 0xFF
+            def fallbackColor = [
+                red:   (packed >> 16) & 0xFF,
+                green: (packed >> 8) & 0xFF,
+                blue:  packed & 0xFF
+            ]
 
             if (s != null) {
+                // Use captured color if available, otherwise original
+                def colorMap = (s.color != null) ? hexToRgbMap(s.color as String) : fallbackColor
                 allChannelEntries.add([
                     name:       chName,
                     minDisplay: s.min,
                     maxDisplay: s.max,
-                    color:      [red: r, green: g, blue: b],
+                    color:      colorMap,
                     isShowing:  s.show
                 ])
                 matched++
@@ -294,7 +372,7 @@ if (MODE.toUpperCase() == "CAPTURE") {
                     name:       chName,
                     minDisplay: 0.0,
                     maxDisplay: 255.0,
-                    color:      [red: r, green: g, blue: b],
+                    color:      fallbackColor,
                     isShowing:  false
                 ])
                 unmatched++

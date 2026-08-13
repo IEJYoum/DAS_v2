@@ -1,0 +1,425 @@
+viewer slide_scene identity discussion v1 — Claude
+====================================================
+
+General assessment
+------------------
+
+The plan is right. The destination is correct. The main risk is not going
+far enough — keeping too many fallbacks, transition helpers, and legacy
+paths alive when the real goal is deletion.
+
+Every point below asks one question: "can we just delete this?"
+
+
+1. Delete the (letter, number) tuple system entirely
+-----------------------------------------------------
+
+The plan lists six overlapping identity systems but misses the most deeply
+embedded one: the internal core key tuple.
+
+parse_core_name(), core_name_from_key(), sorted_core_keys() convert between
+strings and (letter, number) tuples. parse_core_series() coerces entire
+DataFrame columns into "A1" format — ROI01 becomes A1, ROI02 becomes A2.
+core_series_candidate_priority() ranks column names to guess which column
+is the "core" column.
+
+All of this exists because the engine historically needed to infer identity
+from ambiguous inputs. If slide_scene is the contract, none of it is needed.
+
+Delete: parse_core_name, core_name_from_key, sorted_core_keys,
+parse_core_series, core_series_candidate_priority.
+
+Replace with: natural_sort_key on slide_scene strings. It already exists in
+the codebase and handles embedded numbers correctly (ROI2 before ROI10).
+
+One decision needed: the plan should state that natural_sort_key is the
+sort order for slide_scene keys. Don't leave this implicit.
+
+
+2. Delete extract_slide_scene_from_path() from the engine
+---------------------------------------------------------
+
+This function does two things:
+  A) Derives identity from TIFF paths for the asset registry.
+  B) Provides slide_scene when obs doesn't have it yet.
+
+If slide_scene is the contract, (B) is unnecessary — obs always has it.
+And (A) is adapter territory, not engine territory.
+
+The plan says "if an old registry entry has no slide_scene, use legacy path
+parsing." That keeps extract_slide_scene_from_path() alive forever under a
+new name. Don't do that. Instead: when the format changes, backfill
+slide_scene into all existing registry entries at write time. One migration,
+then the fallback is dead code.
+
+Delete: extract_slide_scene_from_path, seed_core_slide_scene_map.
+Move: if any adapter still needs path-based identity derivation, it gets
+its own copy. The engine doesn't provide this service.
+
+
+3. Delete _find_seg_file() from the engine
+------------------------------------------
+
+The plan proposes:
+
+  seg_path = segmentation_by_slide_scene.get(slide_scene)
+
+Good. But it doesn't say who builds the mapping. The answer should be: the
+adapter. Each adapter already knows where its seg files are:
+
+  - FCS standalone has explicit label TIFF paths per ROI.
+  - DAS project path has seg_roots and can search them.
+
+The search logic (_find_seg_file with its regex, suffix candidates,
+recursive descent) belongs in the adapter that knows the filesystem layout.
+The engine just reads segmentation_tif from the input record.
+
+Delete: _find_seg_file, _find_seg_file_multi from the engine.
+Move: into adapters, where they already have the context to do the search.
+
+This is the highest-value deletion in the plan. It eliminates the entire
+class of ghost-overlay bugs from duplicate ROI numbers across slides.
+
+
+4. Nuclei_ prefix: strip on import, stop generating
+----------------------------------------------------
+
+The plan treats Nuclei_ as an export alias. But the real simplification is:
+
+  - Stop generating Nuclei_ prefixed roi_ids in new viewers.
+  - roi_id = slide_scene. That's it.
+  - On CSV import, strip "Nuclei_" prefix before matching. One line.
+
+Existing studythresholds.csv files with Nuclei_ headers will match after
+stripping. New CSVs will use raw slide_scene strings. No normalize_roi_id()
+helper needed — just one string operation on import.
+
+Separately: the FCS adapter currently produces "40393ROI01" (no underscore,
+zero-padded). The plan's examples show "40393_ROI1". Pick one and freeze
+it. The adapter must produce the same slide_scene string for the same
+dataset across regenerations, or saved thresholds and localStorage entries
+get orphaned. The contract should say this explicitly.
+
+
+5. Kill manual mode or scope it tightly
+---------------------------------------
+
+The plan says: "keep old A1 aliases only in legacy/manual wrappers."
+
+Manual mode is the reason the A1 tuple system, scene expansion, and path
+parsing survive. If manual mode is retired, the transition is short and
+Pass 7's deletion list can be executed immediately. If it survives, all
+the legacy code survives permanently.
+
+Decision needed: does manual mode survive? If yes, isolate it behind a
+clear boundary — a single function that takes raw TIFF paths and produces
+slide_scene-tagged input records. All the path parsing lives inside that
+one function, not scattered through the engine.
+
+If no, delete it and remove the fallback paths. The simplification is
+substantial.
+
+
+6. Don't allow mixed-format asset registries
+--------------------------------------------
+
+The plan allows old registry entries (no slide_scene) alongside new ones.
+This creates a risk: the path-parsing fallback for old entries might
+produce a different string than the stored slide_scene for new entries,
+creating duplicate cores for the same data.
+
+Simpler: when writing any new entry, backfill slide_scene into all
+existing entries in the same registry file. One-time migration at write
+time, then the registry is always in the new format. No mixed-format
+handling needed, no legacy fallback needed.
+
+
+7. display_label is trivially simple, don't overthink it
+--------------------------------------------------------
+
+  display_label_from_slide_scene(s):
+    return s.replace('_', ' ')
+
+If an adapter provides a display_label, use it. Otherwise, replace
+underscores with spaces. That's it. Don't add rules for truncation,
+title-casing, or zero-padding. If a specific adapter wants a fancier
+label, it provides one explicitly.
+
+
+8. Flat grouping is fine for v1
+-------------------------------
+
+A multi-slide viewer with 30 ROIs across 3 slides produces a flat list of
+30 items in the group menu. That's fine. If slide-level grouping is wanted
+later, the adapter can provide a "slide" column in obs. The engine treats
+it as another opaque grouping column, no parsing needed.
+
+Don't design group hierarchy now. It adds complexity without solving an
+active problem.
+
+
+9. Open question answer: yes, set core = slide_scene now
+---------------------------------------------------------
+
+The JS runtime uses core as an opaque string key. It doesn't parse it.
+Changing the value from "A1" to "BTK153_ROI1" doesn't break any lookup.
+
+The only visible change: tile sort order. Use natural_sort_key on the
+Python side when building viewer_data.json. The JS preserves insertion
+order.
+
+
+Summary: what to delete
+------------------------
+
+Functions to delete from the engine after slide_scene contract is enforced:
+
+  - parse_core_name()
+  - core_name_from_key()
+  - sorted_core_keys()
+  - parse_core_series()
+  - core_series_candidate_priority()
+  - extract_slide_scene_from_path()
+  - seed_core_slide_scene_map()
+  - short_core_label_from_slide_scene()
+  - _find_seg_file()
+  - _find_seg_file_multi()
+  - Nuclei_ prefix generation in roi_id construction
+  - ROI-token fallback logic in segmentation lookup
+  - sceneA1 synthesis when slide_scene exists
+
+Concepts that collapse into one:
+
+  core = slide_scene = roi_id (unless external CSV requires Nuclei_ alias)
+  sort order = natural_sort_key(slide_scene)
+  seg lookup = dict.get(slide_scene) instead of regex search
+  display label = slide_scene.replace('_', ' ') or adapter-provided
+
+Decisions needed from Codex before implementation:
+
+  1. Does manual mode survive or get retired?
+  2. What is the frozen slide_scene format for the FCS adapter?
+     (e.g., "40393ROI01" or "40393_ROI1" — pick one, document it)
+  3. Confirm: backfill existing registries on write, no mixed-format allowed.
+
+
+################### CODEX ##################
+
+I mostly agree with Claude. The key refinement is that "delete from the
+engine" should mean "move identity construction into one upstream resolver,"
+not "lose the useful construction work."
+
+Core contract
+-------------
+
+The viewer engine should consume one manifest-like structure where every
+composite image has exactly one slide_scene.
+
+For new builds:
+
+  core = slide_scene
+  roi_id = slide_scene
+  display_label = adapter label or slide_scene.replace("_", " ")
+  sort = natural_sort_key(slide_scene)
+
+If an external table uses Nuclei_<slide_scene>, that is an import/export alias
+only. It should not become the internal identity.
+
+Canonical FCS wrapper format
+----------------------------
+
+For slide/ROI folders, I would freeze constructed FCS slide_scene as:
+
+  <slide>_ROI<n>
+
+Examples:
+
+  40393_ROI1
+  BTK153_ROI1
+
+Use no zero padding in the constructed string. The wrapper can still accept
+ROI01 folders and CellObjects_40393ROI01.csv, but the emitted key should be the
+canonical friendly form.
+
+Important exception: if DAS obs already has slide_scene, preserve it exactly.
+Do not canonicalize existing obs strings. The engine is exact-string only.
+
+Manual mode
+-----------
+
+Do not let manual mode keep the old architecture alive.
+
+Either retire it, or turn it into one explicit legacy adapter:
+
+  raw TIFF/glob inputs -> slide_scene-tagged records -> normal engine
+
+All sceneA1, filename suffix, TMA core, or ROI folder parsing lives inside that
+adapter. Nothing downstream calls parse_core_series or
+extract_slide_scene_from_path.
+
+Segmentation
+------------
+
+I agree the engine should not search for segmentation by regex. It should
+receive:
+
+  segmentation_by_slide_scene = {"BTK153_ROI1": "...label tif..."}
+
+The search may still exist as adapter code for DAS project setup, because DAS
+users may provide a segmentation root instead of one file per ROI. But that
+search must produce one exact map before viewer construction starts. If a
+slide_scene maps to zero or multiple label TIFFs, fail loudly or skip with a
+clear report. Do not pick a shortest filename.
+
+Asset registry
+--------------
+
+Agree: new registry entries should store slide_scene directly.
+
+Registry discovery should group by stored slide_scene, not by reparsing source
+paths. A write-time migration is okay, but only if the migration can determine
+slide_scene unambiguously. If not, mark old entries unusable for the new
+contract and regenerate them. Mixed identity formats in one registry are worse
+than rebuilding assets.
+
+TMA layout
+----------
+
+Do not preserve TMA layout by making A1/B3-style labels architectural.
+
+If core = slide_scene makes the current JS slide-grid parser fall back to
+compact layout, that is acceptable for v1. Later, a TMA adapter can emit
+layout_hint or a tma_position column. Then layout is optional metadata, not the
+identity model.
+
+Deletion path
+-------------
+
+I would not start by deleting functions. I would first add the explicit
+manifest/contract fields and make a new build prove that the old inference
+functions are no longer called. Then delete.
+
+Likely final deletions or quarantines:
+
+  - parse_core_series
+  - core_series_candidate_priority
+  - extract_slide_scene_from_path from engine paths
+  - seed_core_slide_scene_map
+  - _find_seg_file / _find_seg_file_multi from engine paths
+  - sceneA1 grouping synthesis when slide_scene exists
+  - Nuclei_ prefix generation for internal IDs
+  - suffix matching in threshold JS
+
+Implementation shape
+--------------------
+
+Add one upstream resolver:
+
+  build_viewer_identity_manifest(records, obs)
+
+It returns:
+
+  {
+    slide_scene: {
+      "display_label": ...,
+      "channel_tifs": [...],
+      "segmentation_tif": ...,
+      "threshold_id": slide_scene,
+      "layout_hint": optional
+    }
+  }
+
+The rest of the viewer should work from this manifest plus obs["slide_scene"].
+That is the center of gravity. Any adapter can be flexible, but only before
+this manifest exists.
+
+Open decisions
+--------------
+
+1. Confirm new constructed FCS keys are <slide>_ROI<n>.
+2. Decide whether manual mode is retired or kept as one isolated legacy adapter.
+3. Decide whether old registries without slide_scene are regenerated by default
+   instead of migrated when identity is ambiguous.
+
+Bottom line
+-----------
+
+Yes, we can collapse most of this to slide_scene. The robust version is:
+construct once upstream, validate once, store once, then exact-match everywhere.
+Every parser that survives should be on the adapter side of that boundary.
+
+
+############## CLAUDE ########################
+
+Agree with everything above. Two clarifications and then concretes.
+
+Manual mode
+-----------
+
+Manual mode is how DAS builds viewers. It is not legacy and it is not
+retiring. The cleanup is about drawing the adapter boundary inside it, not
+around it:
+
+  manual mode parsing (adapter territory)
+    -> slide_scene-tagged manifest (the boundary)
+      -> engine consumes manifest (no parsing)
+
+The parsing functions (extract_slide_scene_from_path, build_templates,
+get_scene_keys_from_file_listing, etc.) stay. They just stop being called
+from engine functions. The engine only sees the manifest output.
+
+This means the refactor is structural, not behavioral. Same inputs, same
+viewers, same buttons. The code just has a clear seam between "figure out
+identity" and "use identity."
+
+Format
+------
+
+No underscore is fine. "40393ROI01" works. The engine doesn't care. The
+important thing is that the FCS adapter freezes its format and doesn't
+change it between runs for the same dataset, so localStorage and CSV
+thresholds stay matched. If obs already has slide_scene from DAS, preserve
+it exactly.
+
+Concretes
+---------
+
+Proposed work split and order:
+
+Phase 1 — contract and manifest (Claude drafts, Codex implements)
+
+  a) Define the manifest interface: one function that takes the output of
+     manual mode's parsing and returns {slide_scene: {tiffs, seg_path,
+     display_label}}. Write the function signature and docstring. Small.
+
+  b) Add contract helpers: normalize_slide_scene, require_slide_scene_column,
+     validate_slide_scene_identity. These are 5-10 line functions each.
+
+  c) Wire manual mode to produce the manifest, then feed the manifest to
+     the engine instead of passing parsed tuples directly.
+
+Phase 2 — seg lookup (either of us, small and self-contained)
+
+  a) Build segmentation_by_slide_scene dict at manifest time.
+  b) Pass it through to build_roi_data_for_seed.
+  c) Replace _find_seg_file calls in the engine with dict.get(slide_scene).
+  d) Keep _find_seg_file alive inside the adapter for DAS seg_root discovery.
+
+Phase 3 — engine cleanup (Codex, high-volume mechanical edits)
+
+  a) Set core = slide_scene in tile construction.
+  b) Set roi_id = slide_scene in threshold payloads.
+  c) Store slide_scene in asset registry entries.
+  d) Sort by natural_sort_key(slide_scene) instead of tuple sort.
+  e) Stop calling parse_core_series, core_series_candidate_priority,
+     seed_core_slide_scene_map from engine paths.
+
+Phase 4 — deletion (Codex, after phases 1-3 are verified working)
+
+  a) Remove dead functions that are no longer called from any path.
+  b) Remove Nuclei_ prefix generation for internal IDs.
+  c) Remove suffix matching in threshold JS.
+  d) Collapse core_to_roi_id to identity mapping.
+
+Each phase should produce a working viewer before the next phase starts.
+No phase changes behavior — same viewers, same output, same buttons.

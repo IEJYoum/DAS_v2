@@ -878,6 +878,7 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
         ext = ".bin"
     sig = file_sig(ap)
     core_tag = canonical_core_tag(core_name)
+    slide_scene = str(core_name or "").strip()
     tma_tag = infer_tma_tag(ap)
     core_key = safe_tag(core_tag, 24) if core_tag != "" else ""
     tma_key = safe_tag(tma_tag, 24) if tma_tag != "" else ""
@@ -888,6 +889,8 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
         rel = assets[key].get("rel", "")
         abs_existing = os.path.normpath(os.path.join(OUTDIR, rel))
         if rel != "" and os.path.exists(abs_existing):
+            if slide_scene != "":
+                assets[key]["slide_scene"] = slide_scene
             return rel, key
 
     stem = os.path.splitext(os.path.basename(ap))[0]
@@ -984,6 +987,7 @@ def color_for_marker(marker):
 def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
     sig = file_sig(tiff_path)
     core_tag = canonical_core_tag(core_name)
+    slide_scene = str(core_name or "").strip()
     tma_tag = infer_tma_tag(tiff_path)
     core_key = safe_tag(core_tag, 24) if core_tag != "" else ""
     tma_key = safe_tag(tma_tag, 24) if tma_tag != "" else ""
@@ -1040,6 +1044,7 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
         "tiff": os.path.abspath(tiff_path),
         "tma": tma_tag,
         "core": core_tag,
+        "slide_scene": slide_scene,
         "marker": str(marker),
         "mode": "L"
     }
@@ -1050,6 +1055,7 @@ def ensure_composite_asset(tile_spec, registry, norm_kw):
     tiffs = list(tile_spec.get("tiff_paths", []))
     overlays = list(tile_spec.get("overlay_paths", []))
     core_name = str(tile_spec.get("core", ""))
+    slide_scene = str(tile_spec.get("slide_scene", "") or core_name).strip()
     if len(tiffs) == 0:
         return None, None, [], []
 
@@ -1089,6 +1095,8 @@ def ensure_composite_asset(tile_spec, registry, norm_kw):
 
     assets = registry["assets"]
     if key in assets:
+        if slide_scene != "":
+            assets[key]["slide_scene"] = slide_scene
         return None, key, overlay_rels, channels
 
     assets[key] = {
@@ -1097,6 +1105,7 @@ def ensure_composite_asset(tile_spec, registry, norm_kw):
         "tiffs": [os.path.abspath(p) for p in tiffs],
         "markers": marker_labels,
         "channels": channels,
+        "slide_scene": slide_scene,
         "tag": tag
     }
     return None, key, overlay_rels, channels
@@ -1245,16 +1254,20 @@ def local_file_url(path):
 def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=False):
     tile_kind = spec.get("tile_kind", "missing")
     core = str(spec.get("core", ""))
+    slide_scene = str(spec.get("slide_scene", "") or core).strip()
     label = str(spec.get("label", core))
     asset_type_id = str(spec.get("asset_type_id", "missing"))
     asset_type_label = str(spec.get("asset_type_label", asset_type_id))
-    display_label = display_label_from_tile_sources(core, spec.get("source_paths", [])) or label
+    display_label = str(spec.get("display_label", "") or "").strip()
+    if display_label == "":
+        display_label = display_label_from_tile_sources(core, spec.get("source_paths", [])) or label
 
     if tile_kind == "composite" and len(spec.get("tiff_paths", [])) > 0:
         base_rel, cache_key, overlay_rels, channels = ensure_composite_asset(spec, registry, norm_kw)
         return {
             "tile_kind": "composite",
             "core": core,
+            "slide_scene": slide_scene,
             "label": label,
             "display_label": display_label,
             "asset_type_id": asset_type_id,
@@ -1275,6 +1288,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
         return {
             "tile_kind": "figure",
             "core": core,
+            "slide_scene": slide_scene,
             "label": label,
             "display_label": display_label,
             "asset_type_id": asset_type_id,
@@ -1293,6 +1307,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
     return {
         "tile_kind": "missing",
         "core": core,
+        "slide_scene": slide_scene,
         "label": label,
         "display_label": display_label,
         "asset_type_id": "missing",
@@ -5294,14 +5309,16 @@ function knownRoiIds() {
 function resolveRoiId(rawRoi) {
   const raw = String(rawRoi || '').trim();
   if (!raw) return '';
+  // Strip legacy Nuclei_ prefix before matching
+  const stripped = /^Nuclei_/i.test(raw) ? raw.slice(7) : raw;
   const roiIds = knownRoiIds();
   for (const roi of roiIds) {
-    if (roi === raw) return roi;
+    if (roi === raw || roi === stripped) return roi;
   }
   const matches = roiIds.filter(function(roi) {
-    return roi.toLowerCase().endsWith(raw.toLowerCase());
+    return roi.toLowerCase().endsWith(stripped.toLowerCase());
   });
-  return matches.length === 1 ? matches[0] : raw;
+  return matches.length === 1 ? matches[0] : stripped;
 }
 function markerValueCaseInsensitive(byRoi, marker) {
   if (!byRoi || typeof byRoi !== 'object') return NaN;
@@ -5413,7 +5430,8 @@ function mergeThresholdTable(table) {
   const header = table[0].map(function(x) { return String(x || '').trim(); });
   const first = header[0].toLowerCase();
   const second = header.length > 1 ? header[1].toLowerCase() : '';
-  if (second === 'markers' || first === 'markers' || header.slice(1).some(function(x) { return /^Nuclei_/i.test(x); })) {
+  const hasRoiHeaders = header.slice(1).some(function(x) { return /^Nuclei_/i.test(x) || knownRoiIds().indexOf(resolveRoiId(x)) >= 0; });
+  if (second === 'markers' || first === 'markers' || hasRoiHeaders) {
     const markerCol = second === 'markers' ? 1 : 0;
     const roiStart = markerCol + 1;
     for (let r = 1; r < table.length; r += 1) {

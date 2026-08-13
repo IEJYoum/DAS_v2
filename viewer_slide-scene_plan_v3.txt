@@ -1,0 +1,462 @@
+viewer slide_scene identity plan v3
+===================================
+
+Purpose
+-------
+
+Collapse viewer image identity to one key string:
+
+  slide_scene
+
+The goal is not to add another resolver next to the old machinery. The goal is
+to construct image identity once upstream, validate it once, store it once, and
+make downstream code exact-match that one string.
+
+Runtime is expensive, so implementation should be one coherent pass with
+internal code checks, followed by one real viewer test matrix. Do not require a
+full viewer regeneration after every small edit.
+
+
+Core rule
+---------
+
+For new viewer builds:
+
+  core = slide_scene
+  tile["core"] = slide_scene
+  tile["slide_scene"] = slide_scene
+  roi_data.cores keys = slide_scene
+  threshold_store.roi_ids = slide_scene
+  threshold_store.core_to_roi_id maps slide_scene -> slide_scene while the
+    field still exists
+
+slide_scene is opaque and human-friendly. Valid strings include:
+
+  40393ROI01
+  40393_ROI1
+  BTK153_ROI1
+  TMA1_A1
+  pTMA1_A1
+  Pt.2_scene2
+
+If obs already has slide_scene, preserve it exactly. Do not canonicalize DAS
+obs values. If an adapter constructs slide_scene from files/folders, it must
+construct the same string every time for the same composite image.
+
+
+Boundary
+--------
+
+Parsing belongs upstream. Matching belongs downstream.
+
+Adapter/manual ingest side may parse:
+
+  folder names
+  filenames
+  sceneA1 conventions
+  ROI01 folders
+  TMA A1/B3 labels
+  segmentation roots
+
+Engine side should consume:
+
+  obs["slide_scene"]
+  identity manifest
+  exact slide_scene -> asset / seg / threshold mappings
+
+Engine side should not repeatedly call parsers to rediscover identity.
+
+
+Identity manifest
+-----------------
+
+Add one manifest shape used at the boundary between ingest/adapters and the
+viewer engine:
+
+  {
+    "<slide_scene>": {
+      "slide_scene": "<slide_scene>",
+      "display_label": "optional human label",
+      "tiff_paths": ["..."],
+      "overlay_paths": ["..."],          # source overlays/label TIFFs if present
+      "segmentation_tif": "...",         # exact label TIFF, optional
+      "source_paths": ["..."],
+      "threshold_id": "<slide_scene>",
+      "layout_hint": {}
+    }
+  }
+
+For v3 implementation, this can be a plain dict. No class. No framework.
+
+Minimum helper signatures:
+
+  def normalize_slide_scene(value):
+      """Return a non-empty slide_scene string or ''."""
+
+  def display_label_from_slide_scene(slide_scene, explicit=""):
+      """Return explicit label when present, else slide_scene with underscores as spaces."""
+
+  def validate_slide_scene_manifest(manifest):
+      """Raise ValueError for empty keys, mismatched record values, or duplicate/empty paths."""
+
+  def build_identity_manifest_from_core_buckets(by_core, obs=None):
+      """Return slide_scene-keyed manifest from manual-mode buckets."""
+
+  def build_identity_manifest_from_seed_viewer(seed_viewer):
+      """Return slide_scene-keyed manifest from an existing viewer_data/core_tiles payload."""
+
+  def build_segmentation_map_from_manifest(manifest):
+      """Return {slide_scene: segmentation_tif} for records with exact segmentation paths."""
+
+The helpers should be short, boring functions in call_visu_html_7.py at first.
+They can move later if this becomes shared outside visualization.
+
+
+Implementation pass
+===================
+
+Do these in one code pass, with py_compile and small function-level smoke tests
+between clusters. Do not require full viewer generation until the end.
+
+
+1. Manual ingest produces a manifest
+------------------------------------
+
+File: call_visu_html_7.py
+
+Current flow:
+
+  build_templates(filepaths)
+  collect_scene_keys(scene_templates)
+  build_core_buckets(scene_keys, scene_templates)
+  build_catalog(by_core, obs)
+
+Keep build_templates(), collect_scene_keys(), and build_core_buckets() as
+adapter/path-resolution code for now. They may still use scene tuples
+internally. The change is what crosses into build_catalog().
+
+Add:
+
+  manifest = build_identity_manifest_from_core_buckets(by_core, obs=obs)
+  catalog = build_catalog_from_identity_manifest(manifest, obs)
+
+Do not make build_catalog() infer slide_scene from A1 by reparsing obs columns.
+If obs has slide_scene, use exact obs strings. If manual mode is operating
+without obs slide_scene, the adapter may construct slide_scene from resolved
+paths. That construction is adapter fallback, not engine behavior.
+
+
+2. Build catalog from slide_scene keys
+--------------------------------------
+
+File: call_visu_html_7.py
+
+Add a new engine-facing function:
+
+  def build_catalog_from_identity_manifest(manifest, obs):
+
+It should:
+
+  - validate manifest
+  - sort slide_scene keys with natural_sort_key
+  - call build_core_tile_specs(slide_scene, bucket_or_record)
+  - set tile["core"] = slide_scene
+  - set tile["slide_scene"] = slide_scene
+  - set tile["display_label"] from manifest
+  - build groupings from obs["slide_scene"]
+
+Existing build_catalog(by_core, obs) can become an adapter wrapper:
+
+  manifest = build_identity_manifest_from_core_buckets(by_core, obs)
+  return build_catalog_from_identity_manifest(manifest, obs)
+
+This is the key simplification: the engine-facing catalog builder only sees
+slide_scene keys.
+
+
+3. Project/reuse path consumes manifest or slide_scene-keyed core_tiles
+-----------------------------------------------------------------------
+
+File: call_visu_html_7.py
+
+Project mode currently uses seed_core_slide_scene_map() to bridge A1 keys to
+obs["slide_scene"]. This should become unnecessary for new viewer_data.
+
+For v3, support this order:
+
+  a) If tile/core has explicit "slide_scene", use it.
+  b) Else if core key exists and matches obs["slide_scene"], use core.
+  c) Else old seed viewer is incompatible with the new contract and should
+     fall back to asset regeneration or explicit adapter migration.
+
+Do not silently parse source_paths in the engine to rescue incompatible seeds.
+That is how stale/ambiguous identity survives.
+
+Functions to update:
+
+  build_core_tiles_from_asset_registry(out_root)
+  missing_obs_slide_scenes(base_viewer, obs)
+  covered_obs_slide_scenes(base_viewer, obs)
+  trim_seed_viewer_to_obs(seed_viewer, obs)
+  build_project_core_positions(obs, allowed_cores, ...)
+  build_core_position_index(core_names, overlay_context)
+
+Desired behavior:
+
+  allowed_cores are slide_scene strings
+  obs rows match by obs["slide_scene"] == core
+  no parse_core_series bridge is needed for normal project-aware builds
+
+
+4. ROI data uses slide_scene directly
+-------------------------------------
+
+File: call_visu_html_7.py
+
+Function:
+
+  build_roi_data_for_seed(...)
+
+Desired:
+
+  core_names = sorted(seed_viewer["core_tiles"].keys(), key=natural_sort_key)
+  core is slide_scene
+  positions come from obs["slide_scene"] == core
+  output cores dict is keyed by slide_scene
+  payload["core"] = slide_scene
+  payload["slide_scene"] = slide_scene
+
+Do not derive slide_scene by scanning obs rows after matching. If matching was
+successful, core already is slide_scene.
+
+
+5. Threshold store uses slide_scene internally
+----------------------------------------------
+
+Files:
+
+  call_visu_html_7.py
+  visu_html_functions7.py
+  threshold_standalone_fcs.py
+
+Internal behavior:
+
+  roi_id = slide_scene
+  threshold_id = slide_scene
+  core_to_roi_id = identity map while still present
+
+Stop generating Nuclei_<slide_scene> for new internal IDs.
+
+CSV compatibility:
+
+  On threshold CSV import, strip a leading Nuclei_ from headers before matching
+  against known slide_scene keys.
+
+  On export, write slide_scene headers unless the user explicitly selected an
+  external/export alias mode. For this pass, no alias mode is needed.
+
+
+6. Segmentation map is exact
+----------------------------
+
+File: call_visu_html_7.py
+
+Build once before ROI/subset overlay construction:
+
+  segmentation_by_slide_scene = build_segmentation_map_from_manifest(manifest)
+
+Then pass it into:
+
+  build_roi_data_for_seed(..., segmentation_by_slide_scene=...)
+  build_subset_overlay_specs(..., segmentation_by_slide_scene=...)
+
+Inside those functions:
+
+  seg_file = segmentation_by_slide_scene.get(slide_scene)
+
+Do not call _find_seg_file_multi() inside the engine loops.
+
+If a DAS/project user provides a segmentation root, root searching can still
+happen once upstream while building the map. If duplicate ROI numbers across
+slides create ambiguity, report it and leave that slide_scene without
+segmentation rather than guessing.
+
+
+7. Asset registry stores slide_scene
+------------------------------------
+
+File: visu_html_functions7.py
+
+When channel assets are written, registry entries should include:
+
+  "slide_scene": slide_scene
+
+This probably means passing slide_scene/core into:
+
+  ensure_channel_asset(...)
+  ensure_composite_asset(...)
+  build_render_tile_from_spec(...)
+
+Since new core = slide_scene, using core_name as the slide_scene is acceptable
+for v3, but write the field explicitly.
+
+Asset reuse discovery:
+
+  build_core_tiles_from_asset_registry() should group by registry item
+  slide_scene, not by reparsing tiff paths.
+
+Old registry entries without slide_scene:
+
+  Do not mix guessed old entries with new entries silently.
+  Either:
+    - skip them with a clear "old registry entry lacks slide_scene" message, or
+    - regenerate assets.
+
+Regenerating is preferable to reintroducing path parsing in the engine.
+
+
+8. FCS adapter emits slide_scene as core
+----------------------------------------
+
+File: threshold_standalone_fcs.py
+
+This adapter already constructs or reads slide_scene. Keep that useful work.
+Change only propagation:
+
+  dataset["core_name"] = dataset["slide_scene"]
+  tile["core"] = slide_scene
+  tile["slide_scene"] = slide_scene
+  roi_id = slide_scene
+
+Do not convert slide_scene to A1. core_name_from_slide_scene() should become
+dead after this pass.
+
+Important: do not change the adapter's existing constructed slide_scene format
+unless there is a deliberate migration plan. Stable matching across regenerated
+viewers matters more than prettier strings.
+
+
+9. Display and layout
+---------------------
+
+Display:
+
+  use tile["display_label"] when present
+  else slide_scene.replace("_", " ")
+
+Grouping:
+
+  Group = slide_scene
+  Value = exact slide_scene string
+
+No sceneA1 grouping when slide_scene exists.
+
+Layout:
+
+  Do not build identity around A1/B3 TMA layout.
+  If core = slide_scene causes TMA-like grid code to fall back to compact
+  layout, accept that for v3.
+  Later, a TMA adapter can provide layout_hint.
+
+
+Code paths expected to shrink later
+===================================
+
+Do not delete these until the new flow is verified, but the goal is to make
+them adapter-only, unused, or removable:
+
+  parse_core_series
+  core_series_candidate_priority
+  infer_core_series_from_obs for project-aware matching
+  extract_slide_scene_from_path from engine paths
+  seed_core_slide_scene_map
+  _find_seg_file / _find_seg_file_multi from engine loops
+  core_name_from_key
+  sorted_core_keys
+  parse_core_name where it means identity rather than optional layout
+  short_core_label_from_slide_scene
+  Nuclei_ prefix generation
+  threshold JS suffix matching
+  sceneA1 synthesis when slide_scene exists
+
+
+Testing once, not repeatedly
+============================
+
+Use cheap checks during implementation:
+
+  python -m py_compile visualization/call_visu_html_7.py visualization/visu_html_functions7.py
+  python -m py_compile "misc mIHC utility/threshold_standalone_fcs.py"
+
+Add small in-process smoke tests that build tiny fake obs/manifests and assert:
+
+  core_tiles keys == slide_scene strings
+  roi_data.cores keys == slide_scene strings
+  core_positions are exact obs["slide_scene"] matches
+  threshold_store.roi_ids are slide_scene strings
+
+Then do one real viewer test matrix:
+
+1. Single ROI FCS/standalone.
+2. Multislide D10/ColorDecon with duplicate ROI numbers across slides.
+3. Existing DAS/project-aware run with real obs["slide_scene"].
+4. Asset reuse/regeneration into an existing viewer root.
+5. Threshold CSV import with old Nuclei_ headers.
+
+Pass/fail checklist:
+
+  [ ] viewer_data.json core_tiles keys are slide_scene strings
+  [ ] every composite tile has core == slide_scene
+  [ ] every composite tile has slide_scene field
+  [ ] roi_data.cores keys match core_tiles keys
+  [ ] threshold_store.roi_ids are slide_scene strings
+  [ ] no new Nuclei_ internal IDs are generated
+  [ ] old Nuclei_ CSV headers import successfully
+  [ ] Group Value menu shows slide_scene values, not sceneA1
+  [ ] ROI and Thresh buttons appear for every slide_scene
+  [ ] duplicate ROI numbers across slides do not share overlays
+  [ ] segmentation overlays come from exact segmentation_by_slide_scene map
+  [ ] asset reuse discovers slide_scene from registry metadata
+  [ ] old ambiguous registry entries are skipped/regenerated, not guessed
+
+
+Work split
+==========
+
+Codex should implement the main engine pass:
+
+  - manifest helpers
+  - build_catalog_from_identity_manifest
+  - project/reuse exact slide_scene matching
+  - ROI data exact slide_scene keys
+  - threshold payload internal IDs
+  - segmentation map handoff
+  - asset registry slide_scene stamping
+
+Claude should handle or review:
+
+  - threshold editor CSV import stripping Nuclei_
+  - FCS adapter propagation core_name = slide_scene
+  - generated viewer inspection
+  - spotting dead code after the flow works
+
+Either agent can do the final deletion pass, but only after the real viewer
+test matrix passes.
+
+
+Notes / risks
+=============
+
+1. The central danger is a half-refactor where some paths use slide_scene and
+   some still infer A1. That is worse than the current state.
+
+2. Do not use parse_core_series to bridge the new architecture. If it survives,
+   it should be adapter-only or legacy-only.
+
+3. Do not parse source_paths in asset reuse unless explicitly migrating an old
+   registry in a controlled adapter step.
+
+4. Keep exact obs["slide_scene"] values. The engine should not "fix" names.
+
+5. More code can be deleted after this, but v3 should first make one clean
+   identity path visible in viewer_data.json.

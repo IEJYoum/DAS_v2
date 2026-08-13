@@ -100,7 +100,7 @@ def parse_object_csv_filename(object_csv):
     if roi_m is None:
         raise ValueError("object_csv name does not contain ROI##: " + str(path))
     roi_folder_name = "ROI" + str(int(roi_m.group(1))).zfill(2)
-    return "Nuclei_" + slide_scene, slide_scene, roi_folder_name
+    return slide_scene, slide_scene, roi_folder_name
 
 
 def slide_roi_scene(slide_name, roi_folder_name):
@@ -317,14 +317,18 @@ def load_study_thresholds(csv_path):
             roi_id = str(col).strip()
             if roi_id == "" or roi_id == marker_col:
                 continue
-            if not roi_id.lower().startswith("nuclei_"):
+            # Accept both Nuclei_-prefixed (legacy) and bare slide_scene headers
+            key = roi_id
+            if key.lower().startswith("nuclei_"):
+                key = key[7:]  # strip Nuclei_ prefix for internal identity
+            elif roi_id == marker_col or roi_id.lower() in ["markers", "area"]:
                 continue
             value = pd.to_numeric(pd.Series([row.get(col, "")]), errors="coerce").iloc[0]
             if pd.isna(value):
                 continue
-            if roi_id not in out:
-                out[roi_id] = {}
-            out[roi_id][marker] = float(value)
+            if key not in out:
+                out[key] = {}
+            out[key][marker] = float(value)
     print("Loaded study thresholds:", str(path), "-", sum(len(v) for v in out.values()), "values")
     return out
 
@@ -389,9 +393,7 @@ def build_threshold_store(datasets, output_root, study_thresholds_path="", predi
                 markers.append(str(marker))
     core_to_roi_id = {}
     for dataset in datasets:
-        core_name = str(dataset.get("core_name", "")).strip()
-        if core_name == "":
-            core_name = core_name_from_slide_scene(str(dataset["slide_scene"]))
+        core_name = str(dataset.get("core_name", "")).strip() or str(dataset["slide_scene"])
         core_to_roi_id[core_name] = str(dataset["roi_id"])
     target_path = study_path
     if target_path is None:
@@ -646,15 +648,6 @@ def validate_label_overlap(dataset_dict, obs):
     return overlap_count
 
 
-def core_name_from_slide_scene(slide_scene):
-    """Return a viewer core name like A1 parsed from a slide_scene value."""
-    if slide_scene in [None, ""]:
-        raise ValueError("slide_scene is required")
-    m = re.search(r"(?i)ROI0*(\d{1,3})(?!\d)", str(slide_scene))
-    if m is None:
-        raise ValueError("slide_scene does not contain ROI##: " + str(slide_scene))
-    return "A" + str(int(m.group(1)))
-
 
 def build_minimal_view_fields(core_names, obs):
     """Return core_meta, groupings, view_sets, and default_view_id for viewer cores."""
@@ -664,7 +657,11 @@ def build_minimal_view_fields(core_names, obs):
     if not isinstance(obs, pd.DataFrame):
         raise ValueError("obs must be a pandas DataFrame")
     core_positions = {}
-    if "core" in obs.columns:
+    if "slide_scene" in obs.columns:
+        scene_array = obs["slide_scene"].astype(str).to_numpy()
+        for core in core_names:
+            core_positions[core] = np.flatnonzero(scene_array == str(core))
+    elif "core" in obs.columns:
         core_array = obs["core"].astype(str).to_numpy()
         for core in core_names:
             core_positions[core] = np.flatnonzero(core_array == str(core))
@@ -702,9 +699,7 @@ def build_catalog_for_datasets(datasets, df, obs, dfxy, output_root, threshold_s
                 raise ValueError("dataset_dict is missing " + key)
         roi_id = str(dataset_dict["roi_id"])
         slide_scene = str(dataset_dict["slide_scene"])
-        core_name = str(dataset_dict.get("core_name", "")).strip()
-        if core_name == "":
-            core_name = core_name_from_slide_scene(slide_scene)
+        core_name = str(dataset_dict.get("core_name", "")).strip() or str(slide_scene)
         if core_name in core_tiles:
             raise ValueError("duplicate viewer core name " + core_name + " from " + slide_scene)
         channel_tifs = [Path(p) for p in list(dataset_dict["channel_tifs"])]
@@ -718,7 +713,9 @@ def build_catalog_for_datasets(datasets, df, obs, dfxy, output_root, threshold_s
             {
                 "tile_kind": "composite",
                 "core": core_name,
+                "slide_scene": slide_scene,
                 "label": core_name,
+                "display_label": slide_scene.replace("_", " "),
                 "asset_type_id": "composite:tiff_stack",
                 "asset_type_label": "Composite (channel-selectable)",
                 "tiff_paths": [str(p) for p in channel_tifs],
@@ -772,9 +769,9 @@ def build_catalog_for_dataset(dataset_dict, df, obs, dfxy, output_root, threshol
 
 
 def assign_core_names(datasets):
-    """Assign stable sequential viewer core names to dataset records."""
-    for i, dataset in enumerate(list(datasets), start=1):
-        dataset["core_name"] = "A" + str(i)
+    """Assign viewer core names from slide_scene values."""
+    for dataset in list(datasets):
+        dataset["core_name"] = str(dataset.get("slide_scene", "")).strip()
     return datasets
 
 
