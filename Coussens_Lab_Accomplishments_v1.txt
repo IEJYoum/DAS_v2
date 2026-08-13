@@ -1,0 +1,184 @@
+Accomplishments: April 2026 - Present
+Isaac Youm, Coussens Lab
+========================================
+
+COMPUTATIONAL / DRY LAB
+========================
+
+1. Custom Image Registration Algorithm (realign_mihc_test.py)
+   Developed a multi-scale pyramid registration engine for whole-slide
+   mIHC image alignment. The algorithm operates on a coarse-to-fine
+   pyramid (scales 100x down to 1x), scoring candidate translations
+   using a composite loss of mean squared error, normalized cross-
+   correlation, gradient alignment, and an overlap penalty. Includes
+   optional affine fitting (rotation, shear, scale) with configurable
+   search grids, and sub-pixel refinement via fractional-offset
+   resampling. Implemented in NumPy with scikit-image affine warps.
+   Applied to both full-slide registration and automated correction
+   of failures produced by the existing lab registration pipeline.
+   Built using NumPy, scikit-image, PIL, and tifffile.
+
+2. Automated Registration Failure Correction (redo_d10_registration.py)
+   Built an end-to-end script that detects registration failures in the
+   existing pipeline's output, automatically re-registers the failed
+   marker TIFFs using the custom registration engine (above), and writes
+   corrected files back into the legacy folder structure. Handles
+   cropped fixed-image recovery from original SVS files via XML metadata
+   parsing, padded local search, and FFT-based convolution refinement.
+   Includes network I/O retry logic for shared-drive reliability.
+   Built using NumPy, tifffile, scipy (FFT convolution), PIL, zarr,
+   and imagecodecs.
+
+3. Registration Triage Dashboard (triage_d10_registration.py)
+   Developed a triage tool for quickly reviewing registration quality
+   across large slide sets. Scans overlay images in the registration
+   check folder, computes black-fraction metrics to flag likely failures,
+   and generates paginated montage figures with per-image statistics.
+   Produces an Excel summary for downstream review. Reduces the time
+   required to identify failed registrations across hundreds of images
+   from manual inspection to a single automated pass.
+   Built using NumPy, matplotlib, pandas, tifffile, PIL.
+
+4. ROI-Level Registration Pipeline (register_ROIs_mIHC.py)
+   Built a batch pipeline that discovers all ROI-level registration
+   jobs across a multi-slide mIHC run, registers each moving marker
+   to its fixed reference using the custom registration engine, writes
+   registered TIFFs into a structured output tree, and logs detailed
+   per-ROI debug information (shifts, losses, warnings) to a
+   tab-delimited text file. Operates on SVS and TIFF inputs with
+   configurable buffer, marker, and scoring parameters.
+   Built using NumPy, tifffile, PIL, zarr, imagecodecs.
+
+5. Registration Export Utilities (export_registered_rgb_from_run.py,
+   make_registered_multichannel_ome.py, make_registration_overlay_pngs.py,
+   svs_to_single_channel_tiffs.py)
+   Wrote a set of post-registration export tools: conversion of SVS
+   whole-slide images to single-channel TIFFs, assembly of registered
+   single-channel TIFFs into pyramidal multichannel OME-TIFFs with
+   proper metadata, export of registered RGB OME-TIFFs with affine
+   transforms applied, and generation of overlay PNGs for visual QC.
+   All handle network I/O retries for shared-drive reliability.
+   Built using NumPy, tifffile, scipy (affine_transform), PIL.
+
+6. Manual Registration Correction App (manual_roi_shift_adjuster.html,
+   apply_manual_roi_shifts.py)
+   Designed and built a browser-based interactive tool for manually
+   correcting residual registration errors. The HTML/JavaScript
+   front-end loads overlay images, provides keyboard-driven pan
+   controls, and exports a TSV of manual shift corrections. A
+   companion Python script reads these corrections, combines them
+   with the auto-registration shifts from the debug log, and
+   regenerates corrected ROI TIFFs from the original SVS pixels.
+   Built using HTML/CSS/JavaScript (front-end) and Python/NumPy
+   (back-end).
+
+7. Custom CNN Nuclear Segmentation (prototype_seg_v0.py, seg_v0.py,
+   train_seg_v0.py)
+   Designed and implemented a custom U-Net-style convolutional neural
+   network (NucleusSegNet) for nuclear segmentation in mIHC images.
+   Currently at proof-of-concept stage. The architecture uses an
+   encoder-decoder structure with skip connections (3 encoder stages,
+   3 decoder stages, batch normalization, bilinear upsampling)
+   producing dual output heads for nucleus probability and boundary
+   prediction. The training pipeline supports configurable loss
+   functions (BCE, weighted BCE, Dice), tiled inference for large
+   images, and post-processing via watershed splitting of oversized
+   regions. Developed to provide an in-house segmentation option
+   that could be tuned to alternative nuclear stains (e.g.
+   Hematoxylin) when H2B staining was unreliable, and to avoid
+   dependency on external tools requiring complex installation
+   environments.
+   Built using PyTorch (nn.Module, Conv2d, BatchNorm2d, BCE/Dice
+   losses, backpropagation), NumPy, scikit-image (watershed,
+   regionprops), scipy (distance transform).
+
+8. Python-Only Reimplementations of Fiji/ImageJ Pipeline Scripts
+   Rewrote two of Sam S.'s core Fiji/Jython-dependent image
+   processing scripts as standalone Python implementations, removing
+   the dependency on the Fiji GUI environment for batch processing
+   and enabling integration with the Python-based DAS pipeline:
+
+   a. AEC-CMYK Color Deconvolution (batch_ss_aec_cmyk_decon_python.py)
+      Reimplemented Sam's Fiji macro for AEC chromogen color
+      deconvolution as a pure Python/NumPy pipeline. Processes RGB
+      TIFFs from registered ROI folders, extracts the stain signal
+      via CMYK-space magenta+yellow decomposition, and writes
+      deconvolved single-channel outputs into the existing folder
+      structure.
+
+   b. Batch StarDist H2B Segmentation (batch_stardist_h2b_python.py)
+      Reimplemented Sam's Fiji/Jython StarDist segmentation script
+      as a standalone Python script using the StarDist and TensorFlow
+      Python APIs directly. Processes H2B nuclear stain channels,
+      runs StarDist 2D inference with tiled prediction for large
+      images, and writes labeled segmentation masks.
+      Built using TensorFlow, StarDist (csbdeep), NumPy, tifffile.
+
+9. FCS-Express Replacement / Threshold Viewer
+   (threshold_standalone_fcs.py, integrated with DAS viewer)
+   Developed a standalone threshold analysis tool that replaces the
+   lab's reliance on the commercial FCS Express application for
+   marker thresholding and visualization. Loads per-cell feature
+   data (CellProfiler output), allows interactive threshold setting,
+   generates spatial overlays showing cells above/below threshold on
+   tissue images, and produces scatterplots. Designed as a standalone
+   entry point that reuses the DAS HTML viewer infrastructure for
+   rendering. Integration with the main DAS pipeline is ongoing.
+   Built using NumPy, pandas, tifffile, and the DAS visualization
+   engine (HTML/JavaScript).
+
+10. DAS Viewer Improvements (visu_html_functions7.py,
+   call_visu_html_7.py, IFvisualization2.py)
+   Ongoing feature development and stability improvements to the
+   lab's interactive HTML-based multiplex image viewer. Recent work
+   includes viewer stability fixes, improved ROI data handling,
+   integration with the standalone FCS thresholding workflow, and
+   in-memory persistence of viewer state across sessions.
+
+11. DAS GUI and Controller Improvements (gui.py, controler.py,
+    IFA.py, ds.py, io_adapter.py)
+    Improved the DAS desktop GUI and controller layer: added
+    automated file discovery, session logging, and run-mode
+    configuration. Improved the I/O adapter for more reliable
+    project file handling.
+
+12. Microscope File Management Utility (copy_by_folder.py)
+    Wrote a utility script to identify and transfer image files from
+    the microscope acquisition folder to the correct analysis
+    directories. Matches files by user-prefix and acquisition-date
+    filters, handles network drive retry logic for shared storage
+    reliability, and writes a debug CSV log of all file routing
+    decisions.
+
+13. QuPath Channel Settings Transfer (transfer_display_settings.groovy)
+    Wrote a Groovy script for QuPath that saves and applies display
+    settings (brightness, contrast, channel visibility) across slides
+    in a project. Matches channels by marker name rather than full
+    channel ID, so settings transfer correctly between slides with
+    different naming conventions. Developed because QuPath's built-in
+    display settings copy function was raising errors and failing.
+
+14. CycIF Tiling Correction
+    Applied existing tiling correction scripts to CycIF imaging
+    projects from a prior lab collaboration, adapting parameters for
+    the specific datasets.
+
+15. User Training
+    Trained one user to use DAS to independently run their own
+    multiplex image analysis.
+
+
+WET LAB
+=======
+
+16. mIHC Panel Staining - Training
+    Completed approximately one month of training on multiplex
+    immunohistochemistry staining protocols.
+
+17. mIHC Panel Staining - KB Panel
+    Stained one full panel (KB, 4 markers x 14 slides) while
+    troubleshooting a failed nuclear stain (H2B).
+
+18. mIHC Vimentin Staining
+    Added Vimentin stain to approximately 9 slides that had been
+    previously stained by another lab member.

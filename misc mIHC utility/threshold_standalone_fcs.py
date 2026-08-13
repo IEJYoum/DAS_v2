@@ -21,7 +21,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from visualization.call_visu_html_7 import add_default_full_dataset_grouping
-from visualization.call_visu_html_7 import add_scene_grouping
 from visualization.call_visu_html_7 import build_roi_data_for_seed
 from visualization.call_visu_html_7 import build_view_sets
 from visualization.call_visu_html_7 import choose_default_view
@@ -239,7 +238,7 @@ def discover_processed_roi_datasets(processed_root, slide_name=None):
             roi_id, scene, _folder = parse_object_csv_filename(object_csv)
         else:
             scene = slide_roi_scene(slide, roi_folder.name)
-            roi_id = "Nuclei_" + scene
+            roi_id = scene
         datasets.append({
             "roi_id": roi_id,
             "slide_scene": scene,
@@ -666,7 +665,6 @@ def build_minimal_view_fields(core_names, obs):
         for core in core_names:
             core_positions[core] = np.flatnonzero(core_array == str(core))
     core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
-    add_scene_grouping(core_names, core_meta, groupings)
     add_default_full_dataset_grouping(obs, core_names, groupings)
     groupings = prune_and_sort_groupings(groupings, core_names)
     view_sets = build_view_sets(groupings, core_names)

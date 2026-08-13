@@ -1,0 +1,294 @@
+Viewer deletion/simplification pass v1
+======================================
+
+Purpose
+-------
+
+Delete dead bridge logic and make the remaining legacy logic easier to identify.
+The target architecture is:
+
+  core == slide_scene == internal roi_id
+
+Adapters may still infer slide_scene from filenames, folders, triplets, or
+legacy CSV headers, but they should do it once upstream. The core viewer should
+match exact obs.slide_scene values and should not keep rediscovering identity.
+
+
+Current Code State Checked By Codex
+-----------------------------------
+
+This file reflects a fresh rg/read pass after Claude's notes. At the time of
+this check, runtime code was clean in git status; only planning/docs were
+untracked.
+
+Confirmed current state:
+
+- call_visu_html_7.py no longer has seed_core_slide_scene_map or
+  short_core_label_from_slide_scene.
+- Project matching, ROI payloads, and threshold_store are centered on exact
+  slide_scene.
+- threshold_standalone_fcs.py generally uses core_name = slide_scene.
+- parse_core_name in call_visu_html_7.py is dead.
+- parse_core_name in visu_html_functions7.py is live and must stay.
+- add_scene_grouping is still imported and called by threshold_standalone_fcs.py.
+- The tracked backup file
+  misc mIHC utility/bup-1-roi-threshold_standalone_fcs - Copy.py is still in
+  git and still references add_scene_grouping.
+- One fallback in threshold_standalone_fcs.py still generates
+  roi_id = "Nuclei_" + scene when no object CSV exists. That conflicts with the
+  new internal-ID rule and should be fixed in Pass 1 if we want a clean
+  contract.
+
+
+Do Not Delete In Pass 1
+-----------------------
+
+1. parse_core_name in visu_html_functions7.py
+
+   Live caller:
+     build_slide_grid()
+
+   It is still the TMA grid hook. When core keys are slide_scene strings, it
+   returns None and the grid falls back to compact layout. That is correct for
+   current non-TMA slide_scene viewers.
+
+2. sorted_core_keys, core_name_from_key
+
+   Still live in manual adapter code:
+     collect_scene_keys()
+     build_core_buckets()
+     build_identity_manifest_from_core_buckets()
+
+   These are tuple-scene adapter helpers. They are not core architecture
+   anymore, but manual mode still uses them.
+
+3. extract_slide_scene_from_path
+
+   Still live in manifest construction:
+     build_identity_manifest_from_core_buckets()
+     build_identity_manifest_from_seed_viewer()
+
+   This is currently adapter-level identity inference. It can be moved later,
+   not deleted now.
+
+4. _find_seg_file / _find_seg_file_multi
+
+   Still live:
+     build_segmentation_map_from_seed_viewer()
+     render_segmentation_subset_overlay()
+
+   The first call is adapter-level. The second is a fallback path that should
+   eventually be contained, but not in Pass 1.
+
+5. infer_core_series_from_obs / parse_core_series
+
+   Still live fallback code when obs lacks slide_scene. This is architecturally
+   next on the chopping block, but deleting it now could break old triplets or
+   manual flows that have not been adapted to create obs.slide_scene.
+
+
+Pass 1: Safe Deletion And Tiny Contract Fixes
+---------------------------------------------
+
+This is ready to execute.
+
+1. Remove add_scene_grouping from threshold_standalone_fcs.py
+
+   Current:
+     from visualization.call_visu_html_7 import add_scene_grouping
+     add_scene_grouping(core_names, core_meta, groupings)
+
+   Reason:
+   derive_groupings_from_obs already creates slide_scene grouping because obs
+   has slide_scene and core_names are slide_scene strings. add_scene_grouping
+   returns early in this flow and is effectively a no-op, but the import keeps
+   the old helper alive.
+
+2. Delete add_scene_grouping from call_visu_html_7.py
+
+   Only do this after step 1.
+
+   Reason:
+   It synthesizes sceneA1-style grouping, which is no longer desired in the core
+   viewer architecture.
+
+3. Delete add_slide_grouping from call_visu_html_7.py
+
+   Confirmed no callers except none after current code state. It assumes tuple
+   cores and reconstructs TMA-ish slide grouping from asset filenames. That
+   should come back, if needed, as a small adapter/layout_hint special case.
+
+4. Delete infer_tma_label_for_core from call_visu_html_7.py
+
+   Only caller is add_slide_grouping. Delete with it.
+
+5. Delete parse_core_name from call_visu_html_7.py
+
+   Confirmed definition-only. Do not touch the live copy in
+   visu_html_functions7.py.
+
+6. Delete add_default_all_grouping from call_visu_html_7.py
+
+   Confirmed definition-only. The current path uses
+   add_default_full_dataset_grouping.
+
+7. Delete the tracked backup file
+
+   File:
+     misc mIHC utility/bup-1-roi-threshold_standalone_fcs - Copy.py
+
+   Reason:
+   It is a stale backup copy with old A1/core naming and add_scene_grouping
+   references. It is tracked, so this is a real repo deletion, not just local
+   cleanup.
+
+8. Fix the remaining internal Nuclei_ fallback in threshold_standalone_fcs.py
+
+   Current fallback:
+     roi_id = "Nuclei_" + scene
+
+   Better:
+     roi_id = scene
+
+   Reason:
+   Nuclei_ should remain an external filename/header alias only. Internal IDs
+   should be slide_scene.
+
+9. Remove unused seed_core_slide_scenes parameter from build_project_core_positions
+
+   Current signature:
+     build_project_core_positions(obs, allowed_cores=None,
+                                  seed_core_slide_scenes=None)
+
+   Better:
+     build_project_core_positions(obs, allowed_cores=None)
+
+   Reason:
+   The old seed-core bridge is gone. The parameter is a fossil.
+
+
+Pass 1 Checks
+-------------
+
+Static:
+
+- py_compile:
+    visualization/call_visu_html_7.py
+    visualization/visu_html_functions7.py
+    misc mIHC utility/threshold_standalone_fcs.py
+
+- rg confirms these names are gone from call_visu_html_7.py:
+    add_scene_grouping
+    add_slide_grouping
+    infer_tma_label_for_core
+    add_default_all_grouping
+    def parse_core_name
+    seed_core_slide_scenes
+
+- rg confirms this file is gone:
+    bup-1-roi-threshold_standalone_fcs - Copy.py
+
+- rg confirms no internal generated Nuclei_ prefix:
+    roi_id = "Nuclei_" + scene
+
+Smoke:
+
+- Fake obs with slide_scene ["40411_ROI1", "40411_ROI2"].
+- build_project_core_positions returns exact row positions.
+- threshold_store.roi_ids are bare slide_scene strings.
+- build_catalog_from_identity_manifest preserves core == slide_scene.
+
+
+Pass 2: Strict Core Identity
+----------------------------
+
+Goal:
+Make obs.slide_scene mandatory for project/core paths.
+
+Candidate changes:
+
+- build_project_core_positions should fail loudly if obs lacks slide_scene in
+  project mode.
+- Rename infer_core_series_from_obs to infer_legacy_core_series_from_obs.
+- Rename parse_core_series to parse_legacy_core_series.
+- Keep those legacy helpers only for explicit legacy/manual adapter paths.
+
+Do not do this in Pass 1. It is the first pass likely to expose old triplets
+that need an adapter update.
+
+
+Pass 3: Manual Adapter Containment
+----------------------------------
+
+Goal:
+Keep manual scene/ROI expansion working, but make it obviously adapter-level.
+
+Candidate shape:
+
+  manifest = build_identity_manifest_from_manual_templates(...)
+  catalog = build_catalog_from_identity_manifest(manifest, obs)
+
+Then the tuple helpers can be grouped under a legacy/manual adapter section or
+moved to a small helper module. This is when sorted_core_keys and
+core_name_from_key can be revisited.
+
+
+Pass 4: Segmentation Map Containment
+------------------------------------
+
+Goal:
+Make all folder search adapter-side.
+
+Current:
+
+- build_segmentation_map_from_seed_viewer may search segmentation roots.
+- render_segmentation_subset_overlay may still search roots as a fallback.
+
+Better:
+
+- Adapters construct:
+    segmentation_by_slide_scene = {slide_scene: seg_tif_path}
+
+- Core overlay renderers consume the map only.
+
+
+Pass 5: Display Cleanup
+-----------------------
+
+Goal:
+Separate identity from presentation.
+
+Each tile should have:
+
+  core = slide_scene
+  slide_scene = slide_scene
+  display_label = human-facing text
+
+Render-time path-derived display guessing should be minimized or moved to
+adapter construction.
+
+
+Runtime Test Once After Pass 1
+------------------------------
+
+One full runtime test should be enough after the static/smoke checks:
+
+- Standalone processed ROI folder, one slide.
+- Standalone combined multi-slide viewer.
+- DAS/IFA triplet with slide_scene already present.
+- Old studythresholds.csv with Nuclei_ headers imports correctly.
+
+
+Expected Outcome
+----------------
+
+Pass 1 is a small real shrink and removes the most obvious fossils.
+
+Passes 2-4 are the real architectural simplification:
+
+- identity is constructed once
+- core viewer code stops guessing from paths
+- legacy conventions are isolated in adapters
+- mismatches fail early instead of producing ghost overlays, missing buttons, or
+  sceneA1 labels
+

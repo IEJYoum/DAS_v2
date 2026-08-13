@@ -1791,13 +1791,6 @@ def add_path_to_bucket_by_kind(bucket, fp, kind):
         append_unique(bucket["other_files"], fp)
 
 
-def parse_core_name(core_name):
-    m = CORE_STR_RE.match(str(core_name))
-    if m is None:
-        return None
-    return (m.group(1).upper(), int(m.group(2)))
-
-
 def sorted_core_keys(keys):
     keys = list(keys)
     return sorted(keys, key=lambda x: (x[0], x[1]))
@@ -2912,7 +2905,7 @@ def build_subset_option_index(subset_options_by_view):
     return out
 
 
-def build_project_core_positions(obs, allowed_cores=None, seed_core_slide_scenes=None):
+def build_project_core_positions(obs, allowed_cores=None):
     out = {}
     if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
         return out
@@ -3761,29 +3754,6 @@ def marker_labels_from_paths(paths):
     return out
 
 
-def infer_tma_label_for_core(bucket):
-    paths = []
-    for k in ["tiffs", "transparent_pngs", "opaque_pngs", "other_files"]:
-        arr = bucket.get(k, [])
-        i = 0
-        while i < len(arr):
-            paths.append(str(arr[i]))
-            i += 1
-
-    counts = {}
-    i = 0
-    while i < len(paths):
-        m = TMA_RE.search(paths[i])
-        if m is not None:
-            tma = m.group(1)
-            counts[tma] = counts.get(tma, 0) + 1
-        i += 1
-
-    if len(counts) == 0:
-        return None
-    return sorted(list(counts.items()), key=lambda x: (-x[1], natural_sort_key(x[0])))[0][0]
-
-
 def build_catalog_from_identity_manifest(manifest, obs):
     validate_slide_scene_manifest(manifest)
     core_names = sorted(list(manifest.keys()), key=natural_sort_key)
@@ -3848,52 +3818,6 @@ def build_catalog_from_identity_manifest(manifest, obs):
 def build_catalog(by_core, obs):
     manifest = build_identity_manifest_from_core_buckets(by_core, obs=obs)
     return build_catalog_from_identity_manifest(manifest, obs)
-
-
-def add_scene_grouping(core_names, core_meta, groupings):
-    if "slide_scene" in groupings:
-        return
-    if "scene" not in groupings:
-        groupings["scene"] = {}
-    i = 0
-    while i < len(core_names):
-        c = core_names[i]
-        val = "scene" + c
-        if c not in core_meta:
-            core_meta[c] = {}
-        core_meta[c]["scene"] = val
-        if val not in groupings["scene"]:
-            groupings["scene"][val] = []
-        if c not in groupings["scene"][val]:
-            groupings["scene"][val].append(c)
-        i += 1
-
-
-def add_slide_grouping(by_core, core_meta, groupings):
-    if "slide" not in groupings:
-        groupings["slide"] = {}
-
-    for key in by_core:
-        core = core_name_from_key(key)
-        slide = infer_tma_label_for_core(by_core[key])
-        if slide is None:
-            continue
-        if core not in core_meta:
-            core_meta[core] = {}
-        core_meta[core]["slide"] = slide
-        if slide not in groupings["slide"]:
-            groupings["slide"][slide] = []
-        if core not in groupings["slide"][slide]:
-            groupings["slide"][slide].append(core)
-
-    if len(groupings["slide"]) == 0:
-        del groupings["slide"]
-
-
-def add_default_all_grouping(core_names, groupings):
-    if "all" not in groupings:
-        groupings["all"] = {}
-    groupings["all"]["all"] = list(core_names)
 
 
 def add_default_full_dataset_grouping(obs, core_names, groupings):
