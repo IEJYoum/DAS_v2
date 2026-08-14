@@ -48,6 +48,8 @@ log = logging.getLogger(__name__)
 
 # ── channel matching rules (mirrors NamesAndTypes) ────────────────────────────
 TIFF_EXTENSIONS = {".tif", ".tiff"}
+LINUX_MOUNT_PREFIXES = ["/mnt/rdscoussens/", "//mnt/rdscoussens/"]
+WINDOWS_MOUNT_PREFIX = "Z:/"
 
 
 
@@ -143,15 +145,25 @@ def get_scaling(path: Path) -> float:
     return 1.0
 
 
+def windows_mapped_path_text(path: Path | str) -> str:
+    s = str(path).replace("\\", "/")
+    for prefix in LINUX_MOUNT_PREFIXES:
+        if s.startswith(prefix):
+            return WINDOWS_MOUNT_PREFIX + s[len(prefix):]
+    return s
+
+
 def format_path(path: Path, style: str) -> str:
-    s = str(path)
+    s = windows_mapped_path_text(path)
     if style == "windows":
         return s.replace("/", "\\")
     return s.replace("\\", "/")
 
 
 def file_uri(path: Path | str) -> str:
-    s = str(path).replace("\\", "/")
+    s = windows_mapped_path_text(path).replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", s):
+        return f"file:///{s}"
     if s.startswith("/"):
         return f"file://{s}"
     return f"file:///{s}"
