@@ -220,6 +220,7 @@ def process_roi(
     image_number: int,
     path_style: str,
     objects_name: str,
+    skip_tif: bool,
 ):
     log.info(f"  Processing {slide_id} / {roi_id}  (ImageNumber={image_number})")
     t_start = time.time()
@@ -241,8 +242,17 @@ def process_roi(
     # ── copy label TIFF as overlay mask ──────────────────────────────────────
     tiff_name = f"Tiff_{slide_id}{roi_id}.tiff"
     tiff_dest = output_dir / tiff_name
-    log.info(f"    Copying label image → {tiff_name}")
-    shutil.copyfile(label_path, tiff_dest)
+    if skip_tif:
+        object_image_name = label_path.name
+        object_image_path = label_path
+        object_image_dir = label_path.parent
+        log.info(f"    Skipping copied object TIFF; using {label_path.name}")
+    else:
+        object_image_name = tiff_name
+        object_image_path = tiff_dest
+        object_image_dir = output_dir
+        log.info(f"    Copying label image -> {tiff_name}")
+        shutil.copyfile(label_path, tiff_dest)
 
     # ── load label image ─────────────────────────────────────────────────────
     log.info(f"    Loading label image: {label_path.name}")
@@ -330,8 +340,6 @@ def process_roi(
     for m in CP_MODULES:
         cptoc_row[f"ExecutionTime_{m}"] = 0.0
 
-    out_path_str = format_path(output_dir, path_style)
-
     for ch in image_channels:
         p = channel_paths.get(ch)
         cptoc_row[f"FileName_{ch}"]    = p.name
@@ -345,10 +353,10 @@ def process_roi(
         cptoc_row[f"Width_{ch}"]       = img_w
 
     # Objects image (the output TIFF mask)
-    cptoc_row[f"FileName_{objects_name}"]    = tiff_name
+    cptoc_row[f"FileName_{objects_name}"]    = object_image_name
     cptoc_row[f"Height_{objects_name}"]      = img_h
-    cptoc_row[f"MD5Digest_{objects_name}"]   = md5(tiff_dest)
-    cptoc_row[f"PathName_{objects_name}"]    = out_path_str
+    cptoc_row[f"MD5Digest_{objects_name}"]   = md5(object_image_path)
+    cptoc_row[f"PathName_{objects_name}"]    = format_path(object_image_dir, path_style)
     cptoc_row[f"Width_{objects_name}"]       = img_w
 
     cptoc_row["Group_Index"]  = 1
@@ -429,6 +437,10 @@ def main():
         "--objects-name", default="CellObjects",
         help="Object name used in column headers (default: CellObjects)"
     )
+    parser.add_argument(
+        "--skip-tif", action="store_true",
+        help="Skip copying label_*.tif to Tiff_*.tiff; .cptoc object metadata will point at label_*.tif."
+    )
     args = parser.parse_args()
 
     root   = Path(args.root)
@@ -452,7 +464,7 @@ def main():
         try:
             process_roi(
                 roi_folder, output, slide_id, roi_id,
-                image_number, args.path_style, args.objects_name,
+                image_number, args.path_style, args.objects_name, args.skip_tif,
             )
         except Exception as e:
             log.error(f"  FAILED {slide_id}/{roi_id}: {e}", exc_info=True)
