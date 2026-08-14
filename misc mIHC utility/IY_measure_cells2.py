@@ -23,6 +23,8 @@ Usage:
     python measure_cells.py --root /path/to/slide/folders [--output /path/to/output]
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import hashlib
