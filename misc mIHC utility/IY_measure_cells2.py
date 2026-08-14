@@ -230,7 +230,7 @@ def process_roi(
     tiff_name = f"Tiff_{slide_id}{roi_id}.tiff"
     tiff_dest = output_dir / tiff_name
     log.info(f"    Copying label image → {tiff_name}")
-    shutil.copy2(label_path, tiff_dest)
+    shutil.copyfile(label_path, tiff_dest)
 
     # ── load label image ─────────────────────────────────────────────────────
     log.info(f"    Loading label image: {label_path.name}")
