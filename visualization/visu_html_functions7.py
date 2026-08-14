@@ -5264,13 +5264,18 @@ function writeBrowserThresholdMemory() {
   }
 }
 function clearBrowserThresholdMemory() {
-  const key = browserThresholdMemoryKey();
-  if (!key) return false;
   try {
-    window.localStorage.removeItem(key);
-    return true;
+    if (!window.localStorage) return 0;
+    const prefix = 'fcs_threshold_memory::';
+    const keys = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && key.indexOf(prefix) === 0) keys.push(key);
+    }
+    keys.forEach(function(key) { window.localStorage.removeItem(key); });
+    return keys.length;
   } catch (_err) {
-    return false;
+    return -1;
   }
 }
 function handleBrowserThresholdMemoryChange(evt) {
@@ -6402,8 +6407,8 @@ function bindControls() {
     el('thresholdFileInput').click();
   });
   el('clearBrowserMemoryBtn').addEventListener('click', function() {
-    const ok = clearBrowserThresholdMemory();
-    renderStatus(ok ? 'Cleared browser memory for this threshold table.' : 'No browser memory key is available.');
+    const cleared = clearBrowserThresholdMemory();
+    renderStatus(cleared >= 0 ? 'Cleared ' + cleared + ' browser-saved threshold table(s).' : 'Browser memory could not be cleared.');
   });
   el('thresholdFileInput').addEventListener('change', function() {
     const file = el('thresholdFileInput').files && el('thresholdFileInput').files[0];
@@ -6496,7 +6501,7 @@ async function boot() {
   renderStatus('Initializing threshold editor... drawing preview');
   drawPreviewOverlay();
   if (browserMemoryTime !== null) {
-    renderStatus('Loaded browser-saved thresholds' + (browserMemoryTime ? ' from ' + browserMemoryTime : '') + '.');
+    renderStatus('Warning: loaded thresholds saved in this browser from a previous viewer run' + (browserMemoryTime ? ' at ' + browserMemoryTime : '') + '. Use Clear Browser Memory for a fresh table.');
   }
 }
 window.addEventListener('storage', handleBrowserThresholdMemoryChange);
