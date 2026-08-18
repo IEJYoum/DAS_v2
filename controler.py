@@ -16,6 +16,7 @@ import importlib.util
 import os
 import sys
 import traceback
+import webbrowser
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1212,15 +1213,29 @@ def startup_image_registration(state: SessionState) -> None:
     old_input = builtins.input
     old_print = builtins.print
     old_cwd = os.getcwd()
+    registration_completed = False
     builtins.input = io.iget
     builtins.print = io.legacy_print
     try:
         os.chdir(str(state.build_folder))
-        importlib.import_module("realign_v1").main()
+        result = importlib.import_module("realign_v1").main()
+        registration_completed = result is not False
     finally:
         builtins.input = old_input
         builtins.print = old_print
         os.chdir(old_cwd)
+    if registration_completed:
+        _launch_manual_roi_shift_adjuster()
+
+
+def _launch_manual_roi_shift_adjuster() -> None:
+    adjuster_path = _IFA_ROOT / "misc mIHC utility" / "manual_roi_shift_adjuster.html"
+    if not adjuster_path.exists():
+        io.iprint(f"Manual ROI shift adjuster not found: {adjuster_path}")
+        return
+    webbrowser.open(adjuster_path.resolve().as_uri())
+    io.iprint(f"Launched manual ROI shift QC page: {adjuster_path}")
+    io.iprint("If manual correction is needed, export adjustments from the page and run apply_manual_roi_shifts.py.")
 
 
 def startup_cell_segmentation(state: SessionState) -> None:
