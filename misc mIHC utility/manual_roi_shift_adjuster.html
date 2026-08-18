@@ -435,6 +435,171 @@
       return rounded.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
     }
 
+    const RGBA_BYTES_PER_PIXEL = 4;
+    const DOWNSAMPLE_TRIGGER_BYTES = 200 * 1024 * 1024;
+    const DOWNSAMPLE_TARGET_BYTES = 100 * 1024 * 1024;
+    const TINT_MIN = 50;
+    const TINT_MAX = 240;
+    const TINT_MIN_SUM = 250;
+
+    function tagValues(value) {
+      if (Array.isArray(value)) {
+        return value;
+      }
+      if (value === undefined || value === null) {
+        return [];
+      }
+      return [value];
+    }
+
+    function tiffBitsPerSample(ifd) {
+      const bits = tagValues(ifd.t258)
+        .map(value => Number(value))
+        .filter(value => Number.isFinite(value) && value > 0);
+      return bits.length ? bits : [8];
+    }
+
+    function tiffSamplesPerPixel(ifd) {
+      const samples = Number(ifd.t277);
+      if (Number.isFinite(samples) && samples > 0) {
+        return samples;
+      }
+      return tiffBitsPerSample(ifd).length || 1;
+    }
+
+    function isEightBitTiff(ifd) {
+      return tiffBitsPerSample(ifd).every(bits => bits === 8);
+    }
+
+    function isRgbEightBitTiff(ifd) {
+      return isEightBitTiff(ifd) && tiffSamplesPerPixel(ifd) >= 3;
+    }
+
+    function sampledRgbaStats(rgba) {
+      const pixels = Math.floor(rgba.length / RGBA_BYTES_PER_PIXEL);
+      const stride = Math.max(1, Math.floor(pixels / 12000));
+      let seen = 0;
+      let mono = 0;
+      let bright = 0;
+      const lum = [];
+
+      for (let pixel = 0; pixel < pixels; pixel += stride) {
+        const i = pixel * RGBA_BYTES_PER_PIXEL;
+        if (rgba[i + 3] === 0) {
+          continue;
+        }
+        const r = rgba[i];
+        const g = rgba[i + 1];
+        const b = rgba[i + 2];
+        const y = Math.round((r + g + b) / 3);
+        seen += 1;
+        lum.push(y);
+        if (Math.abs(r - g) <= 2 && Math.abs(r - b) <= 2 && Math.abs(g - b) <= 2) {
+          mono += 1;
+        }
+        if (y >= 245) {
+          bright += 1;
+        }
+      }
+
+      lum.sort((a, b) => a - b);
+      return {
+        seen,
+        monoFraction: seen ? mono / seen : 0,
+        brightFraction: seen ? bright / seen : 0,
+        p01: lum.length ? lum[Math.floor((lum.length - 1) * 0.01)] : 0,
+        p99: lum.length ? lum[Math.floor((lum.length - 1) * 0.99)] : 255
+      };
+    }
+
+    function contrastCompressMonoRgba(rgba) {
+      const stats = sampledRgbaStats(rgba);
+      if (!stats.seen || stats.monoFraction < 0.98 || stats.p99 <= stats.p01) {
+        return false;
+      }
+      const scale = 255 / (stats.p99 - stats.p01);
+      for (let i = 0; i < rgba.length; i += RGBA_BYTES_PER_PIXEL) {
+        const y = (rgba[i] + rgba[i + 1] + rgba[i + 2]) / 3;
+        const compressed = Math.max(0, Math.min(255, Math.round((y - stats.p01) * scale)));
+        rgba[i] = compressed;
+        rgba[i + 1] = compressed;
+        rgba[i + 2] = compressed;
+      }
+      return true;
+    }
+
+    function randomNearWhiteColor() {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const color = [0, 0, 0].map(() =>
+          Math.floor(Math.random() * (TINT_MAX - TINT_MIN + 1)) + TINT_MIN
+        );
+        if (color[0] + color[1] + color[2] >= TINT_MIN_SUM) {
+          return color;
+        }
+      }
+      return [230, 50, 240];
+    }
+
+    function tintRgba(rgba, color) {
+      for (let i = 0; i < rgba.length; i += RGBA_BYTES_PER_PIXEL) {
+        const y = (rgba[i] + rgba[i + 1] + rgba[i + 2]) / 3;
+        rgba[i] = Math.round(y * color[0] / 255);
+        rgba[i + 1] = Math.round(y * color[1] / 255);
+        rgba[i + 2] = Math.round(y * color[2] / 255);
+      }
+    }
+
+    function targetDisplayScale(width, height) {
+      const bytes = width * height * RGBA_BYTES_PER_PIXEL;
+      if (bytes <= DOWNSAMPLE_TRIGGER_BYTES) {
+        return 1;
+      }
+      return Math.min(1, Math.sqrt(DOWNSAMPLE_TARGET_BYTES / bytes));
+    }
+
+    function downsampleRgbaNearest(rgba, width, height, scale) {
+      if (scale >= 0.999) {
+        return {
+          rgba,
+          width,
+          height,
+          scale: 1
+        };
+      }
+
+      const outWidth = Math.max(1, Math.round(width * scale));
+      const outHeight = Math.max(1, Math.round(height * scale));
+      const out = new Uint8ClampedArray(outWidth * outHeight * RGBA_BYTES_PER_PIXEL);
+
+      for (let y = 0; y < outHeight; y++) {
+        const srcY = Math.min(height - 1, Math.floor(y / scale));
+        for (let x = 0; x < outWidth; x++) {
+          const srcX = Math.min(width - 1, Math.floor(x / scale));
+          const src = (srcY * width + srcX) * RGBA_BYTES_PER_PIXEL;
+          const dst = (y * outWidth + x) * RGBA_BYTES_PER_PIXEL;
+          out[dst] = rgba[src];
+          out[dst + 1] = rgba[src + 1];
+          out[dst + 2] = rgba[src + 2];
+          out[dst + 3] = rgba[src + 3];
+        }
+      }
+
+      return {
+        rgba: out,
+        width: outWidth,
+        height: outHeight,
+        scale: outWidth / width
+      };
+    }
+
+    function canvasFromRgba(rgba, width, height) {
+      const scratch = document.createElement("canvas");
+      scratch.width = width;
+      scratch.height = height;
+      scratch.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
+      return scratch;
+    }
+
     async function loadBitmap(file) {
       if (isTiff(file.name)) {
         if (!window.UTIF) {
@@ -446,17 +611,39 @@
           throw new Error("TIFF has no image frames: " + file.name);
         }
         UTIF.decodeImage(buffer, ifds[0]);
-        const rgba = UTIF.toRGBA8(ifds[0]);
+        const eightBit = isEightBitTiff(ifds[0]);
+        const rgbEightBit = isRgbEightBitTiff(ifds[0]);
+        let rgba = new Uint8ClampedArray(UTIF.toRGBA8(ifds[0]));
         const width = ifds[0].width;
         const height = ifds[0].height;
-        const scratch = document.createElement("canvas");
-        scratch.width = width;
-        scratch.height = height;
-        scratch.getContext("2d").putImageData(
-          new ImageData(new Uint8ClampedArray(rgba), width, height),
-          0,
-          0
-        );
+        const notes = [];
+
+        if (!eightBit) {
+          notes.push("8-bit display");
+          if (contrastCompressMonoRgba(rgba)) {
+            notes.push("contrast-compressed");
+          }
+        }
+
+        const stats = sampledRgbaStats(rgba);
+        if (!rgbEightBit && stats.monoFraction >= 0.98 && stats.brightFraction >= 0.80) {
+          const color = randomNearWhiteColor();
+          tintRgba(rgba, color);
+          notes.push("tinted rgb(" + color.join(",") + ")");
+        }
+
+        const displayScale = targetDisplayScale(width, height);
+        const display = downsampleRgbaNearest(rgba, width, height, displayScale);
+        rgba = display.rgba;
+        if (display.scale < 1) {
+          notes.push("downsampled to " + display.width + "x" + display.height);
+        }
+
+        const scratch = canvasFromRgba(rgba, display.width, display.height);
+        scratch.originalWidth = width;
+        scratch.originalHeight = height;
+        scratch.displayScale = display.scale;
+        scratch.loadNotes = notes.join("; ");
         return scratch;
       }
 
@@ -465,6 +652,10 @@
         const img = new Image();
         img.src = url;
         await img.decode();
+        img.originalWidth = img.naturalWidth || img.width;
+        img.originalHeight = img.naturalHeight || img.height;
+        img.displayScale = 1;
+        img.loadNotes = "";
         return img;
       } finally {
         URL.revokeObjectURL(url);
@@ -507,6 +698,10 @@
           image,
           width: image.naturalWidth || image.width,
           height: image.naturalHeight || image.height,
+          originalWidth: image.originalWidth || image.naturalWidth || image.width,
+          originalHeight: image.originalHeight || image.naturalHeight || image.height,
+          displayScale: image.displayScale || 1,
+          loadNotes: image.loadNotes || "",
           dx: 0,
           dy: 0,
           visible: true
@@ -557,7 +752,14 @@
         name.textContent = ch.label;
         const meta = document.createElement("div");
         meta.className = "channel-meta";
-        meta.textContent = "dy " + roundShift(ch.dy) + " / dx " + roundShift(ch.dx);
+        let metaText = "dy " + roundShift(ch.dy) + " / dx " + roundShift(ch.dx);
+        if (ch.displayScale && ch.displayScale < 1) {
+          metaText += " / " + Math.round(ch.displayScale * 100) + "% view";
+        }
+        if (ch.loadNotes) {
+          metaText += " / " + ch.loadNotes;
+        }
+        meta.textContent = metaText;
         text.appendChild(name);
         text.appendChild(meta);
 
@@ -581,6 +783,9 @@
       label += " / " + moved + " moved";
       if (selected) {
         label += " / selected " + selected.name;
+        if (selected.displayScale && selected.displayScale < 1) {
+          label += " / source " + selected.originalWidth + " x " + selected.originalHeight + " px";
+        }
       }
       els.imageInfo.textContent = label;
     }
@@ -603,7 +808,8 @@
         ctx.globalAlpha = index === state.selectedIndex
           ? Number(els.selectedOpacity.value)
           : Number(els.otherOpacity.value);
-        ctx.drawImage(ch.image, ch.dx, ch.dy);
+        const displayScale = ch.displayScale || 1;
+        ctx.drawImage(ch.image, ch.dx * displayScale, ch.dy * displayScale);
       });
 
       ctx.restore();

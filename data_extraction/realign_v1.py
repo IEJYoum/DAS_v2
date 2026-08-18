@@ -61,7 +61,7 @@ USE_SPARSE_HIGHRES_SCORE = True
 SPARSE_HIGHRES_MIN_TOTAL_PIXELS = 32000000
 SPARSE_GRID_SIZE = 5
 SPARSE_GRID_CELLS_1BASED = [(2, 2), (2, 4), (4, 2), (4, 4)]
-SPARSE_REGION_SIZE = 2000
+SPARSE_REGION_SIZE = 1000
 SPARSE_REGION_MEAN_FACTOR = 1.0
 AFFINE_ROTATION_ITERATIONS = 0
 AFFINE_ROTATION_DEGREES = 1.0
@@ -149,6 +149,7 @@ def _symmetric_values(max_abs, split):
 
 def prompt_registration_settings():
     global USE_SPARSE_HIGHRES_SCORE
+    global SPARSE_REGION_SIZE
     global AFFINE_ROTATION_ITERATIONS
     global AFFINE_ROTATION_DEGREES
     global AFFINE_ROTATION_SPLIT
@@ -158,7 +159,8 @@ def prompt_registration_settings():
     global POST_AFFINE_SUBPIXEL
 
     print("\nregistration settings; Enter/use accepts each current default")
-    USE_SPARSE_HIGHRES_SCORE = check_bool_setting(USE_SPARSE_HIGHRES_SCORE, "Use 2k x 2k x 4 high-res scoring subset")
+    SPARSE_REGION_SIZE = check_setting(SPARSE_REGION_SIZE, "Full-res subset edge length in pixels (<100 = no subset)", int, min_value=0)
+    USE_SPARSE_HIGHRES_SCORE = int(SPARSE_REGION_SIZE) >= 100
     AFFINE_ROTATION_ITERATIONS = check_setting(AFFINE_ROTATION_ITERATIONS, "Rotation iterations", int, min_value=0)
     if AFFINE_ROTATION_ITERATIONS > 0:
         AFFINE_ROTATION_DEGREES = check_setting(AFFINE_ROTATION_DEGREES, "Rotation degrees", float, min_value=0.0)
@@ -183,7 +185,8 @@ def prompt_registration_settings():
 def registration_settings_text():
     lines = [
         "registration settings:",
-        "  subset_2k_x_2k_x_4=" + str(bool(USE_SPARSE_HIGHRES_SCORE)),
+        "  full_res_subset_enabled=" + str(bool(USE_SPARSE_HIGHRES_SCORE)),
+        "  full_res_subset_edge_px=" + str(int(SPARSE_REGION_SIZE)),
         "  subset_min_pixels=" + str(int(SPARSE_HIGHRES_MIN_TOTAL_PIXELS)),
         "  rotation_iterations=" + str(int(AFFINE_ROTATION_ITERATIONS)),
         "  rotation_degrees=" + "{:g}".format(float(AFFINE_ROTATION_DEGREES)),
@@ -858,9 +861,13 @@ def score_translation_numpy(fixed, moving, fixed_mask, moving_mask, dy, dx):
 
 
 def should_use_sparse_highres_score(scale, shape):
+    region_size = int(SPARSE_REGION_SIZE)
+    min_dim = min(int(shape[0]), int(shape[1]))
     return (
         bool(USE_SPARSE_HIGHRES_SCORE)
         and int(scale) == 1
+        and region_size >= 100
+        and region_size < (min_dim / float(SPARSE_GRID_SIZE))
         and int(shape[0]) * int(shape[1]) >= int(SPARSE_HIGHRES_MIN_TOTAL_PIXELS)
     )
 
@@ -2326,9 +2333,8 @@ def run_scene(root, slide_scene, files):
 def main():
     workflow = choose_registration_workflow()
     if workflow == "mihc":
-        print("mIHC registration is not wired here yet.")
-        print("Planned target: adapt the useful mIHC logic from realign_mihc_test.py into this registration adapter.")
-        return False
+        from realign_mihc_bridge import main as run_mihc_registration
+        return run_mihc_registration()
     root, scene_groups, chosen_scenes = collect_inputs()
     prompt_registration_settings()
     scene_rows = []
