@@ -3,6 +3,8 @@ import copy
 import random
 import gc
 import warnings
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,6 +19,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+_SUPPORT_DIR = Path(__file__).resolve().parents[1] / "support"
+if str(_SUPPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SUPPORT_DIR))
+
+from image_conventions import (
+    collect_feature_marker_files as convention_collect_feature_marker_files,
+    find_segmentation_pair as convention_find_segmentation_pair,
+    parse_feature_marker_record,
+)
 from feature_extract_17 import extract_core_features
 
 warnings.filterwarnings("ignore")
@@ -253,22 +264,10 @@ def make_marker_entry(chan, raw):
 # file discovery
 # ==========================
 def parse_marker_chan(file):
-    # matches your legacy naming when available; invalid/non-marker files are skipped
-    try:
-        parts = str(file).split('_')
-        if len(parts) < 2:
-            return None, None
-        markers = parts[1].split('.')
-        chan_part = str(file).split('_c', 1)[1]
-        if chan_part == "" or (not chan_part[0].isdigit()):
-            return None, None
-        chan = int(chan_part[0])
-    except Exception:
+    record = parse_feature_marker_record(file)
+    if record is None:
         return None, None
-    if chan - 2 < 0 or chan - 2 >= len(markers):
-        return None, None
-    marker = markers[chan - 2]
-    return marker, chan
+    return record.marker, record.channel_number
 
 RESUME_DFS = []
 
@@ -385,74 +384,19 @@ def _resolve_candidate_core_folders(seed_path=None, images_root=None, scope='cor
 
 
 def _find_segmentation_pair(seg_root, core_name):
-    seg_root = _normalize_path(seg_root)
-    if seg_root is None or not os.path.isdir(seg_root):
-        return None, None, None
-
-    slide, _ = _split_slide_scene(core_name)
-    seg_search_root = seg_root
-    direct_files = [f for f in os.listdir(seg_root) if os.path.isfile(os.path.join(seg_root, f))]
-    if len(direct_files) == 0:
-        seg_dirs = sorted(
-            d for d in os.listdir(seg_root)
-            if os.path.isdir(os.path.join(seg_root, d))
-        )
-        preferred_name = slide + '_CellposeSegmentation'
-        preferred_dirs = [d for d in seg_dirs if d == preferred_name]
-        if len(preferred_dirs) == 0:
-            preferred_dirs = [
-                d for d in seg_dirs
-                if d.startswith(slide) and ('Segmentation' in d or 'segmentation' in d)
-            ]
-        if len(preferred_dirs) == 1:
-            seg_search_root = os.path.join(seg_root, preferred_dirs[0])
-        elif len(preferred_dirs) > 1:
-            seg_search_root = os.path.join(seg_root, preferred_dirs[0])
-            dprint('Multiple segmentation folders matched:', core_name, '->', preferred_dirs)
-
-    cell_file = None
-    nuc_file = None
-    cell_priority = [
-        'nuc30_cell30_matched_exp5_CellSegmentationBasins.tif',
-        'nuc30_cell30_matched_CellSegmentationBasins.tif',
-        'cell30_CellSegmentationBasins.tif',
-    ]
-
-    files = sorted(os.listdir(seg_search_root))
-    for pattern in cell_priority:
-        for file in files:
-            if _seg_file_matches_core(file, core_name) and (pattern in file):
-                cell_file = file
-                break
-        if cell_file is not None:
-            break
-
-    for file in files:
-        if _seg_file_matches_core(file, core_name) and ('nuc30_NucleiSegmentationBasins.tif' in file):
-            nuc_file = file
-            break
-
-    return cell_file, nuc_file, seg_search_root
+    match = convention_find_segmentation_pair(seg_root, core_name)
+    if match.convention:
+        dprint("segmentation convention:", core_name, "->", match.convention, match.folder)
+    return match.cell_file, match.nuc_file, match.folder
 
 
 def _collect_marker_files(core_folder, qc_tokens, stain_tokens, allowed_markers=None):
-    qc_files = []
-    st_files = []
-    allowed = [str(marker).strip().lower() for marker in (allowed_markers or []) if str(marker).strip() != ""]
-    for file in sorted(os.listdir(core_folder)):
-        low = file.lower()
-        if not (low.endswith('.tif') or low.endswith('.tiff')):
-            continue
-        if any(q in file for q in qc_tokens):
-            qc_files.append(file)
-        elif any(s in file for s in stain_tokens):
-            marker, chan = parse_marker_chan(file)
-            if marker is None:
-                continue
-            if len(allowed) > 0 and not any(tok in marker.lower() for tok in allowed):
-                continue
-            st_files.append(file)
-    return qc_files, st_files
+    return convention_collect_feature_marker_files(
+        core_folder,
+        qc_tokens=qc_tokens,
+        stain_tokens=stain_tokens,
+        allowed_markers=allowed_markers,
+    )
 
 
 def _selected_output_tiff_stems(job):

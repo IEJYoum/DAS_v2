@@ -33,6 +33,41 @@ class CycifImageRecord:
     apply_shift_to_all_channels: bool = True
 
 
+@dataclass(frozen=True)
+class FeatureImageRecord:
+    """One registered TIFF resolved for downstream correction/extraction."""
+
+    file_name: str
+    convention: str
+    marker: str
+    channel_number: int
+    round_token: str = ""
+
+
+@dataclass(frozen=True)
+class SegmentationPair:
+    """Cell/nucleus label files resolved for one core/scene."""
+
+    cell_file: Optional[str]
+    nuc_file: Optional[str]
+    folder: Optional[str]
+    convention: str = ""
+
+
+@dataclass(frozen=True)
+class ViewerAssetRecord:
+    """One image/asset path resolved to the viewer's slide_scene contract."""
+
+    path: str
+    file_name: str
+    convention: str
+    slide_scene: str
+    display_label: str
+    marker: str = ""
+    scene_letter: str = ""
+    scene_number: Optional[int] = None
+
+
 def round_sort_key(round_token: str) -> tuple[int, str]:
     match = re.search(r"R(\d+)([A-Za-z]*)", str(round_token), re.IGNORECASE)
     if match is None:
@@ -255,3 +290,459 @@ def _marker_for_channel(record: CycifImageRecord, channel_number: int) -> str:
     if 0 <= marker_index < len(record.marker_names):
         return record.marker_names[marker_index]
     return "c" + str(channel_number)
+
+
+def parse_feature_marker_record(file_name: str) -> Optional[FeatureImageRecord]:
+    """
+    Parse registered image filenames for feature extraction.
+
+    Downstream consumers prefer DAS output names.  Koei covers the legacy
+    CycIF/Cellpose path; there is intentionally no Bree segmentation convention
+    until there is an actual downstream output contract to parse.
+    """
+    stem = Path(file_name).stem
+    return (
+        parse_das_feature_marker_record(file_name, stem)
+        or parse_koei_feature_marker_record(file_name, stem)
+    )
+
+
+def parse_das_feature_marker_record(file_name: str, stem: Optional[str] = None) -> Optional[FeatureImageRecord]:
+    """
+    DAS registered output convention.
+
+    Expected shape:
+    R1_markerblock_c2_Scene-2.tif
+
+    Channel 1 is treated as nuclear/QC and is not a marker measurement channel.
+    """
+    stem = Path(file_name).stem if stem is None else stem
+    match = re.match(
+        r"^(?P<round>R\d+[A-Za-z]*)_(?P<marker_block>.+)_c(?P<channel>\d+)_(?P<scene>Scene[-_]?[A-Za-z]?0*\d{1,4})$",
+        stem,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    round_token = match.group("round")
+    channel_number = int(match.group("channel"))
+    marker = _marker_from_block_for_channel(match.group("marker_block"), channel_number)
+    if marker is None:
+        return None
+    return FeatureImageRecord(
+        file_name=file_name,
+        convention="DAS",
+        marker=marker,
+        channel_number=channel_number,
+        round_token=round_token,
+    )
+
+
+def parse_koei_feature_marker_record(file_name: str, stem: Optional[str] = None) -> Optional[FeatureImageRecord]:
+    """
+    Koei/legacy registered image convention used by the old CycIF + Cellpose path.
+    """
+    stem = Path(file_name).stem if stem is None else stem
+    parts = stem.split("_")
+    if len(parts) < 2:
+        return None
+    channel_number = _parse_channel_number(stem)
+    if channel_number is None:
+        return None
+    marker = _marker_from_block_for_channel(parts[1], channel_number)
+    if marker is None:
+        return None
+    round_token = parts[0] if re.match(r"R\d+", parts[0], re.IGNORECASE) else ""
+    return FeatureImageRecord(
+        file_name=file_name,
+        convention="Koei",
+        marker=marker,
+        channel_number=channel_number,
+        round_token=round_token,
+    )
+
+
+def collect_feature_marker_files(
+    core_folder: Union[str, os.PathLike[str]],
+    qc_tokens: Optional[Iterable[str]] = None,
+    stain_tokens: Optional[Iterable[str]] = None,
+    allowed_markers: Optional[Iterable[str]] = None,
+) -> tuple[list[str], list[str]]:
+    """
+    Resolve QC and marker TIFFs for correction/extraction.
+
+    DAS convention is the default downstream contract: any parsed non-QC marker
+    channel is a stain image.  Koei convention preserves the old token-gated
+    behavior using `qc_tokens` and `stain_tokens`.
+    """
+    folder = Path(core_folder)
+    qc_tokens = [str(token) for token in (qc_tokens or []) if str(token).strip()]
+    stain_tokens = [str(token) for token in (stain_tokens or []) if str(token).strip()]
+    allowed = [str(marker).strip().lower() for marker in (allowed_markers or []) if str(marker).strip()]
+
+    qc_files: list[str] = []
+    stain_files: list[str] = []
+    if not folder.is_dir():
+        return qc_files, stain_files
+
+    for path in sorted(folder.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file() or path.suffix.lower() not in {".tif", ".tiff"}:
+            continue
+        record = parse_feature_marker_record(path.name)
+        if record is None:
+            continue
+        if allowed and not any(token in record.marker.lower() for token in allowed):
+            continue
+
+        is_qc = any(token in path.name for token in qc_tokens)
+        if is_qc:
+            qc_files.append(path.name)
+            continue
+
+        if record.convention == "DAS":
+            stain_files.append(path.name)
+        elif any(token in path.name for token in stain_tokens):
+            stain_files.append(path.name)
+
+    return qc_files, stain_files
+
+
+def find_segmentation_pair(
+    seg_root: Union[str, os.PathLike[str], None],
+    core_name: str,
+) -> SegmentationPair:
+    """
+    Resolve segmentation labels for feature extraction.
+
+    DAS StarDist currently emits one label image; use it as both nucleus and
+    cell labels so the existing extractor can run without algorithm changes.
+    Koei keeps the old Cellpose filename contract.
+    """
+    if seg_root is None or str(seg_root).strip() == "":
+        return SegmentationPair(None, None, None, "")
+
+    root = Path(seg_root)
+    if not root.is_dir():
+        return SegmentationPair(None, None, None, "")
+
+    for folder in _segmentation_candidate_dirs(root, core_name):
+        das_pair = _find_das_segmentation_pair_in_dir(folder, core_name)
+        if das_pair.cell_file is not None and das_pair.nuc_file is not None:
+            return das_pair
+
+    for folder in _segmentation_candidate_dirs(root, core_name):
+        koei_pair = _find_koei_segmentation_pair_in_dir(folder, core_name)
+        if koei_pair.cell_file is not None and koei_pair.nuc_file is not None:
+            return koei_pair
+
+    return SegmentationPair(None, None, None, "")
+
+
+def _marker_from_block_for_channel(marker_block: str, channel_number: int) -> Optional[str]:
+    channel_number = int(channel_number)
+    if channel_number < 2:
+        return None
+    markers = _split_marker_block(str(marker_block))
+    marker_index = channel_number - 2
+    if marker_index < 0 or marker_index >= len(markers):
+        return None
+    marker = str(markers[marker_index]).strip()
+    if marker == "" or marker.lower() == "d":
+        return None
+    return marker
+
+
+def _split_slide_scene_token(name: str) -> tuple[str, str]:
+    text = str(name)
+    if "_" in text:
+        slide, scene = text.split("_", 1)
+        return slide or text, scene or text
+    return text, text
+
+
+def _scene_token_for_match(name: str) -> str:
+    _, scene = _split_slide_scene_token(name)
+    return str(scene).split("_", 1)[0]
+
+
+def _file_matches_core(file_name: str, core_name: str) -> bool:
+    file_name = os.path.basename(str(file_name))
+    core_name = str(core_name)
+    if core_name.lower() in file_name.lower():
+        return True
+
+    core_slide, _ = _split_slide_scene_token(core_name)
+    file_slide, _ = _split_slide_scene_token(Path(file_name).stem)
+    return (
+        str(file_slide).lower() == str(core_slide).lower()
+        and _scene_token_for_match(file_name).lower() == _scene_token_for_match(core_name).lower()
+    )
+
+
+def _segmentation_candidate_dirs(root: Path, core_name: str) -> list[Path]:
+    candidates: list[Path] = []
+    if _folder_has_files(root):
+        candidates.append(root)
+
+    subdirs = [path for path in root.iterdir() if path.is_dir()]
+    if subdirs:
+        slide, _ = _split_slide_scene_token(core_name)
+        preferred = []
+        for path in subdirs:
+            name = path.name
+            if name == slide + "_CellposeSegmentation":
+                preferred.append(path)
+            elif name.startswith(slide) and ("Segmentation" in name or "segmentation" in name):
+                preferred.append(path)
+        for path in sorted(preferred, key=lambda item: item.name.lower()):
+            if path not in candidates:
+                candidates.append(path)
+
+        for path in sorted(subdirs, key=_segmentation_dir_sort_key, reverse=True):
+            if path not in candidates:
+                candidates.append(path)
+
+    return candidates
+
+
+def _folder_has_files(folder: Path) -> bool:
+    try:
+        return any(path.is_file() for path in folder.iterdir())
+    except Exception:
+        return False
+
+
+def _segmentation_dir_sort_key(path: Path) -> tuple[int, float, str]:
+    match = re.match(r"(\d+)_", path.name)
+    run_number = int(match.group(1)) if match is not None else -1
+    try:
+        mtime = path.stat().st_mtime
+    except Exception:
+        mtime = 0.0
+    return run_number, mtime, path.name.lower()
+
+
+def _tiff_files(folder: Path) -> list[str]:
+    try:
+        return sorted(
+            path.name
+            for path in folder.iterdir()
+            if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+        )
+    except Exception:
+        return []
+
+
+def _find_das_segmentation_pair_in_dir(folder: Path, core_name: str) -> SegmentationPair:
+    labels = [
+        name
+        for name in _tiff_files(folder)
+        if "stardist" in name.lower()
+        and "labeled_cells" in name.lower()
+        and "overlay" not in name.lower()
+        and "prediction" not in name.lower()
+    ]
+    matched = [name for name in labels if _file_matches_core(name, core_name)]
+    if not matched and len(labels) == 1:
+        matched = labels
+    if not matched:
+        return SegmentationPair(None, None, None, "")
+    label_file = sorted(matched)[-1]
+    return SegmentationPair(label_file, label_file, str(folder), "DAS")
+
+
+def _find_koei_segmentation_pair_in_dir(folder: Path, core_name: str) -> SegmentationPair:
+    files = _tiff_files(folder)
+    cell_file = None
+    nuc_file = None
+    cell_priority = [
+        "nuc30_cell30_matched_exp5_cellsegmentationbasins.tif",
+        "nuc30_cell30_matched_cellsegmentationbasins.tif",
+        "cell30_cellsegmentationbasins.tif",
+    ]
+
+    for pattern in cell_priority:
+        for file_name in files:
+            if _file_matches_core(file_name, core_name) and pattern in file_name.lower():
+                cell_file = file_name
+                break
+        if cell_file is not None:
+            break
+
+    for file_name in files:
+        if _file_matches_core(file_name, core_name) and "nuc30_nucleisegmentationbasins.tif" in file_name.lower():
+            nuc_file = file_name
+            break
+
+    return SegmentationPair(cell_file, nuc_file, str(folder) if cell_file and nuc_file else None, "Koei")
+
+
+def parse_viewer_asset_record(path: Union[str, os.PathLike[str]]) -> Optional[ViewerAssetRecord]:
+    """
+    Resolve an image path into the viewer's slide_scene identity.
+
+    Convention priority is intentionally small and explicit:
+    - DAS: registeredImages/<slide_scene>/<channel>.tif outputs.
+    - Sam/FCS: <slide>/Processed/ROI## channel/label assets.
+    - Koei: legacy paths carrying a slide_scene-style folder or filename token.
+    - Generic: last-resort scene/core parsing for unseen but regular folders.
+    """
+    text = str(path)
+    file_name = Path(text).name
+    slide_scene, convention = _viewer_slide_scene_from_path(text)
+    if slide_scene == "":
+        return None
+    scene_letter, scene_number = _viewer_scene_parts(slide_scene)
+    return ViewerAssetRecord(
+        path=text,
+        file_name=file_name,
+        convention=convention,
+        slide_scene=slide_scene,
+        display_label=viewer_display_label(slide_scene),
+        marker=viewer_marker_label_from_path(text),
+        scene_letter=scene_letter,
+        scene_number=scene_number,
+    )
+
+
+def viewer_marker_label_from_path(path: Union[str, os.PathLike[str]]) -> str:
+    """Return a channel label for DAS, Sam/FCS, Koei, or generic TIFF names."""
+    name = Path(path).stem
+
+    feature = parse_feature_marker_record(Path(path).name)
+    if feature is not None and str(feature.marker).strip() != "":
+        return str(feature.marker).strip()
+
+    match = re.search(r"(?i)_C\d+R\d+_([^_]+)_ROI0*\d{1,4}(?:$|_)", name)
+    if match is not None:
+        marker = match.group(1)
+    else:
+        clean = re.sub(r"(?i)_?ROI0*\d{1,4}$", "", name)
+        clean = re.sub(r"(?i)_c\d+$", "", clean)
+        clean = re.sub(r"(?i)_ch\d+$", "", clean)
+        parts = clean.split("_")
+        if len(parts) >= 2 and re.match(r"(?i)^C\d+R\d+$", parts[-2]):
+            marker = parts[-1]
+        elif len(parts) >= 2 and re.match(r"(?i)^Scene[-_]?[A-Za-z]?0*\d{1,4}$", parts[-1]):
+            marker = parts[-2]
+        else:
+            marker = parts[-1] if len(parts) > 0 else clean
+
+    marker = re.sub(r"-0+\d*$", "", str(marker).strip())
+    return marker if marker != "" else "channel"
+
+
+def viewer_display_label(slide_scene: str) -> str:
+    """Return a concise display label while preserving slide_scene as identity."""
+    text = str(slide_scene or "").strip()
+    if text == "":
+        return ""
+    match = re.match(r"(?i)^(.+?)[_-]?ROI0*(\d{1,4})$", text)
+    if match is not None:
+        prefix = str(match.group(1)).strip("_- ")
+        return (prefix + " " if prefix else "") + "ROI" + str(int(match.group(2)))
+    match = re.match(r"(?i)^(.+?)[_-]?scene[_-]?([A-Za-z])?0*(\d{1,4})$", text)
+    if match is not None:
+        prefix = str(match.group(1)).strip("_- ")
+        letter = str(match.group(2) or "").upper()
+        scene = "Scene " + (letter + str(int(match.group(3))) if letter != "" else str(int(match.group(3))))
+        return (prefix + " " if prefix else "") + scene
+    return text.replace("_", " ")
+
+
+def _viewer_slide_scene_from_path(path: str) -> tuple[str, str]:
+    segments = [seg for seg in str(path).replace("\\", "/").split("/") if seg != ""]
+    if len(segments) == 0:
+        return "", ""
+
+    das_scene = _viewer_registered_images_scene(segments)
+    if das_scene != "":
+        return das_scene, "DAS"
+
+    roi_scene = _viewer_roi_slide_scene(segments)
+    if roi_scene != "":
+        return roi_scene, "Sam/FCS"
+
+    scene_scene = _viewer_scene_slide_scene(segments)
+    if scene_scene != "":
+        convention = "Koei" if "_" in scene_scene and re.search(r"(?i)scene", scene_scene) else "Generic"
+        return scene_scene, convention
+
+    core_scene = _viewer_core_scene(segments[-1])
+    if core_scene != "":
+        return core_scene, "Generic"
+
+    return "", ""
+
+
+def _viewer_registered_images_scene(segments: list[str]) -> str:
+    for index, segment in enumerate(segments[:-1]):
+        if segment.lower() != "registeredimages":
+            continue
+        # DAS writes registeredImages/<slide_scene>/<channel file>.
+        if index + 2 == len(segments) - 1:
+            candidate = segments[index + 1]
+            if candidate.strip() != "" and not candidate.startswith("_"):
+                return candidate
+    return ""
+
+
+def _viewer_roi_slide_scene(segments: list[str]) -> str:
+    roi_tag = ""
+    roi_idx = -1
+    file_name = segments[-1]
+    match = re.search(r"(?i)(ROI0*\d{1,4})", file_name)
+    if match is not None:
+        roi_tag = match.group(1).upper()
+        roi_idx = len(segments) - 1
+    if roi_tag == "":
+        for index in range(len(segments) - 1, -1, -1):
+            if re.match(r"(?i)^ROI0*\d{1,4}$", segments[index]):
+                roi_tag = segments[index].upper()
+                roi_idx = index
+                break
+    if roi_tag == "":
+        return ""
+    slide_id = ""
+    for index in range(roi_idx - 1, -1, -1):
+        if re.match(r"^\d+$", segments[index]):
+            slide_id = segments[index]
+            break
+    return slide_id + roi_tag
+
+
+def _viewer_scene_slide_scene(segments: list[str]) -> str:
+    for segment in reversed(segments[:-1]):
+        match = re.search(r"(?i)([^/]*?scene[_-]?[A-Za-z]?0*\d{1,4})", segment)
+        if match is not None:
+            candidate = match.group(1).strip("_- ")
+            if candidate != "":
+                return candidate
+    file_segment = segments[-1] if len(segments) > 0 else ""
+    match = re.search(r"(?i)([^/]*?scene[_-]?[A-Za-z]?0*\d{1,4})", file_segment)
+    if match is not None:
+        candidate = match.group(1).strip("_- ")
+        if candidate != "":
+            return candidate
+    return ""
+
+
+def _viewer_core_scene(text: str) -> str:
+    stem = Path(str(text)).stem
+    match = re.search(r"(?<![A-Za-z])([A-Ia-i])0*(\d{1,4})$", stem)
+    if match is None:
+        return ""
+    return match.group(1).upper() + str(int(match.group(2)))
+
+
+def _viewer_scene_parts(slide_scene: str) -> tuple[str, Optional[int]]:
+    match = re.search(r"(?i)scene[_-]?([A-Za-z])?0*(\d{1,4})", str(slide_scene))
+    if match is not None:
+        return str(match.group(1) or "").upper(), int(match.group(2))
+    match = re.match(r"(?i)^([A-I])0*(\d{1,4})$", str(slide_scene).strip())
+    if match is not None:
+        return match.group(1).upper(), int(match.group(2))
+    match = re.search(r"(?i)ROI0*(\d{1,4})", str(slide_scene))
+    if match is not None:
+        return "A", int(match.group(1))
+    return "", None

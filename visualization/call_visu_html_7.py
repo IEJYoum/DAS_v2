@@ -47,6 +47,14 @@ try:
     import io_adapter as das_io
 except Exception:
     das_io = None
+try:
+    from image_conventions import parse_viewer_asset_record
+    from image_conventions import viewer_display_label as convention_viewer_display_label
+    from image_conventions import viewer_marker_label_from_path as convention_marker_label_from_path
+except Exception:
+    parse_viewer_asset_record = None
+    convention_viewer_display_label = None
+    convention_marker_label_from_path = None
 from shared_utils import (
     load_project_config_values,
     save_project_config_updates,
@@ -352,14 +360,16 @@ def main(df=9, obs=9, dfxy=9, *args, **kwargs):
 
     templates = build_templates(filepaths)
     scene_templates = [t for t in templates if t.get("scene") is not None]
-    if len(scene_templates) == 0:
-        print("No scene-tagged files found. Nothing to render.")
-        return (df, obs, dfxy)
-
-    scene_keys = collect_scene_keys(scene_templates)
-    print("Scene expansion:", len(scene_templates), "seed file(s) ->", len(scene_keys), "scene(s)")
-
-    by_core = build_core_buckets(scene_keys, scene_templates)
+    if should_use_direct_viewer_buckets(templates, scene_templates):
+        by_core = build_direct_viewer_buckets(templates)
+        print("Convention-aware viewer discovery:", len(by_core), "slide_scene value(s)")
+    else:
+        if len(scene_templates) == 0:
+            print("No scene-tagged files found. Nothing to render.")
+            return (df, obs, dfxy)
+        scene_keys = collect_scene_keys(scene_templates)
+        print("Scene expansion:", len(scene_templates), "seed file(s) ->", len(scene_keys), "scene(s)")
+        by_core = build_core_buckets(scene_keys, scene_templates)
     catalog = build_catalog(by_core, obs)
     _set_cvh_meta(
         cvh_mode="manual",
@@ -401,14 +411,16 @@ def run_manual_asset_creation(out_root, obs):
 
     templates = build_templates(filepaths)
     scene_templates = [t for t in templates if t.get("scene") is not None]
-    if len(scene_templates) == 0:
-        print("No scene-tagged files found. Nothing to render.")
-        return ""
-
-    scene_keys = collect_scene_keys(scene_templates)
-    print("Scene expansion:", len(scene_templates), "seed file(s) ->", len(scene_keys), "scene(s)")
-
-    by_core = build_core_buckets(scene_keys, scene_templates)
+    if should_use_direct_viewer_buckets(templates, scene_templates):
+        by_core = build_direct_viewer_buckets(templates)
+        print("Convention-aware viewer discovery:", len(by_core), "slide_scene value(s)")
+    else:
+        if len(scene_templates) == 0:
+            print("No scene-tagged files found. Nothing to render.")
+            return ""
+        scene_keys = collect_scene_keys(scene_templates)
+        print("Scene expansion:", len(scene_templates), "seed file(s) ->", len(scene_keys), "scene(s)")
+        by_core = build_core_buckets(scene_keys, scene_templates)
     catalog = build_catalog(by_core, obs)
     _set_cvh_meta(
         cvh_mode="manual",
@@ -886,6 +898,26 @@ def list_supported_files_one_level(folder):
         if os.path.isfile(fp) and is_supported_asset_file(fp):
             out.append(fp)
         i += 1
+    if len(out) == 0 and os.path.basename(os.path.normpath(str(folder))).lower() == "registeredimages":
+        try:
+            child_names = os.listdir(folder)
+        except Exception:
+            child_names = []
+        i = 0
+        while i < len(child_names):
+            child = os.path.normpath(os.path.join(folder, child_names[i]))
+            if os.path.isdir(child):
+                try:
+                    nested = os.listdir(child)
+                except Exception:
+                    nested = []
+                j = 0
+                while j < len(nested):
+                    fp = os.path.normpath(os.path.join(child, nested[j]))
+                    if os.path.isfile(fp) and is_supported_asset_file(fp):
+                        out.append(fp)
+                    j += 1
+            i += 1
     return dedupe_keep_order(out)
 
 
@@ -1369,16 +1401,55 @@ def build_templates(filepaths):
     i = 0
     while i < len(filepaths):
         t = make_template(filepaths[i])
-        if t.get("scene") is None:
+        if t.get("scene") is None and normalize_slide_scene(t.get("slide_scene", "")) == "":
             print("IGNORING NON-SCENE FILE:", t["sample_path"])
         out.append(t)
         i += 1
     return out
 
 
+def should_use_direct_viewer_buckets(templates, scene_templates):
+    direct = [t for t in list(templates or []) if normalize_slide_scene(t.get("slide_scene", "")) != ""]
+    if len(direct) == 0:
+        return False
+    if len(scene_templates) == 0:
+        return True
+    for t in direct:
+        if str(t.get("viewer_convention", "")).strip() == "DAS":
+            return True
+    return False
+
+
+def build_direct_viewer_buckets(templates):
+    by_core = {}
+    for t in list(templates or []):
+        slide_scene = normalize_slide_scene(t.get("slide_scene", ""))
+        if slide_scene == "":
+            continue
+        if slide_scene not in by_core:
+            by_core[slide_scene] = empty_bucket()
+            record = t.get("viewer_record", {})
+            if isinstance(record, dict):
+                by_core[slide_scene]["slide_scene"] = slide_scene
+                by_core[slide_scene]["display_label"] = str(record.get("display_label", "") or display_label_from_slide_scene(slide_scene))
+                by_core[slide_scene]["viewer_convention"] = str(record.get("convention", ""))
+        kind = str(t.get("kind", "other"))
+        if kind == "segmentation_tiff":
+            by_core[slide_scene]["segmentation_tif"] = str(t.get("sample_path", ""))
+        else:
+            add_path_to_bucket_by_kind(by_core[slide_scene], str(t.get("sample_path", "")), kind)
+    return by_core
+
+
 def make_template(fp):
     ap = os.path.abspath(os.path.normpath(fp))
     kind = classify_path_kind(ap)
+    viewer_record = None
+    if callable(parse_viewer_asset_record):
+        try:
+            viewer_record = parse_viewer_asset_record(ap)
+        except Exception:
+            viewer_record = None
 
     out = {
         "sample_path": ap,
@@ -1386,6 +1457,15 @@ def make_template(fp):
         "scene": None,
         "mode": "none"
     }
+    if viewer_record is not None:
+        out["viewer_record"] = {
+            "convention": str(viewer_record.convention),
+            "slide_scene": str(viewer_record.slide_scene),
+            "display_label": str(viewer_record.display_label),
+            "marker": str(viewer_record.marker),
+        }
+        out["viewer_convention"] = str(viewer_record.convention)
+        out["slide_scene"] = str(viewer_record.slide_scene)
 
     if kind == "segmentation_tiff":
         return out
@@ -1667,8 +1747,13 @@ def resolve_template_for_scene(t, core_key, dir_cache):
 
 
 def marker_label_from_path(fp):
-    # NOTE: this duplicates marker_from_tiff_path in visu_html_functions7.py.
-    # The two should be combined into a single shared function in the future.
+    if callable(convention_marker_label_from_path):
+        try:
+            marker = str(convention_marker_label_from_path(fp)).strip()
+            if marker != "":
+                return marker
+        except Exception:
+            pass
     name = os.path.splitext(os.path.basename(fp))[0]
     # Strip ROI token at end if present (e.g. _ROI06)
     name = re.sub(r"(?i)_?ROI0*\d{1,3}$", "", name)
@@ -1817,6 +1902,13 @@ def display_label_from_slide_scene(slide_scene):
     text = normalize_slide_scene(slide_scene)
     if text == "":
         return ""
+    if callable(convention_viewer_display_label):
+        try:
+            label = str(convention_viewer_display_label(text)).strip()
+            if label != "":
+                return label
+        except Exception:
+            pass
     m = re.match(r"(?i)^(.+?)[_-]?ROI0*(\d{1,3})$", text)
     if m is not None:
         return str(m.group(1)).strip("_- ") + " ROI" + str(int(m.group(2)))
@@ -2727,6 +2819,13 @@ def classify_obs_columns_by_core_positions(obs, core_positions):
 
 
 def extract_slide_scene_from_path(path):
+    if callable(parse_viewer_asset_record):
+        try:
+            record = parse_viewer_asset_record(path)
+            if record is not None and normalize_slide_scene(record.slide_scene) != "":
+                return normalize_slide_scene(record.slide_scene)
+        except Exception:
+            pass
     text = str(path).replace("\\", "/")
     m = re.search(r"(?i)([^/]+_scene[_-]?[A-Za-z]0*\d{1,3})", text)
     if m is not None:

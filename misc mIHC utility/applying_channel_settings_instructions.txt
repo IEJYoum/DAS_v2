@@ -1,408 +1,333 @@
 ================================================================
-  TRANSFERRING DISPLAY SETTINGS & FINDING ANNOTATIONS
-  QuPath project: 3x Tumor Screen (wholeslide_reg)
+  TRANSFERRING QUPATH DISPLAY SETTINGS
+  Script: transfer_display_settings_v2.groovy
 ================================================================
 
 
 TABLE OF CONTENTS
 -----------------
-  1. Transferring display settings between slides
-     a. Saving settings (CAPTURE)
-     b. Applying to one slide (APPLY)
-     c. Applying to all slides at once (APPLY_ALL)
-  2. Finding your annotations
-  3. Mac filepath troubleshooting
-  4. Methods (how the script works)
+  1. What the script transfers
+  2. Quick workflow
+  3. Saving settings from one slide (CAPTURE)
+  4. Applying settings to one open slide (APPLY)
+  5. Applying settings to every project image (APPLY_ALL)
+  6. Options at the top of the script
+  7. Notes and troubleshooting
+  8. Methods
 
 
 ================================================================
-1. TRANSFERRING DISPLAY SETTINGS BETWEEN SLIDES
+1. WHAT THE SCRIPT TRANSFERS
 ================================================================
 
-The script "transfer_display_settings.groovy" (in this same
-folder) lets you save brightness/contrast and channel visibility
-from one slide, then apply those settings to any other slide.
+Use "transfer_display_settings_v2.groovy" inside QuPath 0.7.0 to
+copy display settings from one image to another image, or to every
+image in the current project.
 
-It works across slides even though channel names have different
-prefixes (e.g., NK_SCREEN_B171_... vs NK_3xTLS_403932_...) by
-matching on the marker name only (CD3, B220, PANCK, etc.).
+The script transfers:
+
+  - Brightness/contrast intensity ranges for each channel
+  - Whether each channel is on or off
+  - Channel colors
+
+The script does not edit annotations, detections, measurements, or
+analysis results.
+
+By default, v2 assumes exact channel-name matches:
+
+  def MATCH_MODE = "EXACT"
+
+This is the preferred mode when the full QuPath display channel names
+match across images. There is also a legacy marker-matching mode:
+
+  def MATCH_MODE = "MARKER"
+
+MARKER strips prefixes such as NK_SCREEN_B171_C02R2_ and matches by
+the marker name. Use it only if exact channel names do not match.
 
 
-STEP-BY-STEP: SAVING SETTINGS
-------------------------------
+================================================================
+2. QUICK WORKFLOW
+================================================================
 
-  1. In QuPath, open the slide whose settings you want to save.
+  1. Open the source image in QuPath.
 
-  2. Adjust your display settings as desired:
-     - Use the Brightness & Contrast panel (View > Brightness &
-       Contrast, or shortcut Shift+C) to adjust min/max ranges.
-     - Toggle channels on/off by clicking the checkboxes next to
-       each channel name in the Brightness & Contrast panel.
+  2. Adjust the Brightness & Contrast panel until the image looks
+     the way you want.
 
-  3. Open the script editor:  Automate > Script editor
+  3. Run the script in CAPTURE mode.
 
-  4. Open the script file:
-     - In the script editor, use File > Open...
-     - Navigate to this project folder and select
-       "transfer_display_settings.groovy"
+  4. To update one currently open image, run APPLY.
 
-  5. Near the top of the script, make sure these lines read:
+  5. To update every image in the current project, run APPLY_ALL.
+
+Run the script with the normal Run button in QuPath's script editor.
+Do not use "Run for project"; APPLY_ALL handles the project loop
+itself.
+
+
+================================================================
+3. SAVING SETTINGS FROM ONE SLIDE (CAPTURE)
+================================================================
+
+CAPTURE reads the display settings you are currently looking at in
+the QuPath viewer. It is okay if the display settings have not been
+saved yet; CAPTURE is intentionally based on the live viewer state.
+
+Steps:
+
+  1. Open the source slide.
+
+  2. Open Brightness & Contrast:
+
+       View > Brightness & Contrast
+
+     or press Shift+C.
+
+  3. Adjust channel min/max ranges, channel on/off checkboxes, and
+     colors.
+
+  4. Open:
+
+       transfer_display_settings_v2.groovy
+
+     in QuPath's script editor.
+
+  5. Set the top of the script:
 
        def MODE = "CAPTURE"
        def PRESET_NAME = "default"
+       def MATCH_MODE = "EXACT"
 
-     You can change "default" to any descriptive name, e.g.
-     "TLS_view" or "immune_panel". This lets you save multiple
-     different configurations.
+     Change "default" to any useful preset name.
 
-  6. Click "Run" (or press Ctrl+R / Cmd+R).
+  6. Click Run.
 
-  7. The log panel at the bottom will confirm which channels were
-     saved. The settings are stored as a JSON file in the
-     "saved_display_presets" subfolder inside this project.
+The preset is saved in the current QuPath project folder:
+
+  saved_display_presets/default.json
+
+The log will list every captured channel, whether it is on or off,
+its min/max range, and its color.
 
 
-STEP-BY-STEP: APPLYING SETTINGS TO ANOTHER SLIDE
--------------------------------------------------
+================================================================
+4. APPLYING SETTINGS TO ONE OPEN SLIDE (APPLY)
+================================================================
 
-  1. Open the target slide (the one you want to update).
+APPLY updates only the currently open image.
 
-  2. In the script editor, change the top of the script to:
+Steps:
+
+  1. Open the target slide in QuPath.
+
+  2. Set the top of the script:
 
        def MODE = "APPLY"
-       def PRESET_NAME = "default"    (or whatever name you used)
+       def PRESET_NAME = "default"
+       def MATCH_MODE = "EXACT"
 
-  3. Click "Run".
+  3. Click Run.
 
-  4. The display settings will update immediately. The log will
-     show which channels matched and which were skipped.
-
-     Skipped channels are normal -- they just mean the target
-     slide has a marker that wasn't on the source slide (or
-     vice versa). For example, the 40xxx slides don't have BCL6,
-     so that channel will be skipped if you captured settings
-     from a Bxxx slide.
-
-  5. Repeat for each slide: just open the next slide and re-run.
-     You don't need to re-capture.
+The image display updates immediately. If colors changed, the script
+updates the image server metadata for the current image. Save the
+image/project in QuPath if you want this single-image APPLY persisted.
 
 
-STEP-BY-STEP: APPLYING SETTINGS TO ALL SLIDES (APPLY_ALL)
-----------------------------------------------------------
+================================================================
+5. APPLYING SETTINGS TO EVERY PROJECT IMAGE (APPLY_ALL)
+================================================================
 
-This generates a QuPath-native display preset that works on
-every slide in the project. You only need to run it once, then
-select the preset from the Brightness & Contrast dropdown on
-each slide.
+APPLY_ALL applies the captured preset to every image entry in the
+current QuPath project.
 
-  1. First, run CAPTURE on your reference slide (see above).
+This is the main v2 change: APPLY_ALL does not open each image in the
+viewer. It reads each project entry's ImageData, applies the display
+settings through QuPath's ImageDisplay API, and saves that same entry.
 
-  2. In the script editor, change the top of the script to:
+Steps:
+
+  1. First run CAPTURE on the reference slide.
+
+  2. Set the top of the script:
 
        def MODE = "APPLY_ALL"
-       def PRESET_NAME = "default"    (or whatever name you used)
+       def PRESET_NAME = "default"
+       def MATCH_MODE = "EXACT"
+       def BACKUP_BEFORE_APPLY_ALL = true
+       def DRY_RUN = false
 
-  3. Click "Run". You do NOT need any particular slide open --
-     APPLY_ALL reads channel information from the project file,
-     not from the viewer.
+  3. Click the normal Run button.
 
-  4. The script generates a file called "auto_default.json"
-     (or "auto_<your preset name>.json") inside the
-     resources/display/ folder of this project.
+APPLY_ALL will:
 
-  5. Now, for each slide:
-     a. Open the slide
-     b. Open Brightness & Contrast  (View > Brightness & Contrast,
-        or Shift+C)
-     c. Click the preset dropdown at the top of the B&C panel
-     d. Select "auto_default" (or "auto_<your preset name>")
-     e. The display updates instantly
+  - Create a timestamped backup if BACKUP_BEFORE_APPLY_ALL is true
+  - Loop through project.getImageList()
+  - Read each entry with entry.readImageData()
+  - Apply min/max and visibility through ImageDisplay.create(imageData)
+  - Apply colors through imageData.updateServerMetadata(...)
+  - Save with entry.saveImageData(imageData)
+  - Sync the project at the end
 
-  This is faster than running APPLY on each slide individually
-  because you don't need to re-run the script -- just select
-  the preset from the dropdown.
+Backups are written inside:
+
+  backups/pre_transfer_display_v2_YYYY-MM-DD_HHMMSS/
+
+Existing backups are not copied into the new backup.
 
 
-TIPS
+================================================================
+6. OPTIONS AT THE TOP OF THE SCRIPT
+================================================================
+
+MODE
 ----
-  - You can create multiple presets with different PRESET_NAMEs.
-    For example, capture one set of settings called "TLS_view"
-    with only CD3+B220+H3NUCA visible, and another called
-    "full_panel" with everything turned on. Running APPLY_ALL
-    on each generates a separate dropdown entry.
 
-  - The preset files are plain JSON stored in:
-      saved_display_presets/default.json  (etc.)
-    You can look at them in any text editor to see what was saved.
+  def MODE = "CAPTURE"
 
-  - The script only changes display settings (brightness/contrast
-    and which channels are visible). It does NOT change your
-    annotations, detections, or any analysis results.
+Allowed values:
 
-  - Duplicate markers (e.g. two HEM channels) are handled
-    automatically by numbering them (HEM_1, HEM_2). The script
-    matches them in the same order they appear in each image.
+  CAPTURE    Save display settings from the open viewer.
+  APPLY      Apply a preset to the currently open image.
+  APPLY_ALL  Apply a preset to every image in the current project.
 
 
-================================================================
-2. FINDING YOUR ANNOTATIONS
-================================================================
+PRESET_NAME
+-----------
 
-Currently, annotations exist ONLY on slide B171. All other slides
-show only the root object (no annotations drawn). Here is how to
-check this and what to look for if annotations seem missing.
+  def PRESET_NAME = "default"
 
+The preset file is stored as:
 
-WHERE ANNOTATIONS LIVE IN QUPATH
---------------------------------
+  saved_display_presets/default.json
 
-  - Click the "Annotations" tab in the left-hand panel. If you
-    don't see it, look for the tab icons on the left side of the
-    QuPath window -- the annotations tab has a pen/pencil icon.
+Use different names for different display styles, for example:
 
-  - If the tab shows "No annotations", that slide genuinely has
-    no annotations saved to it.
+  TLS_view
+  full_panel
+  CD3_B220_H3
 
 
-COMMON REASONS ANNOTATIONS SEEM MISSING
-----------------------------------------
+MATCH_MODE
+----------
 
-  a) Wrong slide open
-     The annotations are on B171_multichannel.ome.tiff. If you
-     have a different slide open, the annotations tab will be
-     empty because annotations are per-slide.
+  def MATCH_MODE = "EXACT"
 
-  b) Annotations not visible on the image
-     Annotations might exist but be invisible. Toggle visibility:
-       - Press the "A" key on your keyboard, or
-       - Go to View > Show annotations (make sure it's checked)
-     Also check View > Show annotation names if you want labels.
+EXACT matches full QuPath display channel names. This is preferred
+when channel names match across slides.
 
-  c) Annotations drawn but never saved
-     QuPath does NOT auto-save annotations. After drawing or
-     editing annotations, you must save:
-       - Press Cmd+S (Mac) or Ctrl+S (Windows), or
-       - File > Save
-     If QuPath was closed or the slide was switched without
-     saving, the annotations are lost. There is no undo for this.
+  def MATCH_MODE = "MARKER"
 
-  d) Annotations are outside the current viewport
-     If you are zoomed into a specific region, the annotations
-     may be in a different part of the slide. Zoom out (scroll
-     down or press Cmd+0 / Ctrl+0 to fit the whole slide) to
-     check if annotations are elsewhere.
-
-  e) Annotation opacity is set to zero
-     Go to View > Show annotations and also check the opacity
-     slider at the bottom of the Annotations panel. If opacity
-     is at zero, annotations exist but are invisible.
+MARKER strips the staining prefix and matches by marker name. This is
+only for projects where the same marker has different full names on
+different slides.
 
 
-HOW TO VERIFY ANNOTATIONS EXIST (WITHOUT QUPATH)
--------------------------------------------------
-
-  Each slide's data is stored in the "data" subfolder of this
-  project, in numbered subfolders (1, 2, 3, ... 29). Inside each
-  subfolder is a file called "summary.json" that records the
-  object count.
-
-  For the B171 slide (folder "data/21/summary.json"), you will
-  see:  "nObjects": 19  and  "Annotations": 18
-
-  For all other slides, you will see:  "nObjects": 1
-  (that 1 is just the root object, meaning no annotations).
-
-  The actual annotation geometry is stored in the binary
-  "data.qpdata" file in the same folder. This file can only
-  be read by QuPath.
-
-
-BEST PRACTICES FOR ANNOTATIONS GOING FORWARD
----------------------------------------------
-
-  - ALWAYS press Cmd+S (Mac) or Ctrl+S (Windows) after drawing
-    or modifying annotations. Do this before switching slides.
-
-  - When you switch slides in QuPath, it will ask "Save changes?"
-    if you have unsaved work. Always click "Save".
-
-  - To copy annotations from one slide to another (rare, but
-    possible), see the QuPath docs on exporting/importing objects
-    or use the built-in: Objects > Annotations > Transfer last
-    annotation.
-
-
-================================================================
-3. MAC FILEPATH TROUBLESHOOTING
-================================================================
-
-The Mac version of this project (project-MAC_AP.qpproj) uses
-paths starting with:
-
-  /Volumes/Coussens-Secure/Multiplex_IHC_studies/...
-
-This path depends on the network share being mounted with the
-exact name "Coussens-Secure". macOS sometimes changes the mount
-point name by appending numbers (Coussens-Secure-1, etc.),
-especially after reconnecting or waking from sleep.
-
-
-IF IMAGES FAIL TO LOAD
+BACKUP_BEFORE_APPLY_ALL
 -----------------------
 
-  1. Check the current mount name:
-     - Open Finder
-     - Look in the sidebar under "Locations" or "Network"
-     - The share should appear as "Coussens-Secure"
-     - If it shows "Coussens-Secure-1" or similar, that's the
-       problem
+  def BACKUP_BEFORE_APPLY_ALL = true
 
-  2. Fix the mount name:
-     - Eject/disconnect the share (right-click > Eject)
-     - Reconnect: in Finder, press Cmd+K
-     - Enter the server address and connect
-     - It should remount as "Coussens-Secure" (without a number)
-
-  3. If it still mounts with a number:
-     - Eject ALL versions of the share
-     - Wait a few seconds
-     - Reconnect
-
-  4. Nuclear option: restart the Mac, then reconnect the share
-     before opening QuPath.
+When true, APPLY_ALL backs up the project folder before saving any
+changes. Leave this on unless you have already made your own backup.
 
 
-PREVENTING THIS PROBLEM
-------------------------
+DRY_RUN
+-------
 
-  - Always eject the share before closing the laptop lid or
-    letting it sleep.
+  def DRY_RUN = false
 
-  - Connect to the share BEFORE opening QuPath.
+Set this to true to test matching and logging without saving changes:
 
-  - If the share name changes while QuPath is open, QuPath will
-    show errors for the images. Close QuPath, fix the mount (see
-    above), then reopen QuPath.
+  def DRY_RUN = true
 
-  - The project file (project-MAC_AP.qpproj) is a plain JSON
-    text file. In an emergency, you can open it in a text editor
-    and find-replace "/Volumes/Coussens-Secure-1/" with
-    "/Volumes/Coussens-Secure/" to fix all paths at once. Make
-    a backup copy first.
+Dry runs do not create backups because they do not write changes.
 
 
 ================================================================
-4. METHODS (HOW THE SCRIPT WORKS)
+7. NOTES AND TROUBLESHOOTING
 ================================================================
 
-This section explains the mechanics of the display settings
-transfer script for documentation or methods sections.
+Use normal Run, not Run for project.
+
+If APPLY_ALL reports skipped channels:
+
+  - In EXACT mode, skipped means the channel name was not present in
+    the captured preset.
+  - Check whether the displayed channel names include suffixes like
+    "(C1)".
+  - If exact names really differ by slide, use MATCH_MODE = "MARKER".
+
+If CAPTURE saves the wrong settings:
+
+  - CAPTURE records whatever the viewer is currently showing.
+  - Re-adjust the Brightness & Contrast panel and run CAPTURE again
+    using the same PRESET_NAME to overwrite that preset.
+
+If APPLY updates the display but not after reopening:
+
+  - Single-image APPLY modifies the open image.
+  - Save the image/project in QuPath after APPLY if you want that
+    single-image change persisted.
+  - APPLY_ALL saves each project entry automatically.
+
+If you want to inspect a preset:
+
+  - Open the JSON file in saved_display_presets/.
+  - Each channel entry stores name, serverName, min, max, show, and
+    color.
 
 
-OVERVIEW
+================================================================
+8. METHODS
+================================================================
+
+QuPath stores display state in two places:
+
+  - Channel colors are part of image server metadata.
+  - Min/max display ranges and channel visibility are stored in
+    ImageData properties under QuPath's ImageDisplay property.
+
+CAPTURE uses the open viewer:
+
+  viewer.getImageDisplay()
+  imageDisplay.availableChannels()
+  imageDisplay.selectedChannels()
+
+For each channel, CAPTURE records:
+
+  - ch.getName()
+  - ch.getMinDisplay()
+  - ch.getMaxDisplay()
+  - selected/not selected
+  - ch.getColor()
+
+APPLY_ALL avoids GUI image switching. For each project image entry,
+it uses:
+
+  entry.readImageData()
+  ImageDisplay.create(imageData)
+  imageDisplay.setMinMaxDisplay(...)
+  imageDisplay.setChannelSelected(...)
+  imageData.updateServerMetadata(...)
+  entry.saveImageData(imageData)
+  project.syncChanges()
+
+This avoids the old viewer-loop approach:
+
+  qupath.openImageEntry(entry)
+  getCurrentViewer()
+  viewer.setImageData(...)
+
+Those viewer-based project loops caused save prompts, JavaFX timing
+issues, and project-entry mixups. The v2 APPLY_ALL path keeps each
+entry paired with its own ImageData from read through save.
+
+
+SOFTWARE
 --------
 
-Multiplex immunohistochemistry images in this project are
-multi-channel OME-TIFF files produced by iterative staining
-and registered into composite images. Each channel is named
-with a convention encoding the experiment, slide identifier,
-staining cycle, round, and marker:
-
-  NK_{experiment}_{slideID}_C{cycle}R{round}_{marker}
-
-For example:
-  NK_SCREEN_B171_C02R2_CD3_fixed
-  NK_3xTLS_403932_C01R1_B220
-
-Because channel names include slide-specific prefixes, QuPath's
-built-in display settings (which match channels by exact name)
-cannot transfer between slides. The script addresses this by
-matching on the marker portion of the name only.
-
-
-CAPTURE STEP
-------------
-
-When run in CAPTURE mode, the script reads the current image's
-display state from the QuPath viewer via the ImageDisplay API.
-For each channel, it records:
-
-  - The minimum and maximum display intensity values (the
-    brightness/contrast window)
-  - Whether the channel is currently visible
-
-It extracts the marker name from each channel name using a
-regular expression that strips the experiment/slide/cycle
-prefix:
-
-  Pattern:  NK_\w+_\w+_C\d+R\d+_(.+?)(\s*\(C\d+\))?$
-
-  This captures the marker portion (e.g., "CD3_fixed", "B220",
-  "PANCK", "BCL6") while discarding the slide-specific prefix
-  and any trailing channel index notation like "(C1)".
-
-When a marker name appears more than once in the same image
-(e.g., two HEM channels from different staining rounds), the
-script appends a numeric suffix (HEM_1, HEM_2) and matches
-them in the order they appear in the channel list.
-
-The captured settings are saved as a JSON file in the
-saved_display_presets/ subfolder of the project directory,
-keyed by uppercase marker name.
-
-
-APPLY STEP (SINGLE SLIDE)
---------------------------
-
-When run in APPLY mode, the script reads the saved preset,
-then iterates through the current image's channels. For each
-channel, it extracts the marker name using the same regular
-expression, looks up the corresponding entry in the preset,
-and applies the stored min/max display range and visibility
-state via QuPath's ImageDisplay.setMinMaxDisplay() and
-ImageDisplay.setChannelSelected() methods.
-
-Channels whose marker name has no match in the preset (e.g.,
-a marker that was not present on the source slide) are left
-unchanged with a log message.
-
-
-APPLY_ALL STEP (ALL SLIDES)
------------------------------
-
-APPLY_ALL does not open individual images. Instead, it reads
-the project file (the .qpproj JSON file) to obtain the
-channel names and original colors for every image in the
-project. For each channel name across all images, it:
-
-  1. Extracts the marker name using the same regex
-  2. Looks up the saved display settings for that marker
-  3. Converts the channel's original packed-integer color
-     from the project metadata into RGB components
-  4. Builds a display preset entry with the original channel
-     name, the transferred min/max and visibility settings,
-     and the original color
-
-All entries are collected into a single JSON file written to
-resources/display/ in QuPath's native display preset format.
-This file contains entries for every unique channel name in
-the project (typically ~150-200 entries across all slides).
-
-When the user selects this preset from QuPath's Brightness &
-Contrast panel, QuPath matches entries by channel name. Only
-channels belonging to the currently open image are matched;
-entries for other images' channels are silently ignored. This
-allows a single preset file to serve all images in the project.
-
-Channel colors are preserved from the original image metadata
-and are not modified by the transfer. Only the display
-intensity window (min/max) and channel visibility are changed.
-
-
-SOFTWARE VERSIONS
------------------
-
-  - QuPath 0.5.1+ (tested with project format version 0.5.1)
-  - Script language: Groovy (QuPath built-in script editor)
-  - JSON handling: Google Gson (bundled with QuPath)
-  - No external dependencies or plugins required
+  - QuPath 0.7.0
+  - Script language: Groovy in QuPath's built-in script editor
+  - JSON handling: Google Gson bundled with QuPath
+  - No external dependencies required

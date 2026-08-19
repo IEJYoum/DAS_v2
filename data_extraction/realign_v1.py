@@ -63,12 +63,14 @@ SPARSE_GRID_SIZE = 5
 SPARSE_GRID_CELLS_1BASED = [(2, 2), (2, 4), (4, 2), (4, 4)]
 SPARSE_REGION_SIZE = 1000
 SPARSE_REGION_MEAN_FACTOR = 1.0
+AFFINE_ITERATIONS = 0
 AFFINE_ROTATION_ITERATIONS = 0
 AFFINE_ROTATION_DEGREES = 1.0
 AFFINE_ROTATION_SPLIT = 1
 AFFINE_ROTATION_CENTROID_SQRT = 1
 AFFINE_SHEAR_STEPS = 0
 AFFINE_SHEAR_DEGREES = 1.0
+AFFINE_SHEAR_CENTROID_SQRT = 1
 POST_AFFINE_TRANSLATION = False
 POST_AFFINE_TRANSLATION_RADIUS = 2
 POST_AFFINE_SUBPIXEL = False
@@ -150,28 +152,44 @@ def _symmetric_values(max_abs, split):
 def prompt_registration_settings():
     global USE_SPARSE_HIGHRES_SCORE
     global SPARSE_REGION_SIZE
+    global AFFINE_ITERATIONS
     global AFFINE_ROTATION_ITERATIONS
     global AFFINE_ROTATION_DEGREES
     global AFFINE_ROTATION_SPLIT
     global AFFINE_ROTATION_CENTROID_SQRT
     global AFFINE_SHEAR_STEPS
+    global AFFINE_SHEAR_DEGREES
+    global AFFINE_SHEAR_CENTROID_SQRT
     global POST_AFFINE_TRANSLATION
     global POST_AFFINE_SUBPIXEL
 
     print("\nregistration settings; Enter/use accepts each current default")
     SPARSE_REGION_SIZE = check_setting(SPARSE_REGION_SIZE, "Full-res subset edge length in pixels (<100 = no subset)", int, min_value=0)
     USE_SPARSE_HIGHRES_SCORE = int(SPARSE_REGION_SIZE) >= 100
-    AFFINE_ROTATION_ITERATIONS = check_setting(AFFINE_ROTATION_ITERATIONS, "Rotation iterations", int, min_value=0)
-    if AFFINE_ROTATION_ITERATIONS > 0:
-        AFFINE_ROTATION_DEGREES = check_setting(AFFINE_ROTATION_DEGREES, "Rotation degrees", float, min_value=0.0)
-        AFFINE_ROTATION_SPLIT = check_setting(AFFINE_ROTATION_SPLIT, "Rotation split", int, min_value=1)
-        AFFINE_ROTATION_CENTROID_SQRT = check_setting(
-            AFFINE_ROTATION_CENTROID_SQRT,
-            "sqrt(rotation centroid count)",
-            int,
-            min_value=1,
-        )
-    AFFINE_SHEAR_STEPS = check_setting(AFFINE_SHEAR_STEPS, "Shear steps", int, min_value=0)
+    AFFINE_ITERATIONS = check_setting(AFFINE_ITERATIONS, "Rotation/shear iterations", int, min_value=0)
+    if AFFINE_ITERATIONS > 0:
+        AFFINE_ROTATION_ITERATIONS = check_setting(AFFINE_ROTATION_ITERATIONS, "Rotation iterations (0 = none)", int, min_value=0)
+        if AFFINE_ROTATION_ITERATIONS > 0:
+            AFFINE_ROTATION_DEGREES = check_setting(AFFINE_ROTATION_DEGREES, "Rotation degrees", float, min_value=0.0)
+            AFFINE_ROTATION_SPLIT = check_setting(AFFINE_ROTATION_SPLIT, "Rotation split", int, min_value=1)
+            AFFINE_ROTATION_CENTROID_SQRT = check_setting(
+                AFFINE_ROTATION_CENTROID_SQRT,
+                "sqrt(rotation centroid count)",
+                int,
+                min_value=1,
+            )
+        AFFINE_SHEAR_STEPS = check_setting(AFFINE_SHEAR_STEPS, "Shear steps", int, min_value=0)
+        if AFFINE_SHEAR_STEPS > 0:
+            AFFINE_SHEAR_DEGREES = check_setting(AFFINE_SHEAR_DEGREES, "Shear degrees", float, min_value=0.0)
+            AFFINE_SHEAR_CENTROID_SQRT = check_setting(
+                AFFINE_SHEAR_CENTROID_SQRT,
+                "sqrt(shear centroid count)",
+                int,
+                min_value=1,
+            )
+    else:
+        AFFINE_ROTATION_ITERATIONS = 0
+        AFFINE_SHEAR_STEPS = 0
     POST_AFFINE_TRANSLATION = check_bool_setting(POST_AFFINE_TRANSLATION, "Post affine translation")
     if POST_AFFINE_TRANSLATION:
         POST_AFFINE_SUBPIXEL = check_bool_setting(POST_AFFINE_SUBPIXEL, "Subpixel post affine translation")
@@ -188,12 +206,14 @@ def registration_settings_text():
         "  full_res_subset_enabled=" + str(bool(USE_SPARSE_HIGHRES_SCORE)),
         "  full_res_subset_edge_px=" + str(int(SPARSE_REGION_SIZE)),
         "  subset_min_pixels=" + str(int(SPARSE_HIGHRES_MIN_TOTAL_PIXELS)),
+        "  affine_iterations=" + str(int(AFFINE_ITERATIONS)),
         "  rotation_iterations=" + str(int(AFFINE_ROTATION_ITERATIONS)),
         "  rotation_degrees=" + "{:g}".format(float(AFFINE_ROTATION_DEGREES)),
         "  rotation_split=" + str(int(AFFINE_ROTATION_SPLIT)),
         "  rotation_centroid_sqrt=" + str(int(AFFINE_ROTATION_CENTROID_SQRT)),
         "  shear_steps=" + str(int(AFFINE_SHEAR_STEPS)),
         "  shear_degrees=" + "{:g}".format(float(AFFINE_SHEAR_DEGREES)),
+        "  shear_centroid_sqrt=" + str(int(AFFINE_SHEAR_CENTROID_SQRT)),
         "  post_affine_translation=" + str(bool(POST_AFFINE_TRANSLATION)),
         "  post_affine_radius=" + str(int(POST_AFFINE_TRANSLATION_RADIUS)),
         "  subpixel_post_affine=" + str(bool(POST_AFFINE_SUBPIXEL)),
@@ -439,11 +459,17 @@ class RegistrationDebugReporter:
                 mode_text += " regions=" + str(payload.get("sample_regions"))
             if str(payload.get("sample_pixels", "")).strip() != "":
                 mode_text += " sample_pixels=" + str(payload.get("sample_pixels"))
+        phase_text = ""
+        if str(payload.get("affine_phase", "")).strip() != "":
+            phase_text = " | phase=" + str(payload.get("affine_phase"))
         rotation_text = ""
         if str(payload.get("rotation_deg", "")).strip() != "":
             rotation_text = " | rotation=" + str(payload.get("rotation_deg")) + "deg"
-            if str(payload.get("rotation_center_y", "")).strip() != "" and str(payload.get("rotation_center_x", "")).strip() != "":
-                rotation_text += " center=(" + "{:.1f}".format(float(payload.get("rotation_center_y"))) + ", " + "{:.1f}".format(float(payload.get("rotation_center_x"))) + ")"
+        center_text = ""
+        center_y = payload.get("affine_center_y", payload.get("rotation_center_y", ""))
+        center_x = payload.get("affine_center_x", payload.get("rotation_center_x", ""))
+        if str(center_y).strip() != "" and str(center_x).strip() != "":
+            center_text = " | center=(" + "{:.1f}".format(float(center_y)) + ", " + "{:.1f}".format(float(center_x)) + ")"
         shear_text = ""
         if str(payload.get("shear_x_deg", "")).strip() != "" or str(payload.get("shear_y_deg", "")).strip() != "":
             shear_text = (
@@ -470,12 +496,14 @@ class RegistrationDebugReporter:
             + str(payload.get("scale", "NA"))
             + count_text
             + mode_text
+            + phase_text
             + " | best_shift=("
             + _format_pixel(payload.get("best_dy", 0))
             + ", "
             + _format_pixel(payload.get("best_dx", 0))
             + ")"
             + rotation_text
+            + center_text
             + shear_text
             + " | loss="
             + _format_loss(payload.get("best_score"))
@@ -501,11 +529,16 @@ class RegistrationDebugReporter:
             "sample_regions\t" + str(payload.get("sample_regions", "")),
             "sample_pixels\t" + str(payload.get("sample_pixels", "")),
             "affine_iteration\t" + str(payload.get("affine_iteration", "")),
+            "affine_phase\t" + str(payload.get("affine_phase", "")),
+            "affine_center_y\t" + str(payload.get("affine_center_y", "")),
+            "affine_center_x\t" + str(payload.get("affine_center_x", "")),
             "rotation_deg\t" + str(payload.get("rotation_deg", "")),
             "rotation_center_y\t" + str(payload.get("rotation_center_y", "")),
             "rotation_center_x\t" + str(payload.get("rotation_center_x", "")),
             "shear_y_deg\t" + str(payload.get("shear_y_deg", "")),
             "shear_x_deg\t" + str(payload.get("shear_x_deg", "")),
+            "shear_center_y\t" + str(payload.get("shear_center_y", "")),
+            "shear_center_x\t" + str(payload.get("shear_center_x", "")),
             "rotation_baseline_loss\t" + _format_loss(payload.get("baseline_score")),
             "overlay_path\t" + str(self.overlay_path),
             "elapsed_min\t" + "{:.3f}".format((time.time() - self.start_time) / 60.0),
@@ -1026,9 +1059,9 @@ def build_affine_score_regions(fixed, fixed_mask):
     }, "full"
 
 
-def rotation_centers_for_shape(shape):
+def affine_centers_for_shape(shape, centroid_sqrt):
     h, w = shape
-    grid = max(1, int(AFFINE_ROTATION_CENTROID_SQRT))
+    grid = max(1, int(centroid_sqrt))
     centers = []
     for node_y in range(1, grid + 1):
         for node_x in range(1, grid + 1):
@@ -1036,6 +1069,14 @@ def rotation_centers_for_shape(shape):
             cx = (float(node_x) / float(grid + 1)) * float(w - 1)
             centers.append((cy, cx))
     return centers
+
+
+def rotation_centers_for_shape(shape):
+    return affine_centers_for_shape(shape, AFFINE_ROTATION_CENTROID_SQRT)
+
+
+def shear_centers_for_shape(shape):
+    return affine_centers_for_shape(shape, AFFINE_SHEAR_CENTROID_SQRT)
 
 
 def inverse_affine_coords(y_coords, x_coords, affine_matrix):
@@ -1094,13 +1135,15 @@ def score_affine_transform_regions(fixed, moving, fixed_mask, moving_mask, sampl
 
 def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(0, 0), progress_callback=None):
     start_matrix = translation_matrix(float(start_shift[0]), float(start_shift[1]))
-    if int(AFFINE_ROTATION_ITERATIONS) <= 0 and int(AFFINE_SHEAR_STEPS) <= 0 and not bool(POST_AFFINE_TRANSLATION):
+    affine_iterations = max(0, int(AFFINE_ITERATIONS))
+    rotation_iterations = max(0, int(AFFINE_ROTATION_ITERATIONS))
+    shear_steps = max(0, int(AFFINE_SHEAR_STEPS))
+    rotation_enabled = affine_iterations > 0 and rotation_iterations > 0 and float(AFFINE_ROTATION_DEGREES) > 0.0
+    shear_enabled = affine_iterations > 0 and shear_steps > 0 and float(AFFINE_SHEAR_DEGREES) > 0.0
+    if not rotation_enabled and not shear_enabled and not bool(POST_AFFINE_TRANSLATION):
         return _empty_affine_result(start_matrix)
     score_regions, score_mode = build_affine_score_regions(fixed, fixed_mask)
     if score_regions is None:
-        return _empty_affine_result(start_matrix)
-    centers = rotation_centers_for_shape(fixed.shape)
-    if not centers:
         return _empty_affine_result(start_matrix)
 
     dy = float(start_shift[0])
@@ -1120,24 +1163,32 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
     best_rotation = 0.0
     best_shear_y = 0.0
     best_shear_x = 0.0
-    best_center = default_center
-    rotation_values = [0.0]
-    if int(AFFINE_ROTATION_ITERATIONS) > 0:
-        rotation_values = _symmetric_values(AFFINE_ROTATION_DEGREES, AFFINE_ROTATION_SPLIT)
-    shear_values = [0.0]
-    if int(AFFINE_SHEAR_STEPS) > 0:
+    best_rotation_center = default_center
+    best_shear_center = default_center
+    active_center = default_center
+
+    rotation_values = []
+    rotation_centers = []
+    if rotation_enabled:
+        rotation_values = _symmetric_nonzero_values(AFFINE_ROTATION_DEGREES, AFFINE_ROTATION_SPLIT)
+        rotation_centers = rotation_centers_for_shape(fixed.shape)
+        rotation_enabled = len(rotation_values) > 0 and len(rotation_centers) > 0
+
+    shear_values = []
+    shear_centers = []
+    if shear_enabled:
         shear_values = _symmetric_values(AFFINE_SHEAR_DEGREES, AFFINE_SHEAR_STEPS)
-    iterations = max(int(AFFINE_ROTATION_ITERATIONS), 1 if int(AFFINE_SHEAR_STEPS) > 0 else 0)
-    candidate_count = 0
-    for _center in centers:
-        for angle in rotation_values:
-            for shear_y in shear_values:
-                for shear_x in shear_values:
-                    if abs(angle) < 1e-12 and abs(shear_y) < 1e-12 and abs(shear_x) < 1e-12:
-                        continue
-                    candidate_count += 1
-    total = max(0, iterations * candidate_count)
+        shear_centers = shear_centers_for_shape(fixed.shape)
+        shear_enabled = len(shear_values) > 0 and len(shear_centers) > 0
+
+    rotation_candidate_count = len(rotation_centers) * len(rotation_values)
+    shear_candidate_count = 0
+    if shear_enabled:
+        shear_candidate_count = len(shear_centers) * max(0, (len(shear_values) * len(shear_values)) - 1)
+    rotation_passes = min(affine_iterations, rotation_iterations) if rotation_enabled else 0
+    total = (rotation_passes * rotation_candidate_count) + (affine_iterations * shear_candidate_count)
     tested = 0
+
     if callable(progress_callback):
         progress_callback(
             _affine_payload(
@@ -1147,8 +1198,8 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                 dy,
                 dx,
                 0,
-                0.0,
-                best_center,
+                best_rotation,
+                active_center,
                 best_shear_y,
                 best_shear_x,
                 current_score,
@@ -1157,34 +1208,118 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                 score_regions,
                 current_matrix,
                 baseline_score,
+                phase="start",
+                rotation_center=best_rotation_center,
+                shear_center=best_shear_center,
             )
         )
-    for iteration in range(1, iterations + 1):
-        iteration_score = current_score
-        iteration_overlap = current_overlap
-        iteration_matrix = current_matrix
-        iteration_rotation = best_rotation
-        iteration_shear_y = best_shear_y
-        iteration_shear_x = best_shear_x
-        iteration_center = best_center
-        improved = False
-        for center in centers:
-            for angle in rotation_values:
+
+    def better_score(candidate_score, candidate_overlap, best_score, best_overlap):
+        return candidate_score < best_score or (candidate_score == best_score and candidate_overlap > best_overlap)
+
+    for iteration in range(1, affine_iterations + 1):
+        iteration_improved = False
+
+        if rotation_enabled and iteration <= rotation_iterations:
+            phase_base_matrix = current_matrix
+            phase_base_rotation = best_rotation
+            phase_score = current_score
+            phase_overlap = current_overlap
+            phase_matrix = current_matrix
+            phase_rotation = best_rotation
+            phase_center = best_rotation_center
+            phase_improved = False
+
+            for center in rotation_centers:
+                for angle in rotation_values:
+                    tested += 1
+                    delta_matrix = forward_affine_matrix(
+                        fixed.shape,
+                        0.0,
+                        0.0,
+                        angle,
+                        0.0,
+                        0.0,
+                        center,
+                    )
+                    candidate_matrix = delta_matrix.dot(phase_base_matrix)
+                    score, overlap = score_affine_transform_regions(
+                        fixed,
+                        moving,
+                        fixed_mask,
+                        moving_mask,
+                        score_regions,
+                        candidate_matrix,
+                    )
+                    if better_score(score, overlap, phase_score, phase_overlap):
+                        phase_score = score
+                        phase_overlap = overlap
+                        phase_matrix = candidate_matrix
+                        phase_rotation = phase_base_rotation + float(angle)
+                        phase_center = center
+                        phase_improved = True
+                        iteration_improved = True
+                    if callable(progress_callback):
+                        progress_callback(
+                            _affine_payload(
+                                "affine_progress",
+                                tested,
+                                total,
+                                dy,
+                                dx,
+                                iteration,
+                                phase_rotation,
+                                phase_center,
+                                best_shear_y,
+                                best_shear_x,
+                                phase_score,
+                                phase_overlap,
+                                score_mode,
+                                score_regions,
+                                phase_matrix,
+                                baseline_score,
+                                phase="rotation",
+                                rotation_center=phase_center,
+                                shear_center=best_shear_center,
+                            )
+                        )
+
+            if phase_improved:
+                current_matrix = phase_matrix
+                current_score = phase_score
+                current_overlap = phase_overlap
+                best_rotation = phase_rotation
+                best_rotation_center = phase_center
+                active_center = phase_center
+
+        if shear_enabled:
+            phase_base_matrix = current_matrix
+            phase_base_shear_y = best_shear_y
+            phase_base_shear_x = best_shear_x
+            phase_score = current_score
+            phase_overlap = current_overlap
+            phase_matrix = current_matrix
+            phase_shear_y = best_shear_y
+            phase_shear_x = best_shear_x
+            phase_center = best_shear_center
+            phase_improved = False
+
+            for center in shear_centers:
                 for shear_y in shear_values:
                     for shear_x in shear_values:
-                        if abs(angle) < 1e-12 and abs(shear_y) < 1e-12 and abs(shear_x) < 1e-12:
+                        if abs(shear_y) < 1e-12 and abs(shear_x) < 1e-12:
                             continue
                         tested += 1
                         delta_matrix = forward_affine_matrix(
                             fixed.shape,
                             0.0,
                             0.0,
-                            angle,
+                            0.0,
                             shear_x,
                             shear_y,
                             center,
                         )
-                        candidate_matrix = delta_matrix.dot(current_matrix)
+                        candidate_matrix = delta_matrix.dot(phase_base_matrix)
                         score, overlap = score_affine_transform_regions(
                             fixed,
                             moving,
@@ -1193,15 +1328,15 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                             score_regions,
                             candidate_matrix,
                         )
-                        if score < iteration_score or (score == iteration_score and overlap > iteration_overlap):
-                            iteration_score = score
-                            iteration_overlap = overlap
-                            iteration_matrix = candidate_matrix
-                            iteration_rotation = best_rotation + float(angle)
-                            iteration_shear_y = best_shear_y + float(shear_y)
-                            iteration_shear_x = best_shear_x + float(shear_x)
-                            iteration_center = center
-                            improved = True
+                        if better_score(score, overlap, phase_score, phase_overlap):
+                            phase_score = score
+                            phase_overlap = overlap
+                            phase_matrix = candidate_matrix
+                            phase_shear_y = phase_base_shear_y + float(shear_y)
+                            phase_shear_x = phase_base_shear_x + float(shear_x)
+                            phase_center = center
+                            phase_improved = True
+                            iteration_improved = True
                         if callable(progress_callback):
                             progress_callback(
                                 _affine_payload(
@@ -1211,25 +1346,31 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                                     dy,
                                     dx,
                                     iteration,
-                                    iteration_rotation,
-                                    iteration_center,
-                                    iteration_shear_y,
-                                    iteration_shear_x,
-                                    iteration_score,
-                                    iteration_overlap,
+                                    best_rotation,
+                                    phase_center,
+                                    phase_shear_y,
+                                    phase_shear_x,
+                                    phase_score,
+                                    phase_overlap,
                                     score_mode,
                                     score_regions,
-                                    iteration_matrix,
+                                    phase_matrix,
                                     baseline_score,
+                                    phase="shear",
+                                    rotation_center=best_rotation_center,
+                                    shear_center=phase_center,
                                 )
                             )
-        current_matrix = iteration_matrix
-        current_score = iteration_score
-        current_overlap = iteration_overlap
-        best_rotation = iteration_rotation
-        best_shear_y = iteration_shear_y
-        best_shear_x = iteration_shear_x
-        best_center = iteration_center
+
+            if phase_improved:
+                current_matrix = phase_matrix
+                current_score = phase_score
+                current_overlap = phase_overlap
+                best_shear_y = phase_shear_y
+                best_shear_x = phase_shear_x
+                best_shear_center = phase_center
+                active_center = phase_center
+
         if callable(progress_callback):
             progress_callback(
                 _affine_payload(
@@ -1240,7 +1381,7 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                     dx,
                     iteration,
                     best_rotation,
-                    best_center,
+                    active_center,
                     best_shear_y,
                     best_shear_x,
                     current_score,
@@ -1249,9 +1390,12 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                     score_regions,
                     current_matrix,
                     baseline_score,
+                    phase="iteration",
+                    rotation_center=best_rotation_center,
+                    shear_center=best_shear_center,
                 )
             )
-        if not improved:
+        if not iteration_improved:
             break
 
     post_result = _fit_post_affine_translation(
@@ -1266,7 +1410,7 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
         dy,
         dx,
         best_rotation,
-        best_center,
+        best_rotation_center,
         best_shear_y,
         best_shear_x,
         score_mode,
@@ -1281,9 +1425,13 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
     result = {
         "affine_matrix": current_matrix,
         "rotation_deg": float(best_rotation),
-        "rotation_center": (float(best_center[0]), float(best_center[1])),
+        "rotation_center": (float(best_rotation_center[0]), float(best_rotation_center[1])),
         "shear_y_deg": float(best_shear_y),
         "shear_x_deg": float(best_shear_x),
+        "shear_center": (float(best_shear_center[0]), float(best_shear_center[1])),
+        "affine_iterations": int(affine_iterations),
+        "rotation_iterations": int(rotation_iterations),
+        "shear_steps": int(shear_steps),
         "affine_score": current_score,
         "affine_baseline_score": baseline_score,
         "affine_overlap": current_overlap,
@@ -1305,6 +1453,7 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
         "rotation_sample_pixels": int(score_regions["sample_pixels"]),
     }
     if callable(progress_callback):
+        final_center = best_shear_center if (abs(best_shear_y) > 1e-12 or abs(best_shear_x) > 1e-12) else best_rotation_center
         progress_callback(
             _affine_payload(
                 "affine_done",
@@ -1312,9 +1461,9 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                 total,
                 dy,
                 dx,
-                iterations,
+                affine_iterations,
                 result["rotation_deg"],
-                result["rotation_center"],
+                final_center,
                 result["shear_y_deg"],
                 result["shear_x_deg"],
                 result["affine_score"],
@@ -1323,6 +1472,9 @@ def fit_final_affine_numpy(fixed, moving, fixed_mask, moving_mask, start_shift=(
                 score_regions,
                 result["affine_matrix"],
                 baseline_score,
+                phase="done",
+                rotation_center=result["rotation_center"],
+                shear_center=result["shear_center"],
             )
         )
     return result
@@ -1547,7 +1699,14 @@ def _affine_payload(
     score_regions,
     affine_matrix,
     baseline_score,
+    phase="",
+    rotation_center=None,
+    shear_center=None,
 ):
+    if rotation_center is None:
+        rotation_center = center
+    if shear_center is None:
+        shear_center = center
     return {
         "event": event,
         "scale": "affine",
@@ -1562,11 +1721,16 @@ def _affine_payload(
         "sample_pixels": int(score_regions["sample_pixels"]),
         "sample_regions": int(score_regions["sample_regions"]),
         "affine_iteration": iteration,
+        "affine_phase": str(phase),
+        "affine_center_y": float(center[0]),
+        "affine_center_x": float(center[1]),
         "rotation_deg": float(angle),
-        "rotation_center_y": float(center[0]),
-        "rotation_center_x": float(center[1]),
+        "rotation_center_y": float(rotation_center[0]),
+        "rotation_center_x": float(rotation_center[1]),
         "shear_y_deg": float(shear_y),
         "shear_x_deg": float(shear_x),
+        "shear_center_y": float(shear_center[0]),
+        "shear_center_x": float(shear_center[1]),
         "affine_matrix": np.asarray(affine_matrix, dtype=np.float64),
     }
 
@@ -1580,6 +1744,10 @@ def _empty_affine_result(start_matrix=None):
         "rotation_center": None,
         "shear_y_deg": 0.0,
         "shear_x_deg": 0.0,
+        "shear_center": None,
+        "affine_iterations": 0,
+        "rotation_iterations": 0,
+        "shear_steps": 0,
         "affine_score": None,
         "affine_baseline_score": None,
         "affine_overlap": None,
@@ -2191,10 +2359,18 @@ def run_steps(entries, ref_index, root, slide_scene):
                     "rotation_center_x": (entry.get("rotation_center") or ("", ""))[1],
                     "shear_y_deg": entry.get("shear_y_deg", 0.0),
                     "shear_x_deg": entry.get("shear_x_deg", 0.0),
+                    "shear_center_y": (entry.get("shear_center") or ("", ""))[0],
+                    "shear_center_x": (entry.get("shear_center") or ("", ""))[1],
                     "baseline_score": entry.get("affine_baseline_score"),
                     "affine_matrix": entry.get("affine_matrix"),
                 }
             )
+            if abs(float(entry.get("shear_y_deg", 0.0) or 0.0)) > 1e-12 or abs(float(entry.get("shear_x_deg", 0.0) or 0.0)) > 1e-12:
+                final_payload["affine_center_y"] = final_payload["shear_center_y"]
+                final_payload["affine_center_x"] = final_payload["shear_center_x"]
+            else:
+                final_payload["affine_center_y"] = final_payload["rotation_center_y"]
+                final_payload["affine_center_x"] = final_payload["rotation_center_x"]
             reporter(final_payload)
     return shifts
 
@@ -2253,6 +2429,8 @@ def save_scene(root, slide_scene, entries, ref_index, shifts, runtime_min):
             "rotation_sample_pixels",
             "shear_y_deg",
             "shear_x_deg",
+            "shear_center_y",
+            "shear_center_x",
             "affine_score",
             "affine_baseline_score",
             "affine_overlap",
@@ -2269,6 +2447,7 @@ def save_scene(root, slide_scene, entries, ref_index, shifts, runtime_min):
         ])
         for entry, shift in zip(entries, shifts):
             center = entry.get("rotation_center") or ("", "")
+            shear_center = entry.get("shear_center") or ("", "")
             matrix = np.asarray(entry_affine_matrix(entry, entry["shift"]), dtype=np.float64)
             writer.writerow([
                 slide_scene,
@@ -2288,6 +2467,8 @@ def save_scene(root, slide_scene, entries, ref_index, shifts, runtime_min):
                 entry.get("rotation_sample_pixels", ""),
                 entry.get("shear_y_deg", 0.0),
                 entry.get("shear_x_deg", 0.0),
+                shear_center[0],
+                shear_center[1],
                 _format_loss(entry.get("affine_score")),
                 _format_loss(entry.get("affine_baseline_score")),
                 entry.get("affine_overlap", ""),

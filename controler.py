@@ -1239,6 +1239,55 @@ def _launch_manual_roi_shift_adjuster() -> None:
 
 
 def startup_cell_segmentation(state: SessionState) -> None:
+    options = [
+        "StarDist segmentation",
+        "Mesmer segmentation",
+        "segmentation model training (standalone)",
+        "Cellpose segmentation (stub)",
+    ]
+    descriptions = [
+        "Run the current StarDist wrapper on one folder containing a DAPI/nuclear image.",
+        "Run the existing Mesmer DAS path.",
+        "Print the standalone training script and model-folder locations.",
+        "Placeholder for a future Cellpose runtime.",
+    ]
+    idx = menu_index("Cell Segmentation", options, option_descriptions=descriptions)
+    if idx is None:
+        return
+    if idx == 0:
+        _run_stardist_segmentation(state)
+    elif idx == 1:
+        _run_mesmer_segmentation(state)
+    elif idx == 2:
+        importlib.import_module("segmentation_bridge").print_training_standalone_note()
+    elif idx == 3:
+        io.iprint("Cellpose segmentation is not wired yet.")
+
+
+def _run_stardist_segmentation(state: SessionState) -> None:
+    default_input = state.segmentation_root or state.build_folder
+    default_output = state.segmentation_root or (state.build_folder / "segmentation_stardist")
+    old_input = builtins.input
+    old_print = builtins.print
+    old_cwd = os.getcwd()
+    builtins.input = io.iget
+    builtins.print = io.legacy_print
+    try:
+        os.chdir(str(state.build_folder))
+        output_root = importlib.import_module("segmentation_bridge").run_stardist_interactive(
+            default_input=default_input,
+            default_output=default_output,
+        )
+    finally:
+        builtins.input = old_input
+        builtins.print = old_print
+        os.chdir(old_cwd)
+    if output_root is not None:
+        _adopt_project_context(state, segmentation_root=Path(output_root).resolve())
+        io.iprint(f"segmentation root set to: {state.segmentation_root}")
+
+
+def _run_mesmer_segmentation(state: SessionState) -> None:
     old_input = builtins.input
     old_print = builtins.print
     old_cwd = os.getcwd()

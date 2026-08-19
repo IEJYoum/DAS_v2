@@ -4,6 +4,7 @@ import hashlib
 import json
 import copy
 import re
+import sys
 from pathlib import Path
 from datetime import datetime
 import numpy as np
@@ -17,6 +18,13 @@ try:
     import tifffile as tiff
 except Exception:
     tiff = None
+_SUPPORT_DIR = Path(__file__).resolve().parents[1] / "support"
+if str(_SUPPORT_DIR) not in sys.path:
+    sys.path.append(str(_SUPPORT_DIR))
+try:
+    from image_conventions import viewer_marker_label_from_path as convention_marker_label_from_path
+except Exception:
+    convention_marker_label_from_path = None
 
 OUTDIR = "HTML figs default"
 ASSETSDIR = os.path.join(OUTDIR, "assets")
@@ -922,8 +930,13 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
 
 
 def marker_from_tiff_path(path):
-    # NOTE: this duplicates marker_label_from_path in call_visu_html_7.py.
-    # The two should be combined into a single shared function in the future.
+    if callable(convention_marker_label_from_path):
+        try:
+            marker = str(convention_marker_label_from_path(path)).strip()
+            if marker != "":
+                return marker
+        except Exception:
+            pass
     name = os.path.splitext(os.path.basename(path))[0]
     # Strip ROI token at end if present (e.g. _ROI06)
     name = re.sub(r"(?i)_?ROI0*\d{1,3}$", "", name)
