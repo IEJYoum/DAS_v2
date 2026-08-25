@@ -55,6 +55,10 @@ except Exception:
     parse_viewer_asset_record = None
     convention_viewer_display_label = None
     convention_marker_label_from_path = None
+try:
+    import image_sources
+except Exception:
+    image_sources = None
 from shared_utils import (
     load_project_config_values,
     save_project_config_updates,
@@ -463,23 +467,34 @@ def build_core_tiles_from_asset_registry(out_root):
         if str(item.get("kind", "")).strip().lower() != "channel":
             continue
         tiff_path = str(item.get("tiff", "")).strip()
-        if tiff_path == "":
+        channel_source = item.get("channel_source")
+        if tiff_path == "" and not isinstance(channel_source, dict):
             continue
         slide_scene = normalize_slide_scene(item.get("slide_scene", ""))
         if slide_scene == "":
             continue
         if slide_scene not in by_scene:
-            by_scene[slide_scene] = []
-        append_unique(by_scene[slide_scene], tiff_path)
+            by_scene[slide_scene] = {"tiffs": [], "channel_sources": []}
+        if isinstance(channel_source, dict):
+            append_unique(by_scene[slide_scene]["channel_sources"], channel_source)
+        elif tiff_path != "":
+            append_unique(by_scene[slide_scene]["tiffs"], tiff_path)
 
     core_tiles = {}
     scene_names = sorted(list(by_scene.keys()), key=natural_sort_key)
     i = 0
     while i < len(scene_names):
         slide_scene = str(scene_names[i])
-        tiffs = list(by_scene.get(slide_scene, []))
+        scene_payload = by_scene.get(slide_scene, {})
+        tiffs = list(scene_payload.get("tiffs", []))
+        channel_sources = list(scene_payload.get("channel_sources", []))
         tiffs = sorted(tiffs, key=lambda p: natural_sort_key(marker_label_from_path(p)))
-        if len(tiffs) > 0:
+        channel_sources = sorted(channel_sources, key=lambda p: natural_sort_key(marker_label_from_path(p)))
+        channel_items = list(channel_sources) + list(tiffs)
+        source_paths = list(tiffs)
+        for source in channel_sources:
+            append_unique(source_paths, source_path_text(source))
+        if len(channel_items) > 0:
             core_tiles[slide_scene] = [{
                 "tile_kind": "composite",
                 "core": slide_scene,
@@ -489,10 +504,11 @@ def build_core_tiles_from_asset_registry(out_root):
                 "asset_type_id": "composite:tiff_stack",
                 "asset_type_label": "Composite (channel-selectable)",
                 "tiff_paths": list(tiffs),
+                "channel_sources": list(channel_sources),
                 "overlay_paths": [],
                 "figure_path": None,
-                "source_paths": list(tiffs),
-                "all_markers": marker_labels_from_paths(tiffs),
+                "source_paths": list(source_paths),
+                "all_markers": marker_labels_from_paths(channel_items),
             }]
         i += 1
     return core_tiles
@@ -924,6 +940,48 @@ def list_supported_files_one_level(folder):
 def is_supported_asset_file(fp):
     ext = os.path.splitext(fp)[1].lower()
     return ext in SUPPORTED_EXTS
+
+
+def is_ome_tiff_path(fp):
+    low = str(fp).strip().lower()
+    return low.endswith(".ome.tif") or low.endswith(".ome.tiff")
+
+
+def is_channel_source_spec(value):
+    if image_sources is None:
+        return False
+    source_cls = getattr(image_sources, "ChannelSource", None)
+    return isinstance(value, dict) or (source_cls is not None and isinstance(value, source_cls))
+
+
+def source_path_text(source):
+    if is_channel_source_spec(source):
+        try:
+            return str(image_sources.coerce_channel_source(source).path)
+        except Exception:
+            pass
+    return str(source)
+
+
+def split_tiff_channel_sources(tiffs):
+    single_tiffs = []
+    channel_sources = []
+    for fp in list(tiffs or []):
+        if image_sources is None or not is_ome_tiff_path(fp):
+            append_unique(single_tiffs, fp)
+            continue
+        try:
+            sources = image_sources.iter_channel_sources(fp)
+        except Exception as exc:
+            print("Could not inspect OME TIFF for viewer channels:", fp, exc)
+            append_unique(single_tiffs, fp)
+            continue
+        if len(sources) <= 1:
+            append_unique(single_tiffs, fp)
+            continue
+        for source in sources:
+            append_unique(channel_sources, image_sources.channel_source_to_json(source))
+    return single_tiffs, channel_sources
 
 
 def dedupe_keep_order(arr):
@@ -1747,6 +1805,15 @@ def resolve_template_for_scene(t, core_key, dir_cache):
 
 
 def marker_label_from_path(fp):
+    if is_channel_source_spec(fp):
+        try:
+            source = image_sources.coerce_channel_source(fp)
+            for label in (source.marker, source.channel_name):
+                text = str(label).strip()
+                if text != "":
+                    return text
+        except Exception:
+            pass
     if callable(convention_marker_label_from_path):
         try:
             marker = str(convention_marker_label_from_path(fp)).strip()
@@ -1754,7 +1821,7 @@ def marker_label_from_path(fp):
                 return marker
         except Exception:
             pass
-    name = os.path.splitext(os.path.basename(fp))[0]
+    name = os.path.splitext(os.path.basename(source_path_text(fp)))[0]
     # Strip ROI token at end if present (e.g. _ROI06)
     name = re.sub(r"(?i)_?ROI0*\d{1,3}$", "", name)
     # Strip _c0 / _ch0 channel suffixes
@@ -1854,6 +1921,7 @@ def build_core_buckets(scene_keys, scene_templates):
 def empty_bucket():
     return {
         "tiffs": [],
+        "channel_sources": [],
         "transparent_pngs": [],
         "opaque_pngs": [],
         "other_files": []
@@ -1925,6 +1993,9 @@ def _bucket_paths(bucket):
     for key in ["tiffs", "transparent_pngs", "opaque_pngs", "other_files", "overlay_paths", "source_paths"]:
         for fp in list(bucket.get(key, []) or []):
             append_unique(paths, str(fp))
+    for source in list(bucket.get("channel_sources", []) or []):
+        if is_channel_source_spec(source):
+            append_unique(paths, source_path_text(source))
     return paths
 
 
@@ -2022,6 +2093,7 @@ def build_identity_manifest_from_seed_viewer(seed_viewer):
     for core in core_tiles:
         slide_scene = ""
         tiffs = []
+        channel_sources = []
         overlays = []
         figs = []
         sources = []
@@ -2034,6 +2106,10 @@ def build_identity_manifest_from_seed_viewer(seed_viewer):
             for fp in list(tile.get("tiff_paths", []) or []):
                 append_unique(tiffs, str(fp))
                 append_unique(sources, str(fp))
+            for source in list(tile.get("channel_sources", []) or []):
+                if is_channel_source_spec(source):
+                    append_unique(channel_sources, source)
+                    append_unique(sources, source_path_text(source))
             for fp in list(tile.get("overlay_paths", []) or []):
                 append_unique(overlays, str(fp))
                 append_unique(sources, str(fp))
@@ -2056,6 +2132,7 @@ def build_identity_manifest_from_seed_viewer(seed_viewer):
             "slide_scene": slide_scene,
             "display_label": display_label_from_slide_scene(slide_scene),
             "tiffs": tiffs,
+            "channel_sources": channel_sources,
             "transparent_pngs": overlays,
             "opaque_pngs": figs,
             "other_files": [],
@@ -3764,6 +3841,7 @@ def make_missing_tile(core):
         "asset_type_id": "missing",
         "asset_type_label": "Missing",
         "tiff_paths": [],
+        "channel_sources": [],
         "overlay_paths": [],
         "figure_path": None,
         "source_paths": []
@@ -3772,14 +3850,18 @@ def make_missing_tile(core):
 
 def build_core_tile_specs(core_name, bucket):
     tiffs = list(bucket.get("tiffs", []))
+    channel_sources = list(bucket.get("channel_sources", []))
+    single_tiffs, expanded_sources = split_tiff_channel_sources(tiffs)
+    channel_sources = list(channel_sources) + list(expanded_sources)
     overlays = list(bucket.get("transparent_pngs", []))
     figs = list(bucket.get("opaque_pngs", [])) + list(bucket.get("other_files", []))
     slide_scene = normalize_slide_scene(bucket.get("slide_scene", "")) or normalize_slide_scene(core_name)
     display_label = str(bucket.get("display_label", "") or "").strip() or display_label_from_slide_scene(slide_scene) or slide_scene
 
     tiles = []
-    if len(tiffs) > 0:
-        markers = marker_labels_from_paths(tiffs)
+    if len(single_tiffs) > 0 or len(channel_sources) > 0:
+        channel_items = list(channel_sources) + list(single_tiffs)
+        markers = marker_labels_from_paths(channel_items)
         src_paths = list(tiffs) + list(overlays)
         tiles.append({
             "tile_kind": "composite",
@@ -3789,7 +3871,8 @@ def build_core_tile_specs(core_name, bucket):
             "display_label": display_label,
             "asset_type_id": "composite:tiff_stack",
             "asset_type_label": "Composite (channel-selectable)",
-            "tiff_paths": list(tiffs),
+            "tiff_paths": list(single_tiffs),
+            "channel_sources": list(channel_sources),
             "overlay_paths": list(overlays),
             "figure_path": None,
             "source_paths": src_paths,
@@ -3809,6 +3892,7 @@ def build_core_tile_specs(core_name, bucket):
             "asset_type_id": "figure:" + ftype,
             "asset_type_label": "Figure " + flabel,
             "tiff_paths": [],
+            "channel_sources": [],
             "overlay_paths": [],
             "figure_path": fp,
             "source_paths": [fp]
@@ -3828,6 +3912,7 @@ def build_core_tile_specs(core_name, bucket):
                 "asset_type_id": "figure:overlay",
                 "asset_type_label": "Figure Overlay",
                 "tiff_paths": [],
+                "channel_sources": [],
                 "overlay_paths": [],
                 "figure_path": fp,
                 "source_paths": [fp]

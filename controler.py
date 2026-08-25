@@ -81,6 +81,8 @@ PROJECTS_FILE = (APP_STATE_DIR / "projects.csv").resolve()
 PROJECT_COLUMNS = ["data_folder", "stem", "changed_at", "source_action", "session"]
 PROJECT_CONFIG_FILE = "project_config.txt"
 MASTER_CONFIG_PATH = (APP_STATE_DIR / PROJECT_CONFIG_FILE).resolve()
+SAFE_FALLBACK_PROJECT_ROOT = (APP_STATE_DIR / "fallback_project").resolve()
+FALLBACK_CONFIG_KEYS = ("fallback_data_folder", "fallback_project_folder", "safe_fallback_project_folder")
 
 _LEGACY_IFA5 = None
 _FEATURE_EXTRACTION_IFA = None
@@ -88,6 +90,7 @@ _SPECTRAL_FLOW_IFA = None
 _PROJECTS_DF_CACHE: Optional[pd.DataFrame] = None
 _MASTER_CONFIG_CACHE: Optional[dict[str, str]] = None
 _PROJECT_CONFIG_CACHE: dict[str, dict[str, str]] = {}
+_REPORTED_PROJECT_FALLBACKS: set[str] = set()
 
 if __spec__ is None and "__file__" in globals():
     __spec__ = importlib.util.spec_from_file_location(__name__, __file__)
@@ -220,7 +223,16 @@ def _run_session(
     try:
         io.iprint("DAS_v2 controller")
         _first_run_base_folder_setup(state)
-        _adopt_project_context(state, data_folder=state.data_folder, build_folder=state.build_folder, figure_folder=state.figure_folder)
+        previous_data_folder = state.data_folder
+        _adopt_project_context(
+            state,
+            data_folder=state.data_folder,
+            build_folder=state.build_folder,
+            figure_folder=state.figure_folder,
+            update_master=not _is_fallback_project_folder(state.data_folder),
+        )
+        if not _same_folder(previous_data_folder, state.data_folder):
+            state.stem = _preferred_stem_for_folder(state.data_folder)
         session_log_path = io.start_session_log(state.project_root)
         io.iprint(f"Project root: {state.project_root}")
         io.iprint(f"Data folder: {state.data_folder}")
@@ -543,6 +555,85 @@ def _resolve_usable_folder(path_like: object, label: str, *, log_ignore: bool = 
     return path
 
 
+def _folder_is_readable(path: Path, label: str, *, log_ignore: bool = True) -> bool:
+    try:
+        if not path.is_dir():
+            if log_ignore:
+                io.dprint(f"Ignoring unusable {label}: {path} (not a folder)")
+            return False
+        with os.scandir(path) as entries:
+            next(entries, None)
+        return True
+    except (PermissionError, OSError, FileNotFoundError) as exc:
+        if log_ignore:
+            io.dprint(f"Ignoring unusable {label}: {path} ({exc})")
+        return False
+
+
+def _resolve_existing_readable_folder(path_like: object, label: str, *, log_ignore: bool = True) -> Optional[Path]:
+    path = _resolve_usable_folder(path_like, label, log_ignore=log_ignore)
+    if path is None:
+        return None
+    if not _folder_is_readable(path, label, log_ignore=log_ignore):
+        return None
+    return path
+
+
+def _configured_fallback_folder_text(master: Optional[dict[str, str]] = None) -> str:
+    config = _load_master_config() if master is None else master
+    for key in FALLBACK_CONFIG_KEYS:
+        text = str(config.get(key, "")).strip()
+        if text:
+            return text
+    return ""
+
+
+def _ensure_fallback_project_folder(master: Optional[dict[str, str]] = None) -> Path:
+    config = _load_master_config() if master is None else master
+    candidates = []
+    configured = _configured_fallback_folder_text(config)
+    if configured:
+        candidates.append(configured)
+    candidates.extend([SAFE_FALLBACK_PROJECT_ROOT, DEFAULT_PROJECT_ROOT])
+
+    for candidate in candidates:
+        path = _resolve_usable_folder(candidate, "fallback project folder")
+        if path is None:
+            continue
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError) as exc:
+            io.dprint(f"Ignoring unusable fallback project folder: {path} ({exc})")
+            continue
+        if _folder_is_readable(path, "fallback project folder"):
+            return path
+    raise RuntimeError("No usable DAS fallback project folder is available.")
+
+
+def _report_project_folder_fallback(label: str, attempted: object, fallback: Path) -> None:
+    attempted_text = str(attempted or "").strip() or "[unset]"
+    key = os.path.normcase(attempted_text) + "->" + os.path.normcase(str(fallback))
+    if key in _REPORTED_PROJECT_FALLBACKS:
+        return
+    _REPORTED_PROJECT_FALLBACKS.add(key)
+    io.iprint(f"{label} unavailable: {attempted_text}")
+    io.iprint(f"Starting from recovery project folder: {fallback}")
+
+
+def _use_fallback_project_folder(label: str, attempted: object, master: Optional[dict[str, str]] = None) -> Path:
+    fallback = _ensure_fallback_project_folder(master)
+    _report_project_folder_fallback(label, attempted, fallback)
+    return fallback
+
+
+def _is_fallback_project_folder(path_like: object, master: Optional[dict[str, str]] = None) -> bool:
+    candidates: list[object] = [SAFE_FALLBACK_PROJECT_ROOT]
+    configured = _configured_fallback_folder_text(master)
+    if configured:
+        candidates.append(configured)
+    return any(_same_folder(path_like, candidate) for candidate in candidates)
+
+
 def _require_usable_folder(path_like: object, label: str) -> Path:
     path = _resolve_usable_folder(path_like, label, log_ignore=False)
     if path is None:
@@ -671,15 +762,18 @@ def _save_project_current_stem(data_folder: str | Path, stem: str) -> None:
 
 
 def _stem_triplet_exists(data_folder: str | Path, stem: str) -> bool:
-    folder = Path(data_folder).expanduser().resolve()
     text = str(stem or "").strip()
     if text == "":
         return False
-    return (
-        (folder / f"{text}{TRIPLET_FILES['df']}").is_file()
-        and (folder / f"{text}{TRIPLET_FILES['obs']}").is_file()
-        and (folder / f"{text}{TRIPLET_FILES['dfxy']}").is_file()
-    )
+    try:
+        folder = Path(data_folder).expanduser().resolve()
+        return (
+            (folder / f"{text}{TRIPLET_FILES['df']}").is_file()
+            and (folder / f"{text}{TRIPLET_FILES['obs']}").is_file()
+            and (folder / f"{text}{TRIPLET_FILES['dfxy']}").is_file()
+        )
+    except (PermissionError, OSError, FileNotFoundError):
+        return False
 
 
 def _next_spectral_test_stem(data_folder: str | Path) -> str:
@@ -699,7 +793,10 @@ def _load_preferred_project_stem(data_folder: str | Path) -> str:
     projects = _load_projects_df()
     if projects.empty:
         return ""
-    folder_key = str(Path(data_folder).expanduser().resolve()).strip().lower()
+    folder = _resolve_usable_folder(data_folder, "project data_folder", log_ignore=False)
+    if folder is None:
+        return ""
+    folder_key = str(folder).strip().lower()
     keys = projects["data_folder"].fillna("").astype(str).str.strip().str.lower()
     match = projects.loc[keys == folder_key]
     if match.empty:
@@ -720,7 +817,8 @@ def _preferred_stem_for_folder(data_folder: str | Path) -> str:
     preferred = _load_preferred_project_stem(data_folder)
     if _stem_triplet_exists(data_folder, preferred):
         return preferred
-    latest = find_latest_stem(Path(data_folder).expanduser().resolve())
+    folder = _resolve_usable_folder(data_folder, "project data_folder", log_ignore=False)
+    latest = find_latest_stem(folder) if folder is not None else None
     if latest is not None:
         return latest
     return preferred or TSTEM
@@ -838,13 +936,14 @@ def _ensure_prepare_data_project_context(state: SessionState) -> None:
         io.iprint(f"Project root confirmed: {state.data_folder}")
 
 
-def _adopt_project_context(
+def _adopt_project_context_once(
     state: SessionState,
     *,
     data_folder: Path,
     figure_folder: Optional[Path] = None,
     build_folder: Optional[Path] = None,
     segmentation_root: Optional[Path] = None,
+    update_master: bool = True,
 ) -> None:
     data_path = _require_usable_folder(data_folder, "data folder")
     build_path = _require_usable_folder(build_folder, "build folder") if build_folder is not None else data_path
@@ -876,12 +975,45 @@ def _adopt_project_context(
     state.build_folder = build_path
     state.figure_folder = figure_path
     state.segmentation_root = segmentation_path
-    _save_master_config(state.data_folder, state.figure_folder)
+    if update_master:
+        _save_master_config(state.data_folder, state.figure_folder)
     _save_project_config(
         state.data_folder,
         state.figure_folder,
         segmentation_root=state.segmentation_root,
     )
+
+
+def _adopt_project_context(
+    state: SessionState,
+    *,
+    data_folder: Path,
+    figure_folder: Optional[Path] = None,
+    build_folder: Optional[Path] = None,
+    segmentation_root: Optional[Path] = None,
+    update_master: bool = True,
+) -> None:
+    try:
+        _adopt_project_context_once(
+            state,
+            data_folder=data_folder,
+            figure_folder=figure_folder,
+            build_folder=build_folder,
+            segmentation_root=segmentation_root,
+            update_master=update_master,
+        )
+        return
+    except (PermissionError, OSError, FileNotFoundError) as exc:
+        fallback = _use_fallback_project_folder("Project folder", data_folder)
+        io.dprint(f"Recovering from project context load failure: {exc}")
+        _adopt_project_context_once(
+            state,
+            data_folder=fallback,
+            build_folder=fallback,
+            figure_folder=None,
+            segmentation_root=None,
+            update_master=False,
+        )
 
 
 def _record_project_use(
@@ -937,8 +1069,8 @@ def _resolve_initial_context(
         data_folder = _require_usable_folder(default_folder, "data folder")
     else:
         master_folder = str(master.get("data_folder", "")).strip()
-        master_data_folder = _resolve_usable_folder(master_folder, "master data_folder") if master_folder else None
-        if master_data_folder is not None and master_data_folder.is_dir():
+        master_data_folder = _resolve_existing_readable_folder(master_folder, "master data_folder") if master_folder else None
+        if master_data_folder is not None:
             data_folder = master_data_folder
         else:
             projects = _load_projects_df()
@@ -948,25 +1080,28 @@ def _resolve_initial_context(
                 folder_text = str(row.get("data_folder", "")).strip()
                 if folder_text == "":
                     continue
-                candidate = _resolve_usable_folder(folder_text, "projects.csv data_folder")
-                if candidate is None or not candidate.is_dir():
+                candidate = _resolve_existing_readable_folder(folder_text, "projects.csv data_folder")
+                if candidate is None:
                     continue
                 row_dict = row.to_dict()
                 if fallback_row is None:
                     fallback_row = row_dict
                 remembered_stem = str(row_dict.get("stem", "")).strip()
-                remembered_triplet = (
-                    remembered_stem != ""
-                    and (candidate / f"{remembered_stem}{TRIPLET_FILES['df']}").is_file()
-                    and (candidate / f"{remembered_stem}{TRIPLET_FILES['obs']}").is_file()
-                    and (candidate / f"{remembered_stem}{TRIPLET_FILES['dfxy']}").is_file()
-                )
+                remembered_triplet = _stem_triplet_exists(candidate, remembered_stem)
                 if remembered_triplet or find_latest_stem(candidate) is not None:
                     chosen_row = row_dict
                     break
             latest = chosen_row or fallback_row
-            latest_folder = str(latest.get("data_folder") if latest else DEFAULT_PROJECT_ROOT)
-            data_folder = _resolve_usable_folder(latest_folder, "latest project data_folder") or DEFAULT_PROJECT_ROOT
+            if latest:
+                latest_folder = str(latest.get("data_folder", "")).strip()
+                data_folder = (
+                    _resolve_existing_readable_folder(latest_folder, "latest project data_folder")
+                    or _use_fallback_project_folder("Latest project folder", latest_folder, master)
+                )
+            elif master_folder or not projects.empty:
+                data_folder = _use_fallback_project_folder("Project folder", master_folder or "projects.csv entries", master)
+            else:
+                data_folder = DEFAULT_PROJECT_ROOT
     if latest is None:
         projects = _load_projects_df()
         if not projects.empty:
@@ -1121,6 +1256,7 @@ def startup_menu(state: SessionState) -> bool:
     Legacy-style first menu shown before any data is loaded.
     """
     functions = [
+        startup_set_base_folder,
         startup_prepare_data,
         startup_load_prepared_data,
         startup_load_last,
@@ -1130,6 +1266,7 @@ def startup_menu(state: SessionState) -> bool:
         latest = find_latest_stem(state.data_folder)
         latest_label = latest if latest is not None else "[none]"
         options = [
+            "set project folder",
             "prepare data",
             "load prepared data",
             "load most recent save [" + latest_label + "]",
@@ -1138,6 +1275,7 @@ def startup_menu(state: SessionState) -> bool:
             "Startup",
             options,
             option_descriptions=[
+                "Choose a new default project folder for data and output.",
                 "Includes things like registration, image correction, spectral flow integration, and related preparation workflows.",
                 "Load an existing prepared triplet from the current project folder.",
                 "Load the most recent saved triplet in the current project folder.",
@@ -1207,8 +1345,11 @@ def _first_run_base_folder_setup(state: SessionState) -> None:
     master = _load_master_config()
     configured_folder = str(master.get("data_folder", "")).strip()
     if configured_folder:
-        configured_path = Path(configured_folder).expanduser().resolve()
-        if configured_path.is_dir():
+        configured_path = _resolve_existing_readable_folder(configured_folder, "configured default project folder", log_ignore=False)
+        if configured_path is not None:
+            return
+        current_path = _resolve_existing_readable_folder(state.data_folder, "current project folder", log_ignore=False)
+        if current_path is not None:
             return
     io.iprint("First-run setup")
     io.iprint("Choose the default project folder IF_Analysis should use for data and output.")
@@ -2782,7 +2923,11 @@ def save_triplet(
 
 
 def find_latest_stem(folder: Path) -> Optional[str]:
-    df_files = sorted(folder.glob("*_df.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    try:
+        df_files = sorted(folder.glob("*_df.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except (PermissionError, OSError, FileNotFoundError) as exc:
+        io.dprint(f"Could not inspect latest stem in {folder}: {exc}")
+        return None
     if not df_files:
         return None
     return df_files[0].name[: -len("_df.csv")]

@@ -3,7 +3,6 @@ import os
 import re
 import sys
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -14,13 +13,18 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 DATA_EXTRACT_DIR = REPO_ROOT / "data_extraction"
 MISC_DIR = REPO_ROOT / "misc mIHC utility"
+SUPPORT_DIR = REPO_ROOT / "support"
 
 if str(DATA_EXTRACT_DIR) not in sys.path:
     sys.path.insert(0, str(DATA_EXTRACT_DIR))
 if str(MISC_DIR) not in sys.path:
     sys.path.insert(0, str(MISC_DIR))
+if str(SUPPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(SUPPORT_DIR))
 
+import image_sources
 import stain_correction24_pTMA as sc
+import tissue_edge_correction
 import seg_v0 as seg
 import stardist_seg_v0 as sd
 
@@ -46,6 +50,7 @@ EDGE_FOLDER_REF_MIN_TISSUE_FRACTION = 0.60
 EDGE_FOLDER_REF_REJECT_SD = 3.0
 EDGE_FOLDER_TISSUE_DILATE_FULL_PX = 100
 EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS = 27
+EDGE_FOLDER_GAIN_TANH_FIT_MAXFEV = 20000
 EDGE_FOLDER_GAIN_MIN = 0.05
 EDGE_FOLDER_GAIN_MAX = 1.0
 EDGE_FOLDER_GAIN_HIST_BINS = 8192
@@ -55,26 +60,35 @@ DEFAULT_TILE_STAT_CHUNK_COLS = 512
 DEFAULT_BG_SAMPLE_MAX_PIXELS = 5_000_000
 
 
+def edge_gain_config():
+    return tissue_edge_correction.EdgeGainConfig(
+        gain_quantiles=tuple(float(x) for x in EDGE_FOLDER_GAIN_QUANTILES),
+        gain_anchor_quantile_index=int(EDGE_FOLDER_GAIN_ANCHOR_QUANTILE_INDEX),
+        bin_min_pixels=int(EDGE_FOLDER_BIN_MIN_PIXELS),
+        profile_min_pixels=int(sc.EDGE_PROFILE_MIN_PIXELS),
+        ref_square_size_small=int(EDGE_FOLDER_REF_SQUARE_SIZE_SMALL),
+        ref_target_squares=int(EDGE_FOLDER_REF_TARGET_SQUARES),
+        ref_candidate_squares=int(EDGE_FOLDER_REF_CANDIDATE_SQUARES),
+        ref_min_tissue_fraction=float(EDGE_FOLDER_REF_MIN_TISSUE_FRACTION),
+        ref_reject_sd=float(EDGE_FOLDER_REF_REJECT_SD),
+        tissue_dilate_full_px=float(EDGE_FOLDER_TISSUE_DILATE_FULL_PX),
+        gain_rolling_window_bins=int(EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS),
+        gain_tanh_fit_maxfev=int(EDGE_FOLDER_GAIN_TANH_FIT_MAXFEV),
+        gain_min=float(EDGE_FOLDER_GAIN_MIN),
+        gain_max=float(EDGE_FOLDER_GAIN_MAX),
+        hist_bins=int(EDGE_FOLDER_GAIN_HIST_BINS),
+        hist_max=float(EDGE_FOLDER_GAIN_HIST_MAX),
+        chunk_rows=int(EDGE_FOLDER_GAIN_CHUNK_ROWS),
+        preview_max_edge=int(DEFAULT_EDGE_FULL_MAX_EDGE),
+    )
+
+
 def parse_ome_channel_names(ome_xml):
-    if not ome_xml:
-        return []
-    root = ET.fromstring(ome_xml)
-    names = []
-    for elem in root.iter():
-        if elem.tag.split("}")[-1] == "Channel":
-            name = elem.attrib.get("Name")
-            if not name:
-                name = elem.attrib.get("ID", "")
-            names.append(str(name))
-    return names
+    return image_sources.parse_ome_channel_names(ome_xml)
 
 
 def find_channel_index(channel_names, target_name):
-    target_low = str(target_name).strip().lower()
-    for i, name in enumerate(channel_names):
-        if str(name).strip().lower() == target_low:
-            return i
-    raise ValueError(f"Channel {target_name!r} not found in OME names: {channel_names}")
+    return image_sources.find_channel_index(channel_names, target_name)
 
 
 def normalize_save_ext(save_ext):
@@ -118,31 +132,10 @@ def parse_auto_int(value, name):
 
 
 def read_tiff_info(input_path):
-    with tiff.TiffFile(input_path) as tf:
-        if len(tf.series) == 0:
-            raise ValueError("No TIFF series found")
-        series = tf.series[0]
-        axes = str(getattr(series, "axes", ""))
-        shape = tuple(int(x) for x in getattr(series, "shape", ()))
-        dtype = str(getattr(series, "dtype", ""))
-        page_count = len(series.pages)
-        channel_names = parse_ome_channel_names(getattr(tf, "ome_metadata", None))
-
-    if axes != "CYX":
-        raise ValueError(f"Expected CYX axes for wrapper, got {axes} with shape {shape}")
-    if len(shape) != 3:
-        raise ValueError(f"Expected 3D CYX shape for wrapper, got axes={axes} shape={shape}")
-    if len(channel_names) != shape[0]:
-        raise ValueError(f"OME channel count mismatch: names={len(channel_names)} shapeC={shape[0]}")
-
-    return {
-        "axes": axes,
-        "shape": shape,
-        "shape_yx": (shape[1], shape[2]),
-        "dtype": dtype,
-        "page_count": page_count,
-        "channel_names": channel_names,
-    }
+    info = image_sources.read_tiff_info(input_path)
+    if int(info.get("channel_count", 0)) < 1:
+        raise ValueError(f"No readable channels found in {input_path}")
+    return info
 
 
 def cast_channel_array(arr, dtype):
@@ -153,49 +146,18 @@ def cast_channel_array(arr, dtype):
 
 
 def read_channel_from_tiff(input_path, idx, dtype=None, attempts=2, retry_sleep=2.0):
-    errors = []
-    attempts = max(1, int(attempts))
-
-    for attempt in range(attempts):
-        try:
-            with tiff.TiffFile(input_path) as tf:
-                arr = tf.series[0].pages[idx].asarray(maxworkers=1)
-            return cast_channel_array(arr, dtype)
-        except Exception as e:
-            errors.append(f"page attempt {attempt + 1}: {type(e).__name__}: {e}")
-            sc.release_runtime_memory()
-            if attempt + 1 < attempts and retry_sleep > 0:
-                time.sleep(float(retry_sleep))
-
+    sources = image_sources.iter_channel_sources(input_path)
+    if int(idx) < 0 or int(idx) >= len(sources):
+        raise IndexError(f"Channel index {idx} out of range for {input_path} (n={len(sources)})")
     try:
-        arr = tiff.imread(input_path, key=idx, series=0, maxworkers=1)
-        return cast_channel_array(arr, dtype)
-    except Exception as e:
-        errors.append(f"tifffile.imread key fallback: {type(e).__name__}: {e}")
+        return image_sources.read_channel(
+            sources[int(idx)],
+            dtype=dtype,
+            attempts=attempts,
+            retry_sleep=retry_sleep,
+        )
+    finally:
         sc.release_runtime_memory()
-
-    try:
-        import zarr
-
-        with tiff.TiffFile(input_path) as tf:
-            series = tf.series[0]
-            store = series.aszarr()
-            try:
-                z = zarr.open(store, mode="r")
-                arr = np.asarray(z[idx, :, :])
-            finally:
-                close = getattr(store, "close", None)
-                if callable(close):
-                    close()
-        return cast_channel_array(arr, dtype)
-    except Exception as e:
-        errors.append(f"zarr C-slice fallback: {type(e).__name__}: {e}")
-        sc.release_runtime_memory()
-
-    raise OSError(
-        f"Failed to read channel index {idx} from {input_path}. "
-        + " | ".join(errors)
-    )
 
 
 def make_marker_entry_no_extra_copy(chan, raw):
@@ -795,7 +757,17 @@ def compute_tile_sub_wholesection(base_im, border_mask, qcim_for_mask=None, min_
     return final_sub
 
 
-def apply_marker_corrections(stim_entry, corrections, mask1, mask3, qc_mask, edge_tissue_mask, marker_label=None):
+def apply_marker_corrections(
+    stim_entry,
+    corrections,
+    mask1,
+    mask3,
+    qc_mask,
+    edge_tissue_mask,
+    marker_label=None,
+    edge_tissue_small=None,
+    edge_tissue_info=None,
+):
     current_base = stim_entry[1]
     executed_steps = []
     bg_scalar = np.float32(0.0)
@@ -809,6 +781,8 @@ def apply_marker_corrections(stim_entry, corrections, mask1, mask3, qc_mask, edg
                 edge_mask=mask1,
                 tissue_mask=edge_tissue_mask,
                 ftype=sc.FTYPE,
+                tissue_small=edge_tissue_small,
+                tissue_info=edge_tissue_info,
             )
             if type(stim_entry[3]) == type(0):
                 stim_entry[3] = edge_sub
@@ -1120,8 +1094,8 @@ def edge_report_matches_current_settings(report_path):
         f"edge_reference_square_size_small: {int(EDGE_FOLDER_REF_SQUARE_SIZE_SMALL)}",
         f"edge_reference_target_squares: {int(EDGE_FOLDER_REF_TARGET_SQUARES)}",
         f"edge_bin_min_pixels: {int(EDGE_FOLDER_BIN_MIN_PIXELS)}",
-        "edge_gain_smooth_method: centered_rolling_average",
-        f"edge_gain_rolling_window_bins: {int(EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS)}",
+        "edge_gain_smooth_method: tanh_fit",
+        f"edge_gain_tanh_upper_asymptote: {format_report_value(1.0)}",
         f"edge_gain_min: {format_report_value(float(EDGE_FOLDER_GAIN_MIN))}",
         f"edge_gain_max: {format_report_value(float(EDGE_FOLDER_GAIN_MAX))}",
         "fallback_to_all_tissue: False",
@@ -1189,6 +1163,77 @@ def centered_rolling_average(values, window):
     return np.convolve(padded, kernel, mode="valid").astype(np.float32, copy=False)
 
 
+def tanh_unit_gain_model(x, low, midpoint, width):
+    width = np.maximum(np.asarray(width, dtype=np.float32), 1e-6)
+    x = np.asarray(x, dtype=np.float32)
+    return low + (1.0 - low) * 0.5 * (1.0 + np.tanh((x - midpoint) / width))
+
+
+def fit_tanh_gain_curve(gain_values, good_bins, max_bin):
+    x = np.asarray(good_bins, dtype=np.float32)
+    gain_values = np.asarray(gain_values, dtype=np.float32)
+    y = gain_values[np.asarray(good_bins, dtype=np.intp)]
+    valid = np.isfinite(x) & np.isfinite(y)
+    x = x[valid]
+    y = np.clip(y[valid], EDGE_FOLDER_GAIN_MIN, EDGE_FOLDER_GAIN_MAX)
+
+    stats = {
+        "edge_gain_tanh_fit_status": "not_run",
+        "edge_gain_tanh_fit_bins": int(x.size),
+        "edge_gain_tanh_low": None,
+        "edge_gain_tanh_midpoint_bin": None,
+        "edge_gain_tanh_width_bins": None,
+        "edge_gain_tanh_rmse": None,
+        "edge_gain_tanh_upper_asymptote": 1.0,
+        "edge_gain_tanh_fallback_method": None,
+    }
+
+    if x.size < 4:
+        stats["edge_gain_tanh_fit_status"] = "fallback_too_few_bins"
+        stats["edge_gain_tanh_fallback_method"] = "centered_rolling_average"
+        return centered_rolling_average(gain_values, EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS), stats
+
+    try:
+        from scipy.optimize import curve_fit
+
+        low0 = float(np.clip(np.quantile(y, 0.05), EDGE_FOLDER_GAIN_MIN, 0.99))
+        half_level = low0 + (1.0 - low0) * 0.5
+        midpoint0 = float(x[np.argmin(np.abs(y - half_level))])
+        width0 = float(np.clip(max(float(max_bin) * 0.15, 5.0), 1.0, max(float(max_bin) * 2.0, 1.0)))
+        params, _ = curve_fit(
+            tanh_unit_gain_model,
+            x,
+            y,
+            p0=(low0, midpoint0, width0),
+            bounds=(
+                (float(EDGE_FOLDER_GAIN_MIN), 0.0, 1.0),
+                (float(EDGE_FOLDER_GAIN_MAX), float(max_bin), max(float(max_bin) * 2.0, 1.0)),
+            ),
+            maxfev=int(EDGE_FOLDER_GAIN_TANH_FIT_MAXFEV),
+        )
+        low, midpoint, width = [float(v) for v in params]
+        x_all = np.arange(max_bin + 1, dtype=np.float32)
+        gain_curve = tanh_unit_gain_model(x_all, low, midpoint, width).astype(np.float32, copy=False)
+        gain_curve = np.clip(gain_curve, EDGE_FOLDER_GAIN_MIN, EDGE_FOLDER_GAIN_MAX).astype(np.float32, copy=False)
+        fit_y = tanh_unit_gain_model(x, low, midpoint, width)
+        rmse = float(np.sqrt(np.mean((fit_y - y) ** 2)))
+        stats.update(
+            {
+                "edge_gain_tanh_fit_status": "ok",
+                "edge_gain_tanh_fit_bins": int(x.size),
+                "edge_gain_tanh_low": low,
+                "edge_gain_tanh_midpoint_bin": midpoint,
+                "edge_gain_tanh_width_bins": width,
+                "edge_gain_tanh_rmse": rmse,
+            }
+        )
+        return gain_curve, stats
+    except Exception as e:
+        stats["edge_gain_tanh_fit_status"] = f"fallback_{type(e).__name__}: {e}"
+        stats["edge_gain_tanh_fallback_method"] = "centered_rolling_average"
+        return centered_rolling_average(gain_values, EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS), stats
+
+
 def build_label_presence_small(labels, scale):
     h, w = labels.shape
     hs = max(1, int(h * float(scale)))
@@ -1214,35 +1259,17 @@ def build_label_presence_small(labels, scale):
 
 def build_edge_tissue_body_small(labels, scale, edge_debug_dir=None):
     print("Building tissue body from StarDist labels", flush=True)
-    presence_small = build_label_presence_small(labels, scale)
-    radius_small = max(1, int(np.ceil(float(EDGE_FOLDER_TISSUE_DILATE_FULL_PX) * float(scale))))
-    print(
-        "  dilating label presence:",
-        f"{EDGE_FOLDER_TISSUE_DILATE_FULL_PX} full-res px -> {radius_small} small px",
-        flush=True,
+    tissue_small, info = tissue_edge_correction.build_tissue_body_small_from_labels(
+        labels,
+        scale=float(scale),
+        config=edge_gain_config(),
+        progress_fn=lambda msg: print("  " + str(msg), flush=True),
     )
-    tissue_small = sc.ndimage.binary_dilation(
-        presence_small,
-        structure=disk_footprint(radius_small),
-    )
-    print("  filling enclosed holes in tissue body", flush=True)
-    tissue_small = sc.ndimage.binary_fill_holes(tissue_small)
-
-    info = {
-        "edge_tissue_source": "stardist_labels",
-        "edge_tissue_dilate_full_px": float(EDGE_FOLDER_TISSUE_DILATE_FULL_PX),
-        "edge_tissue_dilate_small_radius": int(radius_small),
-        "edge_tissue_fill_holes": True,
-        "edge_cell_presence_small_pixels": int(np.sum(presence_small)),
-        "edge_tissue_body_small_pixels": int(np.sum(tissue_small)),
-    }
 
     if edge_debug_dir:
         print("  writing tissue geometry debug PNGs", flush=True)
-        save_binary_full_downsample_image(presence_small, edge_debug_dir, "edge_cell_presence_small_qc")
         save_binary_full_downsample_image(tissue_small, edge_debug_dir, "edge_tissue_body_small_qc")
 
-    del presence_small
     sc.release_runtime_memory()
     return np.asarray(tissue_small, dtype=bool), info
 
@@ -1620,358 +1647,26 @@ def full_distance_value_preview_for_shape(
 
 
 def compute_edge_gain_folder_profile(base_im, tissue_mask=None, tissue_small=None, tissue_info=None):
-    quantiles = np.asarray(EDGE_FOLDER_GAIN_QUANTILES, dtype=np.float32)
-    qlabels = [quantile_label(q) for q in quantiles]
-    stim = np.asarray(base_im, dtype=np.float32)
-    tissue_full = None if tissue_mask is None else np.asarray(tissue_mask, dtype=bool)
-    h, w = stim.shape
-    scale = sc.getScale(h, w)
-    hs = max(1, int(h * scale))
-    ws = max(1, int(w * scale))
-    tissue_small_provided = tissue_small is not None
-    if tissue_small_provided:
-        tissue_small = np.asarray(tissue_small, dtype=bool)
-        if tissue_small.shape != (hs, ws):
-            raise ValueError(
-                f"tissue_small shape {tissue_small.shape} does not match expected small shape {(hs, ws)}"
-            )
-        tissue_full = None
-    mask_mode = "tissue_body_from_stardist" if tissue_small_provided else (
-        "none_all_pixels" if tissue_full is None else "provided_boolean_mask"
+    result = tissue_edge_correction.compute_edge_gain_profile(
+        base_im,
+        tissue_mask=tissue_mask,
+        tissue_small=tissue_small,
+        tissue_info=tissue_info,
+        config=edge_gain_config(),
     )
-    geometry_mode = "tissue_body_distance" if tissue_small_provided else (
-        "image_border_distance" if tissue_full is None else "mask_distance"
-    )
-    measure_mode = (
-        "fullres_signal_coarse_tissue_distance_bins"
-        if tissue_small_provided
-        else "fullres_signal_coarse_distance_bins"
-    )
-    apply_mode = (
-        "fullres_multiplicative_gain_inside_tissue_body"
-        if tissue_small_provided
-        else "fullres_multiplicative_gain"
-    )
-    tissue_info = {} if tissue_info is None else dict(tissue_info)
-
-    report = {
-        "status": "ok",
-        "image_shape": f"{h}x{w}",
-        "scale": float(scale),
-        "small_shape": f"{hs}x{ws}",
-        "edge_profile_strategy": "fullres_signal_distance_gain",
-        "edge_gain_quantiles": quantile_list_text(quantiles),
-        "edge_mask_mode": mask_mode,
-        "edge_geometry": geometry_mode,
-        "edge_measure_mode": measure_mode,
-        "edge_apply_mode": apply_mode,
-        "edge_bin_min_pixels": int(EDGE_FOLDER_BIN_MIN_PIXELS),
-        "edge_gain_smooth_method": "centered_rolling_average",
-        "edge_gain_rolling_window_bins": int(EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS),
-        "edge_gain_min": float(EDGE_FOLDER_GAIN_MIN),
-        "edge_gain_max": float(EDGE_FOLDER_GAIN_MAX),
-        "edge_gain_anchor_quantile_index": int(EDGE_FOLDER_GAIN_ANCHOR_QUANTILE_INDEX),
-        "edge_gain_anchor_quantile": quantile_label(quantiles[int(EDGE_FOLDER_GAIN_ANCHOR_QUANTILE_INDEX)]),
-        "edge_gain_hist_bins": int(EDGE_FOLDER_GAIN_HIST_BINS),
-        "edge_gain_hist_max": float(EDGE_FOLDER_GAIN_HIST_MAX),
-        "edge_gain_chunk_rows": int(EDGE_FOLDER_GAIN_CHUNK_ROWS),
-        "edge_reference_square_size_small": int(EDGE_FOLDER_REF_SQUARE_SIZE_SMALL),
-        "edge_reference_square_full_res_approx_pixels": float(EDGE_FOLDER_REF_SQUARE_SIZE_SMALL / scale),
-        "edge_reference_target_squares": int(EDGE_FOLDER_REF_TARGET_SQUARES),
-        "edge_reference_candidate_squares": int(EDGE_FOLDER_REF_CANDIDATE_SQUARES),
-        "edge_reference_min_tissue_fraction": float(EDGE_FOLDER_REF_MIN_TISSUE_FRACTION),
-        "edge_reference_reject_sd": float(EDGE_FOLDER_REF_REJECT_SD),
-        "directional_component": "disabled",
-        "summary_order": [
-            "status",
-            "image_shape",
-            "scale",
-            "small_shape",
-            "edge_profile_strategy",
-            "edge_gain_quantiles",
-            "edge_mask_mode",
-            "edge_geometry",
-            "edge_measure_mode",
-            "edge_apply_mode",
-            "edge_bin_min_pixels",
-            "edge_gain_smooth_method",
-            "edge_gain_rolling_window_bins",
-            "edge_gain_min",
-            "edge_gain_max",
-            "edge_gain_anchor_quantile_index",
-            "edge_gain_anchor_quantile",
-            "edge_gain_hist_bins",
-            "edge_gain_hist_max",
-            "edge_gain_chunk_rows",
-            "edge_reference_square_size_small",
-            "edge_reference_square_full_res_approx_pixels",
-            "edge_reference_target_squares",
-            "edge_reference_candidate_squares",
-            "edge_reference_min_tissue_fraction",
-            "edge_reference_reject_sd",
-            "directional_component",
-            "edge_tissue_source",
-            "edge_tissue_dilate_full_px",
-            "edge_tissue_dilate_small_radius",
-            "edge_tissue_fill_holes",
-            "edge_cell_presence_small_pixels",
-            "edge_tissue_body_small_pixels",
-            "tissue_full_pixels",
-            "tissue_small_pixels",
-            "tissue_max_distance_bin",
-            "measure_full_pixels",
-            "apply_full_pixels",
-            "fallback_to_all_tissue",
-            "max_distance_bin",
-            "good_profile_bins",
-            "hist_clipped_high_pixels",
-            "reference_square_candidates_total",
-            "reference_square_pool",
-            "reference_square_selected",
-            "reference_square_rejected",
-            "reference_square_reject_relaxed",
-            "reference_square_score_mean",
-            "reference_square_score_std",
-            "reference_square_reject_threshold",
-            "reference_level_anchor_quantile",
-            "gain_raw_min",
-            "gain_raw_max",
-            "gain_filled_min",
-            "gain_filled_max",
-            "gain_smoothed_min",
-            "gain_smoothed_max",
-            "gain_smoothed_mean",
-            "edge_gain_preview_min",
-            "edge_gain_preview_max",
-        ],
-        "profile_quantile_labels": qlabels,
-        "profile_rows": [],
-        "reference_quantiles": {},
-        "reference_squares": [],
-    }
-    for key in report["summary_order"]:
-        report.setdefault(key, None)
-    report["fallback_to_all_tissue"] = False
-    for key, value in tissue_info.items():
-        report[key] = value
-
-    if tissue_small_provided:
-        report["tissue_full_pixels"] = int(round(float(np.sum(tissue_small)) / (float(scale) * float(scale))))
-    else:
-        report["tissue_full_pixels"] = int(h * w) if tissue_full is None else int(np.sum(tissue_full))
-    if report["tissue_full_pixels"] < int(sc.EDGE_PROFILE_MIN_PIXELS):
-        report["status"] = "zero_gain_too_few_tissue_pixels"
-        gain_curve = np.ones(1, dtype=np.float32)
-        if tissue_small_provided:
-            gain_preview = full_distance_value_preview_for_shape(
-                np.zeros((hs, ws), dtype=np.int32),
-                gain_curve,
-                stim.shape,
-                scale,
-                outside_value=1.0,
-            )
-        elif tissue_full is None:
-            gain_preview = np.ones(full_downsample_image(stim, max_edge=DEFAULT_EDGE_FULL_MAX_EDGE).shape, dtype=np.float32)
-        else:
-            gain_preview = full_distance_value_preview(np.zeros((1, 1), dtype=np.int32), gain_curve, tissue_full, 1.0, 1.0)
-        return np.zeros((1, 1), dtype=np.int32), gain_curve, gain_preview, report
-
-    if tissue_small_provided:
-        dist_small = sc.ndimage.distance_transform_edt(tissue_small).astype(np.float32, copy=False)
-        dist_idx = np.floor(dist_small).astype(np.int32, copy=False)
-    else:
-        tissue_small, dist_small, dist_idx = make_small_tissue_distance(tissue_full, scale, shape=stim.shape)
-    report["tissue_small_pixels"] = int(np.sum(tissue_small))
-    report["tissue_max_distance_bin"] = int(np.max(dist_idx[tissue_small])) if np.any(tissue_small) else 0
-    max_bin = int(np.max(dist_idx)) if dist_idx.size else 0
-    report["max_distance_bin"] = max_bin
-    if max_bin <= 0:
-        report["status"] = "zero_gain_no_positive_distance_bins"
-        gain_curve = np.ones(1, dtype=np.float32)
-        if tissue_small_provided:
-            gain_preview = full_distance_value_preview_for_shape(
-                dist_idx,
-                gain_curve,
-                stim.shape,
-                scale,
-                outside_value=1.0,
-            )
-        elif tissue_full is None:
-            gain_preview = full_distance_value_preview_for_shape(dist_idx, gain_curve, stim.shape, scale)
-        else:
-            gain_preview = full_distance_value_preview(dist_idx, gain_curve, tissue_full, scale, 1.0)
-        return dist_idx, gain_curve, gain_preview, report
-
-    ref_quantiles, ref_squares, ref_stats = select_reference_squares(
-        stim,
-        tissue_full,
-        tissue_small,
-        dist_small,
-        scale,
-        quantiles,
-    )
-    report["reference_squares"] = ref_squares
-    report["reference_square_candidates_total"] = ref_stats.get("candidate_squares_total")
-    report["reference_square_pool"] = ref_stats.get("candidate_squares_pool")
-    report["reference_square_selected"] = ref_stats.get("selected_squares")
-    report["reference_square_rejected"] = ref_stats.get("rejected_squares")
-    report["reference_square_reject_relaxed"] = ref_stats.get("reject_relaxed")
-    report["reference_square_score_mean"] = ref_stats.get("score_mean")
-    report["reference_square_score_std"] = ref_stats.get("score_std")
-    report["reference_square_reject_threshold"] = ref_stats.get("reject_threshold")
-    if ref_quantiles is None:
-        report["status"] = "zero_gain_no_reference_squares"
-        gain_curve = np.ones(max_bin + 1, dtype=np.float32)
-        if tissue_small_provided:
-            gain_preview = full_distance_value_preview_for_shape(
-                dist_idx,
-                gain_curve,
-                stim.shape,
-                scale,
-                outside_value=1.0,
-            )
-        elif tissue_full is None:
-            gain_preview = full_distance_value_preview_for_shape(dist_idx, gain_curve, stim.shape, scale)
-        else:
-            gain_preview = full_distance_value_preview(dist_idx, gain_curve, tissue_full, scale, 1.0)
-        return dist_idx, gain_curve, gain_preview, report
-
-    for label, value in zip(qlabels, ref_quantiles):
-        report["reference_quantiles"][label] = float(value)
-    anchor_idx = int(EDGE_FOLDER_GAIN_ANCHOR_QUANTILE_INDEX)
-    ref_level = float(ref_quantiles[anchor_idx])
-    report["reference_level_anchor_quantile"] = ref_level
-
-    hist, hist_stats = build_distance_histogram_fullres(
-        stim,
-        tissue_full,
-        dist_idx,
-        scale,
-        use_distance_mask=tissue_small_provided,
-    )
-    report["measure_full_pixels"] = hist_stats["valid_pixels"]
-    report["apply_full_pixels"] = hist_stats["apply_pixels_seen"]
-    report["hist_clipped_high_pixels"] = hist_stats["hist_clipped_high_pixels"]
-    report["input_signal_stats"] = histogram_stats(hist, hist_max=EDGE_FOLDER_GAIN_HIST_MAX)
-
-    q_curve = np.full((max_bin + 1, quantiles.size), np.nan, dtype=np.float32)
-    gain_raw = np.full(max_bin + 1, np.nan, dtype=np.float32)
-    counts = np.sum(hist, axis=1).astype(np.int64, copy=False)
-    min_pixels = max(int(sc.EDGE_PROFILE_MIN_PIXELS), int(EDGE_FOLDER_BIN_MIN_PIXELS))
-
-    for d in range(1, max_bin + 1):
-        n = int(counts[d])
-        if n < min_pixels:
-            continue
-        qvals = histogram_quantiles(hist[d], quantiles, EDGE_FOLDER_GAIN_HIST_MAX)
-        q_curve[d, :] = qvals
-        band_level = float(qvals[anchor_idx])
-        if np.isfinite(band_level) and band_level > 0 and ref_level > 0:
-            gain_raw[d] = ref_level / band_level
-
-    good_bins = np.where(np.isfinite(gain_raw))[0]
-    good_bins = good_bins[good_bins > 0]
-    report["good_profile_bins"] = int(good_bins.size)
-    if good_bins.size == 0:
-        report["status"] = "zero_gain_no_supported_profile_bins"
-        gain_curve = np.ones(max_bin + 1, dtype=np.float32)
-        if tissue_small_provided:
-            gain_preview = full_distance_value_preview_for_shape(
-                dist_idx,
-                gain_curve,
-                stim.shape,
-                scale,
-                outside_value=1.0,
-            )
-        elif tissue_full is None:
-            gain_preview = full_distance_value_preview_for_shape(dist_idx, gain_curve, stim.shape, scale)
-        else:
-            gain_preview = full_distance_value_preview(dist_idx, gain_curve, tissue_full, scale, 1.0)
-        return dist_idx, gain_curve, gain_preview, report
-
-    gain_clipped = np.clip(gain_raw, EDGE_FOLDER_GAIN_MIN, EDGE_FOLDER_GAIN_MAX).astype(np.float32, copy=False)
-    gain_filled = sc._fill_profile_nans(gain_clipped.copy())
-    gain_filled = np.clip(gain_filled, EDGE_FOLDER_GAIN_MIN, EDGE_FOLDER_GAIN_MAX).astype(np.float32, copy=False)
-    gain_curve = centered_rolling_average(gain_filled, EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS)
-    gain_curve = np.clip(gain_curve, EDGE_FOLDER_GAIN_MIN, EDGE_FOLDER_GAIN_MAX).astype(np.float32, copy=False)
-    if gain_curve.size > 1:
-        gain_curve[0] = gain_curve[1]
-
-    finite_raw = gain_raw[np.isfinite(gain_raw)]
-    report["gain_raw_min"] = float(np.min(finite_raw)) if finite_raw.size else None
-    report["gain_raw_max"] = float(np.max(finite_raw)) if finite_raw.size else None
-    report["gain_filled_min"] = float(np.min(gain_filled)) if gain_filled.size else None
-    report["gain_filled_max"] = float(np.max(gain_filled)) if gain_filled.size else None
-    report["gain_smoothed_min"] = float(np.min(gain_curve)) if gain_curve.size else None
-    report["gain_smoothed_max"] = float(np.max(gain_curve)) if gain_curve.size else None
-    report["gain_smoothed_mean"] = float(np.mean(gain_curve)) if gain_curve.size else None
-
-    for d in range(1, max_bin + 1):
-        qrow = []
-        for value in q_curve[d, :]:
-            qrow.append(float(value) if np.isfinite(value) else "nan")
-        report["profile_rows"].append(
-            {
-                "dist_bin": int(d),
-                "count": int(counts[d]),
-                "quantiles": qrow,
-                "gain_raw": float(gain_raw[d]) if np.isfinite(gain_raw[d]) else "nan",
-                "gain_filled": float(gain_filled[d]) if np.isfinite(gain_filled[d]) else "nan",
-                "gain_smoothed": float(gain_curve[d]) if np.isfinite(gain_curve[d]) else "nan",
-            }
-        )
-
-    if tissue_small_provided:
-        gain_preview = full_distance_value_preview_for_shape(
-            dist_idx,
-            gain_curve,
-            stim.shape,
-            scale,
-            outside_value=1.0,
-        )
-        dist_preview = full_distance_index_preview_for_shape(dist_idx, stim.shape, scale)
-        preview_vals = gain_preview[dist_preview > 0]
-    elif tissue_full is None:
-        gain_preview = full_distance_value_preview_for_shape(dist_idx, gain_curve, stim.shape, scale)
-        preview_vals = gain_preview.ravel()
-    else:
-        gain_preview = full_distance_value_preview(dist_idx, gain_curve, tissue_full, scale, 1.0)
-        tissue_preview = full_downsample_image(tissue_full, max_edge=DEFAULT_EDGE_FULL_MAX_EDGE) > 0
-        preview_vals = gain_preview[tissue_preview]
-    report["edge_gain_preview_stats"] = small_array_stats(preview_vals)
-    report["edge_gain_preview_min"] = float(np.min(preview_vals)) if preview_vals.size else None
-    report["edge_gain_preview_max"] = float(np.max(preview_vals)) if preview_vals.size else None
-
-    del tissue_small, dist_small, hist
-    sc.release_runtime_memory()
-    return dist_idx, gain_curve, gain_preview, report
+    return result.dist_idx, result.gain_curve, result.gain_preview, result.report
 
 
 def apply_edge_gain_in_place(stim, tissue_mask, dist_idx_small, gain_curve, scale, use_distance_mask=False):
-    h, w = stim.shape
-    hs, ws = dist_idx_small.shape
-    x_small = scaled_indices(w, scale, ws)
-    chunk_rows = max(1, int(EDGE_FOLDER_GAIN_CHUNK_ROWS))
-    changed = 0
-    for y0 in range(0, h, chunk_rows):
-        y1 = min(h, y0 + chunk_rows)
-        y_small = scaled_indices(y1 - y0, scale, hs, start=y0)
-        dist_chunk = dist_idx_small[np.ix_(y_small, x_small)]
-        gain_chunk = gain_curve[np.clip(dist_chunk, 0, len(gain_curve) - 1)]
-        raw_chunk = stim[y0:y1, :]
-        distance_mask = dist_chunk > 0
-        if tissue_mask is None:
-            valid = np.isfinite(raw_chunk)
-        else:
-            tissue_chunk = tissue_mask[y0:y1, :]
-            valid = tissue_chunk & np.isfinite(raw_chunk)
-        if use_distance_mask:
-            valid = valid & distance_mask
-        if not np.any(valid):
-            continue
-        changed += int(np.count_nonzero(valid & (raw_chunk != 0) & (gain_chunk < 0.999999)))
-        np.multiply(raw_chunk, gain_chunk, out=raw_chunk, where=valid)
-    return changed
+    return tissue_edge_correction.apply_edge_gain_in_place(
+        stim,
+        tissue_mask,
+        dist_idx_small,
+        gain_curve,
+        scale,
+        config=edge_gain_config(),
+        use_distance_mask=use_distance_mask,
+    )
 
 
 def build_edge_folder_masks(labels, edge_debug_dir, args):
@@ -2018,6 +1713,7 @@ def run_edge_folder_mode(edge_folder, labels_path, args):
     print("edge_geometry: tissue_body_distance")
     print("edge_measure_mode: fullres_signal_coarse_tissue_distance_bins")
     print("edge_apply_mode: fullres_multiplicative_gain_inside_tissue_body")
+    print("edge_gain_smooth_method: tanh_fit")
     if args.dry_run:
         for path in input_paths:
             print("selected:", os.path.basename(path))
@@ -2123,6 +1819,14 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
     print("Loaded labels:", labels.shape, labels.dtype, "max_label=", int(np.max(labels) if labels.size else 0))
 
     mask1, mask3, qc_mask, edge_tissue_mask = sc.getMasks(labels)
+    edge_tissue_small = None
+    edge_tissue_info = None
+    if "e" in corrections and str(sc.EDGE_METHOD or "").lower() in sc.EDGE_DISTANCE_GAIN_METHODS:
+        edge_tissue_small, edge_tissue_info = build_edge_tissue_body_small(
+            labels,
+            tissue_edge_correction.get_scale(*labels.shape),
+            out_root if args.debug_pngs else None,
+        )
     del labels
     print("Built correction masks", flush=True)
     if args.debug_pngs:
@@ -2137,6 +1841,8 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
         del mask1, edge_tissue_mask
         mask1 = None
         edge_tissue_mask = None
+        edge_tissue_small = None
+        edge_tissue_info = None
     sc.release_runtime_memory()
 
     bg_lines = [
@@ -2187,6 +1893,8 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
                 qc_mask=qc_mask,
                 edge_tissue_mask=edge_tissue_mask,
                 marker_label=f"{marker} c{chan_num}",
+                edge_tissue_small=edge_tissue_small,
+                edge_tissue_info=edge_tissue_info,
             )
             save_wholesection_marker_outputs(
                 marker,
@@ -2206,6 +1914,8 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
         del mask1
     if edge_tissue_mask is not None:
         del edge_tissue_mask
+    if edge_tissue_small is not None:
+        del edge_tissue_small
     sc.release_runtime_memory()
 
 

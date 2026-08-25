@@ -25,6 +25,10 @@ try:
     from image_conventions import viewer_marker_label_from_path as convention_marker_label_from_path
 except Exception:
     convention_marker_label_from_path = None
+try:
+    import image_sources
+except Exception:
+    image_sources = None
 
 OUTDIR = "HTML figs default"
 ASSETSDIR = os.path.join(OUTDIR, "assets")
@@ -127,8 +131,17 @@ def norm_cycif(arr, out_lo=20, out_hi=200, p=99, gamma=1.0):
     return clamp_u8(y)
 
 
+def is_channel_source_spec(value):
+    if image_sources is None:
+        return False
+    source_cls = getattr(image_sources, "ChannelSource", None)
+    return isinstance(value, dict) or (source_cls is not None and isinstance(value, source_cls))
+
+
 def safe_imread(fp, Norm=True, **kw):
-    if tiff is None:
+    if is_channel_source_spec(fp):
+        a = image_sources.read_channel(fp)
+    elif tiff is None:
         with Image.open(fp) as im:
             a = np.array(im)
     else:
@@ -824,11 +837,18 @@ def safe_tag(s, max_len=80):
 
 
 def file_sig(path):
+    if is_channel_source_spec(path):
+        try:
+            raw = image_sources.file_signature_for_source(path)
+            return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+        except Exception:
+            pass
     try:
-        st = os.stat(path)
-        raw = str(os.path.abspath(path)) + "|" + str(st.st_size) + "|" + str(int(st.st_mtime))
+        text = source_path_text(path)
+        st = os.stat(text)
+        raw = str(os.path.abspath(text)) + "|" + str(st.st_size) + "|" + str(int(st.st_mtime))
     except Exception:
-        raw = str(os.path.abspath(path))
+        raw = str(os.path.abspath(source_path_text(path)))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
@@ -850,11 +870,34 @@ def canonical_core_tag(core_name):
 
 
 def infer_tma_tag(path):
-    p = str(path).replace("\\", "/")
+    p = source_path_text(path).replace("\\", "/")
     m = re.search(r"(?i)(ptma\d+)", p)
     if m is None:
         return ""
     return m.group(1)
+
+
+def source_path_text(source):
+    if is_channel_source_spec(source):
+        try:
+            return str(image_sources.coerce_channel_source(source).path)
+        except Exception:
+            pass
+    return str(source)
+
+
+def source_abspath(source):
+    return os.path.abspath(source_path_text(source))
+
+
+def source_json(source):
+    if is_channel_source_spec(source):
+        try:
+            return image_sources.channel_source_to_json(source)
+        except Exception:
+            if isinstance(source, dict):
+                return dict(source)
+    return None
 
 
 def stage_source_file(src_path, out_path):
@@ -930,6 +973,15 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
 
 
 def marker_from_tiff_path(path):
+    if is_channel_source_spec(path):
+        try:
+            source = image_sources.coerce_channel_source(path)
+            for label in (source.marker, source.channel_name):
+                text = str(label).strip()
+                if text:
+                    return text
+        except Exception:
+            pass
     if callable(convention_marker_label_from_path):
         try:
             marker = str(convention_marker_label_from_path(path)).strip()
@@ -937,7 +989,7 @@ def marker_from_tiff_path(path):
                 return marker
         except Exception:
             pass
-    name = os.path.splitext(os.path.basename(path))[0]
+    name = os.path.splitext(os.path.basename(source_path_text(path)))[0]
     # Strip ROI token at end if present (e.g. _ROI06)
     name = re.sub(r"(?i)_?ROI0*\d{1,3}$", "", name)
     # Strip _c0 / _ch0 channel suffixes
@@ -1054,18 +1106,21 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
     assets[key] = {
         "kind": "channel",
         "rel": rel,
-        "tiff": os.path.abspath(tiff_path),
+        "tiff": source_abspath(tiff_path),
         "tma": tma_tag,
         "core": core_tag,
         "slide_scene": slide_scene,
         "marker": str(marker),
         "mode": "L"
     }
+    source_spec = source_json(tiff_path)
+    if source_spec is not None:
+        assets[key]["channel_source"] = source_spec
     return rel, key
 
 
 def ensure_composite_asset(tile_spec, registry, norm_kw):
-    tiffs = list(tile_spec.get("tiff_paths", []))
+    tiffs = list(tile_spec.get("channel_sources", []) or []) + list(tile_spec.get("tiff_paths", []) or [])
     overlays = list(tile_spec.get("overlay_paths", []))
     core_name = str(tile_spec.get("core", ""))
     slide_scene = str(tile_spec.get("slide_scene", "") or core_name).strip()
@@ -1115,12 +1170,15 @@ def ensure_composite_asset(tile_spec, registry, norm_kw):
     assets[key] = {
         "kind": "composite_meta",
         "rel": None,
-        "tiffs": [os.path.abspath(p) for p in tiffs],
+        "tiffs": [source_abspath(p) for p in tiffs],
         "markers": marker_labels,
         "channels": channels,
         "slide_scene": slide_scene,
         "tag": tag
     }
+    source_specs = [source_json(p) for p in tiffs]
+    if any(item is not None for item in source_specs):
+        assets[key]["channel_sources"] = source_specs
     return None, key, overlay_rels, channels
 
 
@@ -1275,7 +1333,8 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
     if display_label == "":
         display_label = display_label_from_tile_sources(core, spec.get("source_paths", [])) or label
 
-    if tile_kind == "composite" and len(spec.get("tiff_paths", [])) > 0:
+    source_count = len(spec.get("channel_sources", []) or []) + len(spec.get("tiff_paths", []) or [])
+    if tile_kind == "composite" and source_count > 0:
         base_rel, cache_key, overlay_rels, channels = ensure_composite_asset(spec, registry, norm_kw)
         return {
             "tile_kind": "composite",

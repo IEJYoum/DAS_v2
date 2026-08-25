@@ -31,6 +31,7 @@ from image_conventions import (
     find_segmentation_pair as convention_find_segmentation_pair,
     parse_feature_marker_record,
 )
+import tissue_edge_correction
 from feature_extract_17 import extract_core_features
 
 warnings.filterwarnings("ignore")
@@ -66,7 +67,7 @@ EPOCHS = 10000
 EDGETERMS = 10
 PER_TERM  = 6
 FTYPE = 'poly'   # 'poly' or 'sinu'
-EDGE_METHOD = 'distance_profile'  # 'distance_profile' or 'legacy_xy'
+EDGE_METHOD = 'tissue_distance_gain'  # 'tissue_distance_gain', 'distance_profile', or 'legacy_xy'
 EDGE_PROFILE_Q = 0.90
 EDGE_PROFILE_MIN_PIXELS = 64
 EDGE_PROFILE_REF_FRACTION = 0.25
@@ -77,6 +78,11 @@ EDGE_ASYM_SIDE_FRAC = 0.35
 EDGE_ASYM_MIN_PIXELS = 64
 EDGE_ASYM_MIN_DELTA = 2.0
 EDGE_ASYM_MAX_FACTOR = 1.25
+EDGE_DISTANCE_GAIN_METHODS = {'tissue_distance_gain', 'distance_gain', 'fullres_signal_distance_gain'}
+EDGE_DISTANCE_GAIN_CONFIG = tissue_edge_correction.EdgeGainConfig(
+    profile_min_pixels=EDGE_PROFILE_MIN_PIXELS,
+)
+LAST_EDGE_GAIN_REPORT = None
 
 # Masks
 USE_DISTANCE_TRANSFORM_MASKS = True  # False restores the older iterative binary_erosion path.
@@ -1392,12 +1398,36 @@ def compute_edge_sub_distance_profile(base_im, tissue_mask, measure_mask=None):
     return edge_full
 
 
-def compute_edge_sub(base_im, edge_mask=None, tissue_mask=None, ftype=FTYPE, method=EDGE_METHOD):
+def compute_edge_sub(base_im, edge_mask=None, tissue_mask=None, ftype=FTYPE, method=EDGE_METHOD, tissue_small=None, tissue_info=None):
+    global LAST_EDGE_GAIN_REPORT
     method = str(method or EDGE_METHOD)
     if method == 'legacy_xy':
         if edge_mask is None:
             raise ValueError("legacy_xy edge correction requires edge_mask")
         return compute_edge_sub_xy_legacy(base_im, edge_mask, ftype=ftype)
+    if method in EDGE_DISTANCE_GAIN_METHODS:
+        if tissue_mask is None:
+            tissue_mask = edge_mask
+        if tissue_mask is None:
+            raise ValueError("tissue_distance_gain edge correction requires tissue_mask")
+        gain_tissue_mask = None if tissue_small is not None else tissue_mask
+        edge_sub, result = tissue_edge_correction.compute_edge_gain_subtraction(
+            base_im,
+            tissue_mask=gain_tissue_mask,
+            tissue_small=tissue_small,
+            tissue_info=tissue_info,
+            config=EDGE_DISTANCE_GAIN_CONFIG,
+            return_result=True,
+        )
+        LAST_EDGE_GAIN_REPORT = dict(result.report)
+        fdebug(
+            "EDGE tissue_distance_gain:",
+            "status=", result.report.get("status"),
+            "bins=", result.report.get("good_profile_bins"),
+            "gain_min=", result.report.get("gain_smoothed_min"),
+            "gain_max=", result.report.get("gain_smoothed_max"),
+        )
+        return edge_sub
     if tissue_mask is None:
         tissue_mask = edge_mask
     if tissue_mask is None:
@@ -1547,6 +1577,8 @@ def process_core(job):
         # masks from cell seg - build only the masks needed by the requested corrections
         requested_mask_steps = [step for step in COM if str(step).lower() in ("q", "b", "t", "e")]
         needs_masks = len(requested_mask_steps) > 0
+        edge_tissue_small = None
+        edge_tissue_info = None
         if needs_masks:
             seg_t0 = time.perf_counter()
             segi = np.asarray(tiff.imread(os.path.join(sfold, cell_sfile)), dtype=np.int32)
@@ -1560,12 +1592,26 @@ def process_core(job):
                 'read_elapsed=', f"{time.perf_counter() - seg_t0:.1f}s",
             )
             mask1, mask3, qc_mask, edge_tissue_mask = getMasks(segi, requested_steps=requested_mask_steps)
+            if any(str(step).lower() == "e" for step in COM) and str(EDGE_METHOD or "").lower() in EDGE_DISTANCE_GAIN_METHODS:
+                fdebug("edge tissue-distance geometry start:", slide_scene)
+                edge_tissue_small, edge_tissue_info = tissue_edge_correction.build_tissue_body_small_from_labels(
+                    segi,
+                    config=EDGE_DISTANCE_GAIN_CONFIG,
+                    progress_fn=lambda msg: fdebug("edge tissue-distance geometry:", slide_scene, msg),
+                )
+                fdebug(
+                    "edge tissue-distance geometry done:",
+                    slide_scene,
+                    "small_pixels=", int(np.sum(edge_tissue_small)) if edge_tissue_small is not None else 0,
+                )
             if DEVMODE and qc_mask is not None:
                 showIm(qc_mask,'mask for qc')
             del segi
         else:
             fdebug('SEG SHAPE (skipping masks, no corrections):', 'MARKERS:', len(job["st_files"]), 'QC:', len(job["qc_files"]))
             mask1 = mask3 = qc_mask = edge_tissue_mask = None
+            edge_tissue_small = None
+            edge_tissue_info = None
 
         needs_qc_images = any(step in COM for step in ("q", "t"))
         if needs_qc_images:
@@ -1624,6 +1670,8 @@ def process_core(job):
                         edge_mask=mask1,
                         tissue_mask=edge_tissue_mask,
                         ftype=FTYPE,
+                        tissue_small=edge_tissue_small,
+                        tissue_info=edge_tissue_info,
                     )
                     if type(stim_entry[3]) == type(0):
                         stim_entry[3] = edge_sub
@@ -1665,7 +1713,7 @@ def process_core(job):
             release_runtime_memory()
 
         # refresh marker_paths after correction
-        del qcimD, mask1, mask3, qc_mask, edge_tissue_mask
+        del qcimD, mask1, mask3, qc_mask, edge_tissue_mask, edge_tissue_small, edge_tissue_info
         release_runtime_memory()
         marker_paths = []
         if SAVE_TIFF:
