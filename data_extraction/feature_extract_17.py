@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import pandas as pd
 import tifffile as tiff
@@ -30,7 +31,12 @@ PROGRESS_TICK = None
 
 def dprint(*args, **kwargs):
     if VERBOSE:
-        print(*args, **kwargs)
+        try:
+            import io_adapter as _io_adapter
+            _io_adapter.dprint(*args, **kwargs)
+            _io_adapter.flush_session_log()
+        except Exception:
+            print(*args, **kwargs)
 
 
 def _progress_tick(phase=""):
@@ -218,6 +224,226 @@ def count_by_label(label_im, max_label=None):
 
 
 # -----------------------
+# Telemetry helper
+# -----------------------
+def _phase_timer(flair):
+    """Returns a callable that logs elapsed time for each phase."""
+    state = {"start": time.perf_counter(), "phase_start": time.perf_counter()}
+    def tick(phase_name, detail=""):
+        now = time.perf_counter()
+        elapsed_phase = now - state["phase_start"]
+        elapsed_total = now - state["start"]
+        msg = f"[{flair}] {phase_name}: {elapsed_phase:.1f}s (total {elapsed_total:.1f}s)"
+        if detail:
+            msg += f" | {detail}"
+        dprint(msg)
+        state["phase_start"] = now
+    return tick
+
+
+# -----------------------
+# Phase 1: Load segmentation masks
+# -----------------------
+def _load_segmentation(nuc_path, cell_path, flair):
+    nucim = tiff.imread(nuc_path).astype(np.int32)
+    nucleus_only = False
+    try:
+        same_seg_path = os.path.abspath(str(nuc_path)) == os.path.abspath(str(cell_path))
+    except Exception:
+        same_seg_path = False
+
+    if cell_path is None or str(cell_path).strip() == "" or not os.path.isfile(str(cell_path)):
+        cellim = nucim
+        nucleus_only = True
+        dprint(f"{flair}: nucleus-only extraction (no cell segmentation mask); cytoplasm handling skipped")
+    elif same_seg_path:
+        cellim = nucim
+        nucleus_only = True
+        dprint(f"{flair}: nucleus-only extraction (cell and nuclear mask paths are identical); cytoplasm handling skipped")
+    else:
+        cellim = tiff.imread(cell_path).astype(np.int32)
+        if np.array_equal(nucim, cellim):
+            cellim = nucim
+            nucleus_only = True
+            dprint(f"{flair}: nucleus-only extraction (cell and nuclear masks are identical); cytoplasm handling skipped")
+
+    if nucim.shape != cellim.shape:
+        raise ValueError(f"Segmentation shape mismatch: nuc {nucim.shape} vs cell {cellim.shape}")
+
+    return nucim, cellim, nucleus_only
+
+
+# -----------------------
+# Phase 2: Morphology + base dataframe
+# -----------------------
+def _build_morphology_df(nucim, cellim, nucleus_only, flair, min_cyto_pixels):
+    H, W = nucim.shape
+    max_id = int(max(nucim.max(), cellim.max()))
+    if max_id <= 0:
+        dprint("No cells found (max label <=0).")
+        return None, None, None, None, None, None, 0, 0
+
+    ucells = np.unique(nucim)
+    ucells = ucells[ucells > 0]
+    ucells = np.sort(ucells).astype(np.int64)
+    if ucells.size == 0:
+        dprint("No cells found (no positive nuc labels).")
+        return None, None, None, None, None, None, 0, 0
+
+    nuc_props = regionprops_table(nucim, properties=("label", "area", "eccentricity", "centroid"))
+    if nucleus_only:
+        cell_props = nuc_props
+    else:
+        cell_props = regionprops_table(cellim, properties=("label", "area", "eccentricity", "centroid"))
+
+    nuc_df = pd.DataFrame(nuc_props).set_index("label")
+    cell_df = pd.DataFrame(cell_props).set_index("label")
+
+    if not nucleus_only:
+        sanity_check_centroids(cellim, nuc_df)
+
+    df = pd.DataFrame(index=ucells)
+    df.index.name = "seg_label"
+    seg_ids = df.index.to_numpy(dtype=np.int64)
+
+    df["DAPI_X"] = cell_df.reindex(seg_ids)["centroid-1"].fillna(nuc_df.reindex(seg_ids)["centroid-1"]).values
+    df["DAPI_Y"] = cell_df.reindex(seg_ids)["centroid-0"].fillna(nuc_df.reindex(seg_ids)["centroid-0"]).values
+
+    df["Ecc_nuc"]  = nuc_df.reindex(seg_ids)["eccentricity"].values
+    df["Ecc_cell"] = cell_df.reindex(seg_ids)["eccentricity"].fillna(nuc_df.reindex(seg_ids)["eccentricity"]).values
+
+    df["cyto_fallback_used"] = 0
+    df["cyto_pixels_measured"] = 0
+
+    n_cnt = count_by_label(nucim, max_label=max_id)
+    c_cnt = count_by_label(cellim, max_label=max_id)
+    if nucleus_only:
+        cyto_labels = None
+        cy_cnt = np.zeros(max_id + 1, dtype=np.int64)
+    else:
+        mask_remove = (nucim > 0) & (nucim == cellim)
+        cyto_labels = cellim.copy()
+        cyto_labels[mask_remove] = 0
+        cy_cnt = count_by_label(cyto_labels, max_label=max_id)
+
+    df["Area_nuc"]  = n_cnt[seg_ids]
+    df["Area_cell"] = np.where(c_cnt[seg_ids] > 0, c_cnt[seg_ids], n_cnt[seg_ids])
+    df["Area_cyto"] = cy_cnt[seg_ids]
+
+    if nucleus_only:
+        fallback_ids = np.array([], dtype=np.int64)
+    else:
+        fallback_mask = (cy_cnt[seg_ids] < int(min_cyto_pixels))
+        fallback_ids = seg_ids[fallback_mask]
+        if fallback_ids.size > 0:
+            dprint(f"{flair}: fallback cytoplasm for {fallback_ids.size}/{seg_ids.size} cells (cyto px < {min_cyto_pixels})")
+
+    return df, seg_ids, cyto_labels, cy_cnt, fallback_ids, max_id, H, W
+
+
+# -----------------------
+# Phase 3: Precompute fallback band indices
+# -----------------------
+def _build_fallback_bands(nucim, fallback_ids, n_in, n_out):
+    fallback_band_inds = {}
+    for cid in fallback_ids:
+        nuc_mask = (nucim == int(cid))
+        if not np.any(nuc_mask):
+            continue
+        band = nuclear_band_mask(nuc_mask, n_in=n_in, n_out=n_out)
+        fallback_band_inds[int(cid)] = np.flatnonzero(band.ravel()).astype(np.int64)
+    return fallback_band_inds
+
+
+# -----------------------
+# Phase 4: Extract per-marker intensities
+# -----------------------
+def _extract_markers(
+    df, marker_paths, nucim, cellim, cyto_labels, nucleus_only,
+    seg_ids, max_id, H, W, fallback_band_inds, flair, tick,
+):
+    n_markers = len(marker_paths)
+    for i, mp in enumerate(marker_paths):
+        bname = os.path.basename(mp)
+        bname = os.path.splitext(bname)[0]
+
+        im = tiff.imread(mp)
+        if im.ndim != 2:
+            im = im[0, :, :]
+        im = np.asarray(im, dtype=np.float32)
+
+        im2, changed = match_shape(im, (H, W), title_for_debug=bname)
+        if changed:
+            dprint("  shape mismatch:", im.shape, "->", im2.shape, "for", bname)
+            if DEVMODE:
+                show_alignment_qc(im2, cellim, nucim, title=f"{flair} {bname} shape fix QC")
+        im = im2
+
+        _, nuc_counts, nuc_means = mean_by_label(nucim, im, max_label=max_id)
+        if nucleus_only:
+            cell_counts = nuc_counts
+            cell_means = nuc_means
+            cy_means = np.zeros_like(nuc_means, dtype=np.float64)
+        else:
+            _, cell_counts, cell_means = mean_by_label(cellim, im, max_label=max_id)
+            _, cy_counts, cy_means = mean_by_label(cyto_labels, im, max_label=max_id)
+
+        df[bname + "_nuc"]  = nuc_means[seg_ids]
+        df[bname + "_cell"] = cell_means[seg_ids]
+        df[bname + "_cyto"] = cy_means[seg_ids]
+
+        miss = (cell_counts[seg_ids] == 0)
+        if np.any(miss):
+            miss_ids = seg_ids[miss]
+            df.loc[miss_ids, bname + "_cell"] = df.loc[miss_ids, bname + "_nuc"]
+
+        if fallback_band_inds:
+            flat = im.ravel()
+            for cid, inds in fallback_band_inds.items():
+                if inds.size == 0:
+                    df.loc[cid, bname + "_cyto"] = 0.0
+                else:
+                    df.loc[cid, bname + "_cyto"] = float(np.mean(flat[inds]))
+        _progress_tick(f"{flair} | feature extraction | {bname}")
+        tick(f"marker {i+1}/{n_markers}", bname)
+
+
+# -----------------------
+# Phase 5: Finalize dataframe
+# -----------------------
+def _finalize_df(df, seg_ids, cy_cnt, fallback_band_inds, slide, scene,
+                 save_core_csv, core_csv_path, nuc_path, flair):
+    if fallback_band_inds:
+        for cid, inds in fallback_band_inds.items():
+            df.loc[cid, "cyto_fallback_used"] = 1
+            df.loc[cid, "cyto_pixels_measured"] = int(len(inds))
+            df.loc[cid, "Area_cyto"] = 0
+            df.loc[cid, "Area_cell"] = df.loc[cid, "Area_nuc"]
+            df.loc[cid, "Ecc_cell"]  = df.loc[cid, "Ecc_nuc"]
+
+    normal_ids = seg_ids[df["cyto_fallback_used"].to_numpy(dtype=np.int64) == 0]
+    if normal_ids.size > 0:
+        df.loc[normal_ids, "cyto_pixels_measured"] = cy_cnt[normal_ids]
+
+    df["seg_label"] = df.index.astype(np.int64)
+    df["slide"] = slide
+    df["scene"] = scene
+    df["cellid"] = "cell" + df["seg_label"].astype(str)
+    df["slide_scene"] = df["slide"] + "_" + df["scene"]
+    df["slide_scene_cellid"] = df["slide_scene"] + "_" + df["cellid"]
+    df = df.set_index("slide_scene_cellid")
+
+    if save_core_csv:
+        if core_csv_path is None:
+            out_dir = os.path.join(os.path.dirname(nuc_path), "feature_tables")
+            os.makedirs(out_dir, exist_ok=True)
+            core_csv_path = os.path.join(out_dir, f"{flair}_extracted.csv")
+        df.to_csv(core_csv_path)
+
+    return df
+
+
+# -----------------------
 # Main: per-core extraction
 # -----------------------
 def extract_core_features(
@@ -245,6 +471,7 @@ def extract_core_features(
     """
     global DEVMODE
     DEVMODE = devmode
+    tick = _phase_timer(flair)
 
     if n_in is None:
         n_in = N_IN
@@ -252,186 +479,34 @@ def extract_core_features(
         n_out = N_OUT
     if min_cyto_pixels is None:
         min_cyto_pixels = MIN_CYTO_PIXELS
-    if DEVMODE:
-        dprint("Loading segmentation:", nuc_path, cell_path)
-    nucim = tiff.imread(nuc_path).astype(np.int32)
-    cellim = tiff.imread(cell_path).astype(np.int32)
 
-    if nucim.shape != cellim.shape:
-        raise ValueError(f"Segmentation shape mismatch: nuc {nucim.shape} vs cell {cellim.shape}")
+    # Phase 1: load segmentation
+    nucim, cellim, nucleus_only = _load_segmentation(nuc_path, cell_path, flair)
+    tick("load segmentation", f"shape={nucim.shape} nucleus_only={nucleus_only}")
 
-    H, W = nucim.shape
-    max_id = int(max(nucim.max(), cellim.max()))
-    if max_id <= 0:
-        dprint("No cells found (max label <=0).")
+    # Phase 2: morphology + base dataframe
+    result = _build_morphology_df(nucim, cellim, nucleus_only, flair, min_cyto_pixels)
+    df, seg_ids, cyto_labels, cy_cnt, fallback_ids, max_id, H, W = result
+    if df is None:
         return pd.DataFrame()
+    tick("morphology", f"cells={len(seg_ids)} max_label={max_id} fallback={len(fallback_ids)}")
 
-    # cells defined by nucleus ids
-    ucells = np.unique(nucim)
-    ucells = ucells[ucells > 0]
-    ucells = np.sort(ucells).astype(np.int64)
-    if ucells.size == 0:
-        dprint("No cells found (no positive nuc labels).")
-        return pd.DataFrame()
+    # Phase 3: fallback band precomputation (skipped when nucleus_only)
+    fallback_band_inds = _build_fallback_bands(nucim, fallback_ids, n_in, n_out)
+    tick("fallback bands", f"n={len(fallback_band_inds)}")
 
-    # -----------------------
-    # Morphology (once)
-    # -----------------------
-    nuc_props = regionprops_table(nucim, properties=("label", "area", "eccentricity", "centroid"))
-    cell_props = regionprops_table(cellim, properties=("label", "area", "eccentricity", "centroid"))
+    # Phase 4: marker extraction
+    _extract_markers(
+        df, marker_paths, nucim, cellim, cyto_labels, nucleus_only,
+        seg_ids, max_id, H, W, fallback_band_inds, flair, tick,
+    )
+    tick("all markers done", f"n={len(marker_paths)}")
 
-    nuc_df = pd.DataFrame(nuc_props).set_index("label")
-    cell_df = pd.DataFrame(cell_props).set_index("label")
-
-    # sanity check on a few ids (your helper)
-    sanity_check_centroids(cellim, nuc_df)
-
-    # -----------------------
-    # Base df (KEEP INT INDEX)
-    # -----------------------
-    df = pd.DataFrame(index=ucells)
-    df.index.name = "seg_label"
-    seg_ids = df.index.to_numpy(dtype=np.int64)  # master integer id array aligned to df rows
-
-    # coords
-    df["DAPI_X"] = cell_df.reindex(seg_ids)["centroid-1"].fillna(nuc_df.reindex(seg_ids)["centroid-1"]).values
-    df["DAPI_Y"] = cell_df.reindex(seg_ids)["centroid-0"].fillna(nuc_df.reindex(seg_ids)["centroid-0"]).values
-
-
-    # areas from morphology tables (fallback cell->nuc if missing)
-    df["Area_nuc"]  = nuc_df.reindex(seg_ids)["area"].values
-    df["Area_cell"] = cell_df.reindex(seg_ids)["area"].fillna(nuc_df.reindex(seg_ids)["area"]).values
-    df["Area_cyto"] = 0  # filled from pixel counts below + overridden for fallback
-
-    # eccentricities
-    df["Ecc_nuc"]  = nuc_df.reindex(seg_ids)["eccentricity"].values
-    df["Ecc_cell"] = cell_df.reindex(seg_ids)["eccentricity"].fillna(nuc_df.reindex(seg_ids)["eccentricity"]).values
-
-    # flags / bookkeeping
-    df["cyto_fallback_used"] = 0
-    df["cyto_pixels_measured"] = 0
-
-    # -----------------------
-    # Build cyto label image (normal def)
-    # -----------------------
-    # remove nucleus pixels where nucleus id == cell id
-    mask_remove = (nucim > 0) & (nucim == cellim)
-    cyto_labels = cellim.copy()
-    cyto_labels[mask_remove] = 0
-
-    # counts for nuc/cell/cyto pixel area (so you don't rely on morphology area)
-    # mean_by_label returns: sums/counts/means (per your existing helper)
-    n_cnt = count_by_label(nucim, max_label=max_id)
-    c_cnt = count_by_label(cellim, max_label=max_id)
-    cy_cnt = count_by_label(cyto_labels, max_label=max_id)
-
-    # pixel-count areas (these were what your old code effectively used)
-    df["Area_nuc"]  = n_cnt[seg_ids]
-    df["Area_cell"] = np.where(c_cnt[seg_ids] > 0, c_cnt[seg_ids], n_cnt[seg_ids])  # if missing cell label -> nuc
-    df["Area_cyto"] = cy_cnt[seg_ids]
-
-    # identify fallback ids (INT IDs)
-    fallback_mask = (cy_cnt[seg_ids] < int(min_cyto_pixels))
-    fallback_ids = seg_ids[fallback_mask]
-    if fallback_ids.size > 0:
-        dprint(f"{flair}: fallback cytoplasm for {fallback_ids.size}/{seg_ids.size} cells (cyto px < {min_cyto_pixels})")
-
-    # precompute fallback band indices for ids needing fallback
-    fallback_band_inds = {}
-    selem = ndimage.generate_binary_structure(2, 1)  # 4-connected
-    for cid in fallback_ids:
-        nuc_mask = (nucim == int(cid))
-        if not np.any(nuc_mask):
-            continue
-        band = nuclear_band_mask(nuc_mask, n_in=n_in, n_out=n_out)  # your helper; must return bool 2D
-        fallback_band_inds[int(cid)] = np.flatnonzero(band.ravel()).astype(np.int64)
-
-    # -----------------------
-    # Marker extraction
-    # -----------------------
-    for mp in marker_paths:
-        bname = os.path.basename(mp)
-        bname = os.path.splitext(bname)[0]
-
-        #dprint("Loading marker:", bname)
-        im = tiff.imread(mp)
-        if im.ndim != 2:
-            im = im[0, :, :]
-        im = np.asarray(im, dtype=np.float32)
-
-        im2, changed = match_shape(im, (H, W), title_for_debug=bname)  # your helper
-        if changed:
-            dprint("  shape mismatch:", im.shape, "->", im2.shape, "for", bname)
-            if DEVMODE:
-                show_alignment_qc(im2, cellim, nucim, title=f"{flair} {bname} shape fix QC")  # your helper
-        im = im2
-
-        # fast means
-        _, nuc_counts, nuc_means   = mean_by_label(nucim, im, max_label=max_id)
-        _, cell_counts, cell_means = mean_by_label(cellim, im, max_label=max_id)
-        _, cy_counts, cy_means     = mean_by_label(cyto_labels, im, max_label=max_id)
-
-        # fill using INT seg_ids (safe)
-        df[bname + "_nuc"]  = nuc_means[seg_ids]
-        df[bname + "_cell"] = cell_means[seg_ids]
-        df[bname + "_cyto"] = cy_means[seg_ids]
-
-        # if cell label missing -> treat cell mean as nuc mean
-        miss = (cell_counts[seg_ids] == 0)
-        if np.any(miss):
-            miss_ids = seg_ids[miss]
-            df.loc[miss_ids, bname + "_cell"] = df.loc[miss_ids, bname + "_nuc"]
-
-        # override cyto for fallback ids using band pixels
-        if fallback_band_inds:
-            flat = im.ravel()
-            for cid, inds in fallback_band_inds.items():
-                if inds.size == 0:
-                    df.loc[cid, bname + "_cyto"] = 0.0
-                else:
-                    df.loc[cid, bname + "_cyto"] = float(np.mean(flat[inds]))
-        _progress_tick(f"{flair} | feature extraction | {bname}")
-
-    # -----------------------
-    # Finalize fallback morphology overrides + cyto pixel bookkeeping
-    # -----------------------
-    if fallback_band_inds:
-        for cid, inds in fallback_band_inds.items():
-            df.loc[cid, "cyto_fallback_used"] = 1
-            df.loc[cid, "cyto_pixels_measured"] = int(len(inds))
-
-            # morphology override per your rules
-            df.loc[cid, "Area_cyto"] = 0
-            df.loc[cid, "Area_cell"] = df.loc[cid, "Area_nuc"]
-            df.loc[cid, "Ecc_cell"]  = df.loc[cid, "Ecc_nuc"]
-
-    # for non-fallback cells, measured pixels are the normal cyto pixel count
-    normal_ids = seg_ids[df["cyto_fallback_used"].to_numpy(dtype=np.int64) == 0]
-    if normal_ids.size > 0:
-        df.loc[normal_ids, "cyto_pixels_measured"] = cy_cnt[normal_ids]
-
-    # -----------------------
-    # ADD SLIDE/SCENE/CELLID + FINAL STRING INDEX (DO THIS LAST)
-    # -----------------------
-    df["seg_label"] = df.index.astype(np.int64)              # keep seg id explicitly as a column
-    df["slide"] = slide
-    df["scene"] = scene
-    df["cellid"] = "cell" + df["seg_label"].astype(str)
-    df["slide_scene"] = df["slide"] + "_" + df["scene"]
-    df["slide_scene_cellid"] = df["slide_scene"] + "_" + df["cellid"]
-
-    # final index (legacy)
-    df = df.set_index("slide_scene_cellid")
-
-    # -----------------------
-    # Save per-core CSV
-    # -----------------------
-    if save_core_csv:
-        if core_csv_path is None:
-            out_dir = os.path.join(os.path.dirname(nuc_path), "feature_tables")
-            os.makedirs(out_dir, exist_ok=True)
-            core_csv_path = os.path.join(out_dir, f"{flair}_extracted.csv")
-        #dprint("Saving core CSV:", core_csv_path)
-        df.to_csv(core_csv_path)
+    # Phase 5: finalize
+    df = _finalize_df(
+        df, seg_ids, cy_cnt, fallback_band_inds,
+        slide, scene, save_core_csv, core_csv_path, nuc_path, flair,
+    )
+    tick("finalize + save", f"rows={df.shape[0]} cols={df.shape[1]}")
 
     return df

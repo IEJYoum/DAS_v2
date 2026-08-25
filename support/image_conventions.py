@@ -12,12 +12,50 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
 
 SUPPORTED_IMAGE_SUFFIXES = {".czi", ".tif", ".tiff"}
+PANEL_WORKBOOK_GLOB = "CyclicPanelMarkers*.xlsx"
+
+
+def read_czi_channel_names(path: Union[str, os.PathLike[str]]) -> tuple[str, ...]:
+    """Extract ordered channel names from CZI XML metadata.
+
+    Reads Information/Image/Dimensions/Channels elements and returns the Name
+    attribute of each Channel in order.  Returns an empty tuple on any failure.
+    """
+    try:
+        from czifile import CziFile
+    except ImportError:
+        return ()
+    try:
+        with CziFile(str(path)) as czi:
+            meta = czi.metadata()
+        root = ET.fromstring(meta)
+        for info in root.iter("Information"):
+            img = info.find("Image")
+            if img is None:
+                continue
+            dims = img.find("Dimensions")
+            if dims is None:
+                continue
+            channels = dims.find("Channels")
+            if channels is None:
+                continue
+            names = []
+            for ch in channels:
+                name = ch.attrib.get("Name", "").strip()
+                if name:
+                    names.append(name)
+            if names:
+                return tuple(names)
+    except Exception:
+        pass
+    return ()
 
 
 @dataclass(frozen=True)
@@ -28,6 +66,7 @@ class CycifImageRecord:
     scene_token: str
     round_token: str
     marker_names: tuple[str, ...] = ()
+    nuclear_marker_name: str = ""
     channel_number: Optional[int] = None
     register_channel_index: int = 0
     apply_shift_to_all_channels: bool = True
@@ -55,6 +94,31 @@ class SegmentationPair:
 
 
 @dataclass(frozen=True)
+class PanelMarkerRecord:
+    """One row from a CycIF panel workbook."""
+
+    cycle_number: int
+    local_channel: int
+    marker_name: str
+    marker_token: str
+    background_name: str = ""
+    background_token: str = ""
+    remove: bool = False
+
+
+@dataclass
+class PanelFeaturePlan:
+    """Panel-derived file plan for stain correction and feature extraction."""
+
+    panel_path: str
+    qc_files: list[str]
+    stain_files: list[str]
+    marker_by_stain: dict[str, str]
+    background_file_by_stain: dict[str, str]
+    missing_backgrounds: list[str]
+
+
+@dataclass(frozen=True)
 class ViewerAssetRecord:
     """One image/asset path resolved to the viewer's slide_scene contract."""
 
@@ -66,6 +130,140 @@ class ViewerAssetRecord:
     marker: str = ""
     scene_letter: str = ""
     scene_number: Optional[int] = None
+
+
+def sanitize_marker_name(marker_name: object) -> str:
+    """Convert panel/CZI marker text into a conservative filename token."""
+
+    text = str(marker_name).strip()
+    text = re.sub(r"[^A-Za-z0-9_-]", "_", text)
+    return text or "marker"
+
+
+def normalize_marker_key(marker_name: object) -> str:
+    """Loose key for matching workbook labels to sanitized filenames."""
+
+    return re.sub(r"[^a-z0-9]", "", str(marker_name).strip().lower())
+
+
+def is_autofluorescence_marker(marker_name: object) -> bool:
+    return "autofluorescence" in normalize_marker_key(marker_name)
+
+
+def _boolish(value: object) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if text in {"", "nan", "none", "false", "f", "no", "n", "0"}:
+        return False
+    return True
+
+
+def find_panel_workbook(folder: Union[str, os.PathLike[str]]) -> Optional[str]:
+    """Find a CyclicPanelMarkers workbook in one folder, if exactly one exists."""
+
+    try:
+        root = Path(folder)
+        matches = sorted(path for path in root.glob(PANEL_WORKBOOK_GLOB) if path.is_file())
+    except Exception:
+        return None
+    if len(matches) == 1:
+        return str(matches[0])
+    return None
+
+
+def read_panel_marker_records(
+    panel_path: Union[str, os.PathLike[str]],
+    sheet_name: str = "in",
+) -> tuple[PanelMarkerRecord, ...]:
+    """Read a CycIF panel workbook and derive per-cycle local channels.
+
+    `channel_number` is sequential across the whole acquisition, while TIFFs use
+    local per-round channels.  Local channels are therefore assigned in workbook
+    row order within each cycle.
+    """
+
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError("pandas is required to read CycIF panel workbooks") from exc
+
+    table = pd.read_excel(panel_path, sheet_name=sheet_name)
+    required = {"cycle_number", "channel_number", "marker_name"}
+    missing = sorted(required.difference(table.columns))
+    if missing:
+        raise ValueError("panel workbook missing required columns: " + ", ".join(missing))
+
+    local_counts: dict[int, int] = {}
+    records: list[PanelMarkerRecord] = []
+    for _, row in table.iterrows():
+        if pd.isna(row["cycle_number"]) or pd.isna(row["marker_name"]):
+            continue
+        cycle_number = int(row["cycle_number"])
+        local_counts[cycle_number] = local_counts.get(cycle_number, 0) + 1
+        marker_name = str(row["marker_name"]).strip()
+        background_name = ""
+        if "background" in table.columns and not pd.isna(row.get("background")):
+            background_name = str(row.get("background")).strip()
+        records.append(
+            PanelMarkerRecord(
+                cycle_number=cycle_number,
+                local_channel=local_counts[cycle_number],
+                marker_name=marker_name,
+                marker_token=sanitize_marker_name(marker_name),
+                background_name=background_name,
+                background_token=sanitize_marker_name(background_name) if background_name else "",
+                remove=_boolish(row.get("remove")) if "remove" in table.columns else False,
+            )
+        )
+    if not records:
+        raise ValueError("panel workbook produced no marker records: " + str(panel_path))
+    return tuple(records)
+
+
+def round_number_from_token(round_token: str) -> Optional[int]:
+    match = re.search(r"R(\d+)", str(round_token), re.IGNORECASE)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def apply_panel_to_cycif_records(
+    scene_groups: dict[str, list[CycifImageRecord]],
+    panel_path: Union[str, os.PathLike[str]],
+) -> dict[str, list[CycifImageRecord]]:
+    """Attach panel marker names to registration records before output naming."""
+
+    panel_records = read_panel_marker_records(panel_path)
+    by_cycle: dict[int, dict[int, PanelMarkerRecord]] = {}
+    for row in panel_records:
+        by_cycle.setdefault(row.cycle_number, {})[row.local_channel] = row
+
+    updated: dict[str, list[CycifImageRecord]] = {}
+    for slide_scene, records in scene_groups.items():
+        out_records: list[CycifImageRecord] = []
+        for record in records:
+            cycle_number = round_number_from_token(record.round_token)
+            cycle_key = cycle_number if cycle_number is not None else -1
+            local_rows = by_cycle.get(cycle_key, {})
+            if not local_rows:
+                out_records.append(record)
+                continue
+            max_channel = max(local_rows)
+            marker_names = tuple(
+                local_rows[channel].marker_token if channel in local_rows else "d"
+                for channel in range(2, max_channel + 1)
+            )
+            nuclear_marker = local_rows.get(1).marker_token if 1 in local_rows else ""
+            out_records.append(
+                replace(
+                    record,
+                    marker_names=marker_names,
+                    nuclear_marker_name=nuclear_marker,
+                )
+            )
+        updated[slide_scene] = out_records
+    return updated
 
 
 def round_sort_key(round_token: str) -> tuple[int, str]:
@@ -259,7 +457,9 @@ def marker_slot_count(records: Iterable[CycifImageRecord], plane_count: int) -> 
 
 def build_marker_block(record: CycifImageRecord, channel_number: int, slot_count: int) -> str:
     slots = ["d"] * max(1, int(slot_count))
-    if int(channel_number) >= 2:
+    if int(channel_number) == 1 and str(record.nuclear_marker_name or "").strip():
+        slots[0] = sanitize_marker_name(record.nuclear_marker_name)
+    elif int(channel_number) >= 2:
         marker_index = int(channel_number) - 2
         marker = _marker_for_channel(record, int(channel_number))
         while marker_index >= len(slots):
@@ -362,6 +562,115 @@ def parse_koei_feature_marker_record(file_name: str, stem: Optional[str] = None)
     )
 
 
+def build_panel_feature_plan(
+    core_folder: Union[str, os.PathLike[str]],
+    allowed_markers: Optional[Iterable[str]] = None,
+    panel_path: Optional[Union[str, os.PathLike[str]]] = None,
+) -> Optional[PanelFeaturePlan]:
+    """Resolve panel-aware stain/QC files for a registered DAS core folder."""
+
+    folder = Path(core_folder)
+    if not folder.is_dir():
+        return None
+
+    panel_text = str(panel_path or find_panel_workbook(folder) or "").strip()
+    if panel_text == "":
+        return None
+    panel_records = read_panel_marker_records(panel_text)
+    allowed = [normalize_marker_key(marker) for marker in (allowed_markers or []) if str(marker).strip()]
+
+    files_by_cycle_channel_marker: dict[tuple[int, int, str], str] = {}
+    unique_files_by_cycle_channel: dict[tuple[int, int], str] = {}
+    duplicate_cycle_channel: set[tuple[int, int]] = set()
+
+    for path in sorted(folder.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file() or path.suffix.lower() not in {".tif", ".tiff"}:
+            continue
+        record = parse_feature_marker_record(path.name)
+        if record is None:
+            continue
+        cycle_number = round_number_from_token(record.round_token)
+        if cycle_number is None:
+            continue
+        key = (cycle_number, int(record.channel_number))
+        marker_key = normalize_marker_key(record.marker)
+        files_by_cycle_channel_marker[(cycle_number, int(record.channel_number), marker_key)] = path.name
+        if key in unique_files_by_cycle_channel:
+            duplicate_cycle_channel.add(key)
+        else:
+            unique_files_by_cycle_channel[key] = path.name
+
+    def file_for_panel_row(row: PanelMarkerRecord) -> Optional[str]:
+        key = (row.cycle_number, row.local_channel, normalize_marker_key(row.marker_token))
+        if key in files_by_cycle_channel_marker:
+            return files_by_cycle_channel_marker[key]
+        cycle_channel_key = (row.cycle_number, row.local_channel)
+        if cycle_channel_key not in duplicate_cycle_channel:
+            return unique_files_by_cycle_channel.get(cycle_channel_key)
+        return None
+
+    panel_file_by_marker_key: dict[tuple[int, str], str] = {}
+    panel_files_by_marker_key_any_channel: dict[str, list[str]] = {}
+    panel_file_by_row: dict[PanelMarkerRecord, str] = {}
+    for row in panel_records:
+        file_name = file_for_panel_row(row)
+        if file_name is None:
+            continue
+        panel_file_by_row[row] = file_name
+        panel_file_by_marker_key[(row.local_channel, normalize_marker_key(row.marker_name))] = file_name
+        panel_file_by_marker_key[(row.local_channel, normalize_marker_key(row.marker_token))] = file_name
+        panel_files_by_marker_key_any_channel.setdefault(normalize_marker_key(row.marker_name), []).append(file_name)
+        panel_files_by_marker_key_any_channel.setdefault(normalize_marker_key(row.marker_token), []).append(file_name)
+
+    qc_files: list[str] = []
+    stain_files: list[str] = []
+    marker_by_stain: dict[str, str] = {}
+    background_file_by_stain: dict[str, str] = {}
+    missing_backgrounds: list[str] = []
+
+    for row in panel_records:
+        if row.local_channel < 2:
+            continue
+        file_name = panel_file_by_row.get(row)
+        if file_name is None:
+            continue
+
+        is_qc = bool(row.remove) or is_autofluorescence_marker(row.marker_name)
+        if is_qc:
+            qc_files.append(file_name)
+            continue
+
+        if allowed and not any(token in normalize_marker_key(row.marker_name) for token in allowed):
+            continue
+
+        stain_files.append(file_name)
+        marker_by_stain[file_name] = row.marker_token
+        if row.background_name:
+            background_key = normalize_marker_key(row.background_name)
+            background_file = panel_file_by_marker_key.get((row.local_channel, background_key))
+            if not background_file:
+                candidates = sorted(dict.fromkeys(panel_files_by_marker_key_any_channel.get(background_key, [])))
+                if len(candidates) == 1:
+                    background_file = candidates[0]
+            if background_file:
+                background_file_by_stain[file_name] = background_file
+            else:
+                missing_backgrounds.append(
+                    f"{file_name} background={row.background_name} channel=c{row.local_channel}"
+                )
+
+    qc_files = sorted(dict.fromkeys(qc_files))
+    stain_files = sorted(dict.fromkeys(stain_files))
+    return PanelFeaturePlan(
+        panel_path=str(panel_text),
+        qc_files=qc_files,
+        stain_files=stain_files,
+        marker_by_stain=marker_by_stain,
+        background_file_by_stain=background_file_by_stain,
+        missing_backgrounds=missing_backgrounds,
+    )
+
+
 def collect_feature_marker_files(
     core_folder: Union[str, os.PathLike[str]],
     qc_tokens: Optional[Iterable[str]] = None,
@@ -376,6 +685,10 @@ def collect_feature_marker_files(
     behavior using `qc_tokens` and `stain_tokens`.
     """
     folder = Path(core_folder)
+    panel_plan = build_panel_feature_plan(folder, allowed_markers=allowed_markers)
+    if panel_plan is not None:
+        return list(panel_plan.qc_files), list(panel_plan.stain_files)
+
     qc_tokens = [str(token) for token in (qc_tokens or []) if str(token).strip()]
     stain_tokens = [str(token) for token in (stain_tokens or []) if str(token).strip()]
     allowed = [str(marker).strip().lower() for marker in (allowed_markers or []) if str(marker).strip()]

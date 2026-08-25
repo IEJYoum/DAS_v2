@@ -29,9 +29,12 @@ if str(_SUPPORT_DIR) not in sys.path:
 
 from image_conventions import (
     CycifImageRecord,
+    apply_panel_to_cycif_records,
     build_output_names_for_record,
     discover_cycif_scene_groups,
+    find_panel_workbook,
     marker_slot_count,
+    read_czi_channel_names,
 )
 from shared_utils import checkChange
 
@@ -54,6 +57,8 @@ DEBUG_TEXT_INTERVAL_SEC = 30
 DEBUG_SCALE1_TEXT_INTERVAL_SEC = 150
 DEBUG_OVERLAY_INTERVAL_SEC = 60
 DEBUG_OVERLAY_MAX_DIM = 1000
+DEBUG_SCORE_INPUT_PNGS = True
+DEBUG_SCORE_INPUT_MAX_DIM = 900
 DEBUG_PROGRESS_CHECK_EVERY = 5000
 DEBUG_SCALE1_PROGRESS_CHECK_EVERY = 5
 DEBUG_DIR_NAME = "_live_debug"
@@ -76,6 +81,7 @@ POST_AFFINE_TRANSLATION_RADIUS = 2
 POST_AFFINE_SUBPIXEL = False
 SUBPIXEL_OFFSETS = [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]
 NORM_HIGH_Q = 99
+SIGNAL_MASK_Q = 50
 PAD_Q = 10
 MIN_SIGNAL_OVERLAP_FRAC = 0.10
 MIN_COARSE_SIGNAL = 16
@@ -372,6 +378,51 @@ def _normalize_for_overlay(image):
     out = (arr - lo) / (hi - lo)
     out[~finite] = 0
     return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def _resize_debug_panel(panel):
+    max_dim = int(DEBUG_SCORE_INPUT_MAX_DIM)
+    if max_dim <= 0:
+        return panel
+    h, w = panel.shape
+    if max(h, w) <= max_dim:
+        return panel
+    factor = max(h / float(max_dim), w / float(max_dim))
+    out_shape = (max(1, int(round(h / factor))), max(1, int(round(w / factor))))
+    return resize(
+        panel,
+        out_shape,
+        preserve_range=True,
+        order=1,
+        anti_aliasing=True,
+    ).astype(np.float32)
+
+
+def _score_debug_panel(fixed, moving, fixed_mask, moving_mask):
+    fixed_score = np.clip(np.asarray(fixed, dtype=np.float32), 0.0, 1.0)
+    moving_score = np.clip(np.asarray(moving, dtype=np.float32), 0.0, 1.0)
+    fixed_masked = fixed_score.copy()
+    moving_masked = moving_score.copy()
+    fixed_masked[~np.asarray(fixed_mask, dtype=bool)] = 0.0
+    moving_masked[~np.asarray(moving_mask, dtype=bool)] = 0.0
+    top = np.concatenate([fixed_score, moving_score], axis=1)
+    bottom = np.concatenate([fixed_masked, moving_masked], axis=1)
+    panel = np.concatenate([top, bottom], axis=0)
+    panel = _resize_debug_panel(panel)
+    return np.asarray(np.clip(panel * 255.0, 0, 255), dtype=np.uint8)
+
+
+def save_score_input_debug_png(progress_callback, scale, fixed, moving, fixed_mask, moving_mask):
+    if not DEBUG_SCORE_INPUT_PNGS:
+        return
+    debug_dir = getattr(progress_callback, "debug_dir", None)
+    if debug_dir is None:
+        return
+    ref_round = _safe_token(getattr(progress_callback, "ref_round", "fixed"))
+    moving_round = _safe_token(getattr(progress_callback, "moving_round", "moving"))
+    out_path = Path(debug_dir) / (ref_round + "_vs_" + moving_round + "_scale" + str(scale) + "_score_input.png")
+    panel = _score_debug_panel(fixed, moving, fixed_mask, moving_mask)
+    imsave(str(out_path), panel)
 
 
 class RegistrationDebugReporter:
@@ -684,6 +735,42 @@ def folder_has_supported_files(folder):
     return False
 
 
+def scene_groups_need_panel_names(scene_groups):
+    for records in scene_groups.values():
+        for record in records:
+            if isinstance(record, CycifImageRecord) and not record.marker_names:
+                return True
+    return False
+
+
+def maybe_apply_panel_workbook(root, scene_groups):
+    if not scene_groups_need_panel_names(scene_groups):
+        return scene_groups
+
+    default_panel = find_panel_workbook(root) or ""
+    print("detected inputs without marker names; an optional panel workbook can supply output marker names")
+    panel_path = str(
+        local_check_change(
+            default_panel,
+            "panel workbook (.xlsx) for marker names (blank = use CZI/filename names)",
+        )
+    ).strip()
+    if panel_path == "":
+        print("no panel workbook selected; registration will use CZI metadata or filename-derived markers")
+        return scene_groups
+    if not os.path.isfile(panel_path):
+        print("panel workbook not found; registration will use CZI metadata or filename-derived markers:", panel_path)
+        return scene_groups
+    try:
+        updated = apply_panel_to_cycif_records(scene_groups, panel_path)
+    except Exception as exc:
+        print("panel workbook could not be applied; registration will use CZI metadata or filename-derived markers:", exc)
+        return scene_groups
+    print("using panel workbook for registration output names:", panel_path)
+    _flush_session_log()
+    return updated
+
+
 def collect_inputs():
     cwd = os.getcwd().replace("\\", "/")
     if folder_has_supported_files(cwd):
@@ -723,6 +810,7 @@ def collect_inputs():
     scene_groups, skipped_files = discover_cycif_scene_groups(root, files)
     if len(scene_groups) == 0:
         raise ValueError("no supported CycIF files were detected in " + root)
+    scene_groups = maybe_apply_panel_workbook(root, scene_groups)
     conventions = sorted({record.convention for records in scene_groups.values() for record in records})
     print("detected CycIF convention(s):", ", ".join(conventions))
     if skipped_files:
@@ -835,10 +923,14 @@ def prepare_registration_plane(plane, real_mask):
     score = raw.copy()
     score[score < floor] = floor
     high = np.percentile(score[real_mask], NORM_HIGH_Q)
-    if high > 0:
+    if high > floor:
         score[score > high] = high
-        score = score / high
-    signal_mask = (raw > floor) & real_mask
+        score = (score - floor) / (high - floor)
+    if float(SIGNAL_MASK_Q) <= 0:
+        signal_mask = real_mask.copy()
+    else:
+        mask_floor = np.percentile(raw[real_mask], SIGNAL_MASK_Q)
+        signal_mask = (raw > mask_floor) & real_mask
     if int(signal_mask.sum()) == 0:
         signal_mask = real_mask.copy()
     return score.astype(np.float32), signal_mask
@@ -1797,6 +1889,15 @@ def fit_translation_numpy(
             sparse_moving_mask_small = downsample_for_fit(sparse_moving_mask, scale, is_mask=True)
         if scale != 1 and (int(fixed_mask_small.sum()) < MIN_COARSE_SIGNAL or int(moving_mask_small.sum()) < MIN_COARSE_SIGNAL):
             continue
+        if callable(progress_callback):
+            save_score_input_debug_png(
+                progress_callback,
+                scale,
+                fixed_small,
+                moving_small,
+                fixed_mask_small,
+                moving_mask_small,
+            )
         sparse_regions = None
         score_mode = "full"
         sample_pixels = ""
@@ -2056,24 +2157,10 @@ def format_entry_transform(entry):
     return text
 
 
-def get_output_canvas(entries, shifts):
-    y_values = []
-    x_values = []
-    for entry, shift in zip(entries, shifts):
-        matrix = entry_affine_matrix(entry, shift)
-        for channel in entry["raw_channels"]:
-            for y, x in transformed_corners(channel.shape, matrix):
-                y_values.append(float(y))
-                x_values.append(float(x))
-    min_y = min(y_values)
-    min_x = min(x_values)
-    max_y = max(y_values)
-    max_x = max(x_values)
-    base_shift = (max(0, int(np.ceil(-min_y))), max(0, int(np.ceil(-min_x))))
-    out_shape = (
-        int(np.ceil(max_y + base_shift[0])),
-        int(np.ceil(max_x + base_shift[1])),
-    )
+def get_output_canvas(entries, ref_index):
+    reference_entry = entries[ref_index]
+    out_shape = tuple(int(x) for x in reference_entry["raw_channels"][0].shape)
+    base_shift = (0, 0)
     return out_shape, base_shift
 
 
@@ -2250,6 +2337,14 @@ def load_scene_entries(root, slide_scene, files):
         for file_or_record in files:
             file = registration_file_name(file_or_record)
             raw_channels = load_group_planes([root + "/" + file])
+            if (
+                isinstance(file_or_record, CycifImageRecord)
+                and not file_or_record.marker_names
+            ):
+                from dataclasses import replace as _replace
+                czi_names = read_czi_channel_names(root + "/" + file)
+                if czi_names:
+                    file_or_record = _replace(file_or_record, marker_names=czi_names[1:])
             out_names = build_group_output_names([file_or_record], len(raw_channels), scene_token)
             if len(out_names) != len(raw_channels):
                 raise ValueError("output-name mismatch in " + file)
@@ -2378,7 +2473,7 @@ def run_steps(entries, ref_index, root, slide_scene):
 def save_scene(root, slide_scene, entries, ref_index, shifts, runtime_min):
     out_scene = root + "/registeredImages/" + slide_scene
     os.makedirs(out_scene, exist_ok=True)
-    out_shape, base_shift = get_output_canvas(entries, shifts)
+    out_shape, base_shift = get_output_canvas(entries, ref_index)
     cache_shifted_reg(entries, shifts, out_shape, base_shift)
     reference_entry = entries[ref_index]
     debug_count = 0

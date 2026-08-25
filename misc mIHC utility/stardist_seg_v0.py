@@ -34,17 +34,44 @@ def load_stardist_model():
         ssl._create_default_https_context = old_https_context
 
 
+def _tile_grid(h, w, tile_size, overlap):
+    """Yield (read_y, read_x, write_y, write_x) slices for each tile."""
+    def _axis(length):
+        if length <= tile_size:
+            return [(0, length, 0, length)]
+        step = tile_size - overlap
+        starts = list(range(0, length - tile_size, step)) + [length - tile_size]
+        seen = list(dict.fromkeys(starts))
+        out = []
+        for i, s in enumerate(seen):
+            wy0 = s if i == 0 else s + overlap // 2
+            wy1 = s + tile_size if i == len(seen) - 1 else s + tile_size - overlap // 2
+            out.append((s, s + tile_size, wy0, wy1))
+        return out
+    for ry0, ry1, wy0, wy1 in _axis(h):
+        for rx0, rx1, wx0, wx1 in _axis(w):
+            yield (ry0, ry1, wy0, wy1), (rx0, rx1, wx0, wx1)
+
+
 def predict_stardist(stardist_model, stardist_normalize, dapi_array):
     image = dapi_array.astype(np.float32, copy=False)
     image = stardist_normalize(image, 1, 99.8)
-    labels, _ = stardist_model.predict_instances_big(
-        image,
-        axes="YX",
-        block_size=seg.STARDIST_BLOCK_SIZE,
-        min_overlap=seg.STARDIST_MIN_OVERLAP,
-        context=seg.STARDIST_CONTEXT,
-    )
-    return labels.astype(np.int32, copy=False)
+    h, w = image.shape
+    tile_size = seg.STARDIST_TILE_SIZE
+    overlap = seg.STARDIST_TILE_OVERLAP
+    if h <= tile_size and w <= tile_size:
+        labels, _ = stardist_model.predict_instances(image, axes="YX")
+        return labels.astype(np.int32, copy=False)
+    out = np.zeros((h, w), dtype=np.int32)
+    label_offset = 0
+    for (ry0, ry1, wy0, wy1), (rx0, rx1, wx0, wx1) in _tile_grid(h, w, tile_size, overlap):
+        tile = image[ry0:ry1, rx0:rx1]
+        tile_labels, _ = stardist_model.predict_instances(tile, axes="YX")
+        crop = tile_labels[wy0 - ry0:wy1 - ry0, wx0 - rx0:wx1 - rx0]
+        mask = crop > 0
+        out[wy0:wy1, wx0:wx1][mask] = crop[mask] + label_offset
+        label_offset += int(tile_labels.max())
+    return out
 
 
 def run_stardist(output_folder, dapi_array, mask_labeled, dapi_scale, engine_timings):

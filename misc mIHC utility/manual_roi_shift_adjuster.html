@@ -393,6 +393,34 @@
       return lower.endsWith(".tif") || lower.endsWith(".tiff");
     }
 
+    function isDapiLikeFile(name) {
+      return /(^|[_\-.])(DAPI|DNA)([_\-.]|\d|$)/i.test(name);
+    }
+
+    function isCycifLikeFile(name) {
+      return /^R\d+[A-Z]?_.*_c\d+_.*Scene-/i.test(name);
+    }
+
+    function selectFilesForLoad(files) {
+      const imageFiles = sortFiles(Array.from(files).filter(file => hasImageExtension(file.name)));
+      const cycifFiles = imageFiles.filter(file => isTiff(file.name) && isCycifLikeFile(file.name));
+      const dapiFiles = cycifFiles.filter(file => isDapiLikeFile(file.name));
+      if (
+        imageFiles.length > CYCIF_DAPI_ONLY_TRIGGER_COUNT
+        && dapiFiles.length >= 2
+        && cycifFiles.length > CYCIF_DAPI_ONLY_TRIGGER_COUNT
+      ) {
+        return {
+          files: sortFiles(dapiFiles),
+          note: "CycIF-like large folder: loading DAPI/DNA only (" + dapiFiles.length + "/" + cycifFiles.length + " CycIF TIFFs, " + imageFiles.length + " total images)."
+        };
+      }
+      return {
+        files: imageFiles,
+        note: ""
+      };
+    }
+
     function simpleName(file) {
       return file.name.replace(/\.(ome\.)?tiff?$/i, "");
     }
@@ -441,6 +469,7 @@
     const TINT_MIN = 50;
     const TINT_MAX = 240;
     const TINT_MIN_SUM = 250;
+    const CYCIF_DAPI_ONLY_TRIGGER_COUNT = 20;
 
     function tagValues(value) {
       if (Array.isArray(value)) {
@@ -675,7 +704,8 @@
     }
 
     async function loadFolder(files) {
-      const imageFiles = sortFiles(Array.from(files).filter(file => hasImageExtension(file.name)));
+      const selection = selectFilesForLoad(files);
+      const imageFiles = selection.files;
       if (!imageFiles.length) {
         setStatus("No image files found.", true);
         return;
@@ -685,7 +715,7 @@
       state.selectedIndex = -1;
       renderChannels();
       draw();
-      setStatus("Loading 0/" + imageFiles.length + "...");
+      setStatus((selection.note ? selection.note + " " : "") + "Loading 0/" + imageFiles.length + "...");
 
       for (let i = 0; i < imageFiles.length; i++) {
         const file = imageFiles[i];
@@ -720,7 +750,7 @@
       renderChannels();
       updateCanvasScale();
       draw();
-      setStatus("Loaded " + state.channels.length + " images.");
+      setStatus((selection.note ? selection.note + " " : "") + "Loaded " + state.channels.length + " images.");
     }
 
     function renderChannels() {

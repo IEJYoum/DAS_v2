@@ -16,9 +16,8 @@ INPUT_PATTERN_TEXT = "H2B"
 INPUT_PREFIX = "V_"
 OUTPUT_PREFIX = "label_"
 STARDIST_MODEL_NAME = "2D_versatile_fluo"
-STARDIST_BLOCK_SIZE = 1024
-STARDIST_MIN_OVERLAP = 128
-STARDIST_CONTEXT = 128
+STARDIST_TILE_SIZE = 1024
+STARDIST_TILE_OVERLAP = 128
 STARDIST_ALLOW_INSECURE_DOWNLOAD = True
 SEGMENT_WARNING_LIMIT = 65535
 
@@ -85,17 +84,42 @@ def load_model():
         ssl._create_default_https_context = old_https_context
 
 
+def _tile_grid(h, w, tile_size, overlap):
+    """Yield (read_y, read_x, write_y, write_x) slices for each tile."""
+    def _axis(length):
+        if length <= tile_size:
+            return [(0, length, 0, length)]
+        step = tile_size - overlap
+        starts = list(range(0, length - tile_size, step)) + [length - tile_size]
+        seen = list(dict.fromkeys(starts))
+        out = []
+        for i, s in enumerate(seen):
+            wy0 = s if i == 0 else s + overlap // 2
+            wy1 = s + tile_size if i == len(seen) - 1 else s + tile_size - overlap // 2
+            out.append((s, s + tile_size, wy0, wy1))
+        return out
+    for ry0, ry1, wy0, wy1 in _axis(h):
+        for rx0, rx1, wx0, wx1 in _axis(w):
+            yield (ry0, ry1, wy0, wy1), (rx0, rx1, wx0, wx1)
+
+
 def predict_labels(model, image):
     image = image.astype(np.float32, copy=False)
     image = stardist_normalize(image, 1, 99.8)
-    labels, _ = model.predict_instances_big(
-        image,
-        axes="YX",
-        block_size=STARDIST_BLOCK_SIZE,
-        min_overlap=STARDIST_MIN_OVERLAP,
-        context=STARDIST_CONTEXT,
-    )
-    return labels
+    h, w = image.shape
+    if h <= STARDIST_TILE_SIZE and w <= STARDIST_TILE_SIZE:
+        labels, _ = model.predict_instances(image, axes="YX")
+        return labels
+    out = np.zeros((h, w), dtype=np.int32)
+    label_offset = 0
+    for (ry0, ry1, wy0, wy1), (rx0, rx1, wx0, wx1) in _tile_grid(h, w, STARDIST_TILE_SIZE, STARDIST_TILE_OVERLAP):
+        tile = image[ry0:ry1, rx0:rx1]
+        tile_labels, _ = model.predict_instances(tile, axes="YX")
+        crop = tile_labels[wy0 - ry0:wy1 - ry0, wx0 - rx0:wx1 - rx0]
+        mask = crop > 0
+        out[wy0:wy1, wx0:wx1][mask] = crop[mask] + label_offset
+        label_offset += int(tile_labels.max())
+    return out
 
 
 def write_labels(path, labels):

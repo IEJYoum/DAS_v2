@@ -898,7 +898,7 @@ def list_supported_files_one_level(folder):
         if os.path.isfile(fp) and is_supported_asset_file(fp):
             out.append(fp)
         i += 1
-    if len(out) == 0 and os.path.basename(os.path.normpath(str(folder))).lower() == "registeredimages":
+    if os.path.basename(os.path.normpath(str(folder))).lower().startswith("registeredimages"):
         try:
             child_names = os.listdir(folder)
         except Exception:

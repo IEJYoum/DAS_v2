@@ -4,6 +4,8 @@ import random
 import gc
 import warnings
 import sys
+import traceback
+import time
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +26,7 @@ if str(_SUPPORT_DIR) not in sys.path:
     sys.path.insert(0, str(_SUPPORT_DIR))
 
 from image_conventions import (
+    build_panel_feature_plan,
     collect_feature_marker_files as convention_collect_feature_marker_files,
     find_segmentation_pair as convention_find_segmentation_pair,
     parse_feature_marker_record,
@@ -76,6 +79,7 @@ EDGE_ASYM_MIN_DELTA = 2.0
 EDGE_ASYM_MAX_FACTOR = 1.25
 
 # Masks
+USE_DISTANCE_TRANSFORM_MASKS = True  # False restores the older iterative binary_erosion path.
 EDGE_ERODE_IN  = 10
 EDGE_ERODE_OUT = 15
 EDGE_TISSUE_ERODE = 15
@@ -126,6 +130,15 @@ nuc_sfile  = ''
 def dprint(*args, **kwargs):
     if VERBOSE:
         print(*args, **kwargs)
+
+
+def fdebug(*args):
+    try:
+        import io_adapter as _io_adapter
+        _io_adapter.dprint("[feature_extraction]", *args)
+        _io_adapter.flush_session_log(force=True)
+    except Exception:
+        print("[feature_extraction]", *args)
 
 
 def _progress_tick(phase=""):
@@ -401,10 +414,12 @@ def _collect_marker_files(core_folder, qc_tokens, stain_tokens, allowed_markers=
 
 def _selected_output_tiff_stems(job):
     stems = set()
+    marker_overrides = job.get("marker_by_stain", {})
     for file in job.get("st_files", []):
         marker, chan = parse_marker_chan(file)
         if marker is None or chan is None:
             continue
+        marker = marker_overrides.get(file, marker)
         stems.add(f"{str(marker).strip().lower()}_c{int(chan)}")
     return stems
 
@@ -492,8 +507,26 @@ def _build_job_from_core_folder(core_folder, seg_root, qc_tokens, stain_tokens, 
         dprint('SKIP (missing seg):', fol, 'cell:', cell_file, 'nuc:', nuc_file)
         return None
 
-    qc_files, st_files = _collect_marker_files(core_folder, qc_tokens, stain_tokens, allowed_markers=allowed_markers)
+    panel_plan = build_panel_feature_plan(core_folder, allowed_markers=allowed_markers)
+    if panel_plan is not None:
+        qc_files = list(panel_plan.qc_files)
+        st_files = list(panel_plan.stain_files)
+        fdebug(
+            "panel workbook:",
+            panel_plan.panel_path,
+            "| QC:",
+            len(qc_files),
+            "| stains:",
+            len(st_files),
+            "| mapped backgrounds:",
+            len(panel_plan.background_file_by_stain),
+        )
+        if panel_plan.missing_backgrounds:
+            fdebug("panel backgrounds not resolved:", "; ".join(panel_plan.missing_backgrounds[:8]))
+    else:
+        qc_files, st_files = _collect_marker_files(core_folder, qc_tokens, stain_tokens, allowed_markers=allowed_markers)
     if len(st_files) == 0:
+        fdebug("SKIP core: no stain files resolved:", fol, "QC:", len(qc_files))
         return None
 
     slide, scene = _split_slide_scene(fol)
@@ -509,6 +542,10 @@ def _build_job_from_core_folder(core_folder, seg_root, qc_tokens, stain_tokens, 
         "nuc_sfile": nuc_file,
         "qc_files": qc_files,
         "st_files": st_files,
+        "panel_path": panel_plan.panel_path if panel_plan is not None else "",
+        "marker_by_stain": dict(panel_plan.marker_by_stain) if panel_plan is not None else {},
+        "background_file_by_stain": dict(panel_plan.background_file_by_stain) if panel_plan is not None else {},
+        "missing_backgrounds": list(panel_plan.missing_backgrounds) if panel_plan is not None else [],
         "slide_scene": slide_scene,
         "slide": slide,
         "scene": scene,
@@ -577,7 +614,11 @@ def collect_core_jobs(
 # ==========================
 def load_qc_images(job):
     qcimD = {}
+    exact_backgrounds = set(str(x) for x in job.get("background_file_by_stain", {}).values())
+    panel_has_complete_backgrounds = bool(exact_backgrounds) and not bool(job.get("missing_backgrounds"))
     for file in job["qc_files"]:
+        if panel_has_complete_backgrounds and str(file) not in exact_backgrounds:
+            continue
         marker, chan = parse_marker_chan(file)
         if marker is None:
             continue
@@ -591,19 +632,34 @@ def load_qc_images(job):
                 qcimD[key] = [chan, np.array(qim, dtype=np.float32, copy=True)]
             else:
                 np.maximum(qcimD[key][1], qim, out=qcimD[key][1])
+            if str(file) in exact_backgrounds:
+                qcimD['FILE:' + str(file)] = [chan, np.array(qim, dtype=np.float32, copy=True)]
             del qim
         except Exception as e:
-            dprint('QC read fail:', file, e)
+            fdebug('QC read fail:', file, repr(e))
+    fdebug("loaded QC images:", len([key for key in qcimD if key.startswith('FILE:')]), "of", len(job.get("qc_files", [])), "candidate QC files", "keys:", sorted(qcimD.keys())[:12])
     return qcimD
 
 
-def apply_qc_sub(marker_entry, qcimD, qc_mask):
+def _qc_entry_for_marker(chan, qcimD, background_file=None):
+    if background_file:
+        exact_key = 'FILE:' + str(background_file)
+        if exact_key in qcimD:
+            return exact_key, qcimD[exact_key]
+    fallback_key = 'QC_c' + str(chan)
+    if fallback_key in qcimD:
+        return fallback_key, qcimD[fallback_key]
+    return "", None
+
+
+def apply_qc_sub(marker_entry, qcimD, qc_mask, background_file=None, marker_name=""):
     chan, raw = marker_entry[0], marker_entry[1]
-    key = 'QC_c' + str(chan)
-    if key not in qcimD:
+    key, qc_entry = _qc_entry_for_marker(chan, qcimD, background_file=background_file)
+    if qc_entry is None:
+        fdebug("q skipped: no QC image", "marker=", marker_name, "c" + str(chan), "background=", background_file or "[channel fallback]")
         return marker_entry
 
-    qim = qcimD[key][1].astype(np.float32, copy=False)
+    qim = qc_entry[1].astype(np.float32, copy=False)
 
     # ratio computed only on qc_mask pixels
     eps = 1e-6
@@ -634,6 +690,7 @@ def apply_qc_sub(marker_entry, qcimD, qc_mask):
     afsub[qc_mask] = np.clip(raw[qc_mask] - qim_scaled[qc_mask], 0, None).astype(np.float32)
 
     marker_entry[2] = afsub
+    fdebug("q applied:", marker_name, "c" + str(chan), "background=", background_file or key, "ratio=", round(float(ratio), 4))
     return marker_entry
 
 
@@ -653,34 +710,81 @@ def apply_qc_sub1(stim_entry, qcimD):
 # ==========================
 # masks
 # ==========================
-def getMasks(segi):
+def _mask_needs(requested_steps=None):
+    if requested_steps is None:
+        return {"edge", "edge_tissue", "tile", "qc"}
+    steps = {str(step).lower() for step in requested_steps}
+    needs = set()
+    if "e" in steps:
+        needs.update(("edge", "edge_tissue"))
+    if "t" in steps:
+        needs.add("tile")
+    if "q" in steps or "b" in steps:
+        needs.add("qc")
+    return needs
+
+
+def _background_erosion(mask, iterations, dist=None):
+    iterations = int(iterations)
+    if USE_DISTANCE_TRANSFORM_MASKS:
+        if dist is None:
+            dist = ndimage.distance_transform_cdt(mask, metric="taxicab")
+        return mask & (dist > iterations)
+    return ndimage.binary_erosion(mask, iterations=iterations, border_value=1)
+
+
+def _filled_background_after_erosion(mask, iterations, dist=None):
+    eroded = _background_erosion(mask, iterations, dist=dist)
+    return ~ndimage.binary_fill_holes(~eroded)
+
+
+def getMasks(segi, requested_steps=None):
+    t0 = time.perf_counter()
+    needs = _mask_needs(requested_steps)
     mask = (segi == 0)
     if SAVE_DEBUG_PNGS:
         showIm(mask.astype(np.uint8), 'mask', norm=False, force=True, save=True)
 
+    engine = "distance_transform" if USE_DISTANCE_TRANSFORM_MASKS else "legacy_erosion"
+    fdebug("mask build start:", "engine=", engine, "needs=", ",".join(sorted(needs)) or "none", "shape=", segi.shape)
+    dist = None
+    if USE_DISTANCE_TRANSFORM_MASKS and needs:
+        dist = ndimage.distance_transform_cdt(mask, metric="taxicab")
+
+    mask1 = None
+    mask3 = None
+    mask5 = None
+    mask_edge = None
+
     # edge mask: narrow ring near cells/borders (your logic)
-    mask1 = ndimage.binary_erosion(mask, iterations=EDGE_ERODE_IN, border_value=1)
-    mask2 = ndimage.binary_erosion(mask, iterations=EDGE_ERODE_OUT, border_value=1)
-    mask1 = mask1 & (~mask2)
-    if SAVE_DEBUG_PNGS:
-        showIm(mask1.astype(np.uint8), 'mask for calculating edge effects', norm=False, force=True)
+    if "edge" in needs:
+        mask1 = _background_erosion(mask, EDGE_ERODE_IN, dist=dist)
+        mask2 = _background_erosion(mask, EDGE_ERODE_OUT, dist=dist)
+        mask1 = mask1 & (~mask2)
+        if SAVE_DEBUG_PNGS:
+            showIm(mask1.astype(np.uint8), 'mask for calculating edge effects', norm=False, force=True)
 
     # edge tissue mask: a filled tissue body with much less expansion than the tile mask
-    mask_edge = ndimage.binary_erosion(mask, iterations=EDGE_TISSUE_ERODE, border_value=1)
-    mask_edge = ~ndimage.binary_fill_holes(~mask_edge)
-    if SAVE_DEBUG_PNGS:
-        showIm(mask_edge.astype(np.uint8), 'edge tissue mask', norm=False, force=True, save=True)
+    if "edge_tissue" in needs:
+        mask_edge = _background_erosion(mask, EDGE_TISSUE_ERODE, dist=dist)
+        mask_edge = ~ndimage.binary_fill_holes(~mask_edge)
+        if SAVE_DEBUG_PNGS:
+            showIm(mask_edge.astype(np.uint8), 'edge tissue mask', norm=False, force=True, save=True)
 
     # tile mask: broader ring
-    mask3 = ndimage.binary_erosion(mask, iterations=TILE_ERODE_IN, border_value=1)
-    mask3 = ~ndimage.binary_fill_holes(~mask3)
-    mask5 = ~mask3
-    #showIm(mask3, 'mask3', force = True)
+    if "tile" in needs or "qc" in needs:
+        tile_inner_bg = _filled_background_after_erosion(mask, TILE_ERODE_IN, dist=dist)
+        if "qc" in needs:
+            mask5 = ~tile_inner_bg
+        #showIm(mask3, 'mask3', force = True)
 
-    mask4 = ndimage.binary_erosion(mask, iterations=TILE_ERODE_OUT, border_value=1)
-    mask3 = mask3 & (~mask4)
-    if SAVE_DEBUG_PNGS:
-        showIm(mask3.astype(np.uint8), 'tilemask raw', norm=False, force=True, save=True)
+        if "tile" in needs:
+            mask4 = _background_erosion(mask, TILE_ERODE_OUT, dist=dist)
+            mask3 = tile_inner_bg & (~mask4)
+            if SAVE_DEBUG_PNGS:
+                showIm(mask3.astype(np.uint8), 'tilemask raw', norm=False, force=True, save=True)
+
+    fdebug("mask build done:", "engine=", engine, "elapsed=", f"{time.perf_counter() - t0:.1f}s")
     return mask1, mask3, mask5, mask_edge
 
 # ==========================
@@ -1415,30 +1519,71 @@ def process_core(job):
                             if f.endswith('.tiff') or f.endswith('.tif')]
             marker_paths = _filter_output_marker_paths(marker_paths, selected_output_stems)
 
-    if SKIP_STAIN_IF_TIFFS_EXIST and _has_all_selected_output_tiffs(marker_paths, selected_output_stems):
-        dprint("RESUME core:", slide_scene, "-> tiffs exist (n=", len(marker_paths), "), skipping stain-correction")
+    no_corrections = len(COM) == 0
+    tiffs_complete = _has_all_selected_output_tiffs(marker_paths, selected_output_stems)
+    if (SKIP_STAIN_IF_TIFFS_EXIST and tiffs_complete) or (no_corrections and tiffs_complete):
+        if no_corrections:
+            dprint("SKIP stain loop:", slide_scene, "-> no corrections and tiffs exist (n=", len(marker_paths), ")")
+        else:
+            dprint("RESUME core:", slide_scene, "-> tiffs exist (n=", len(marker_paths), "), skipping stain-correction")
     else:
         dprint('\n=== CORE ===')
         dprint('FOLD:', FOLD)
         dprint('DEVICE:', device)
         dprint('COM:', COM)
+        fdebug("core start:", slide_scene, "| FOLD:", FOLD)
+        fdebug(
+            "job files:",
+            "stains=", len(job.get("st_files", [])),
+            "qc=", len(job.get("qc_files", [])),
+            "panel=", job.get("panel_path") or "[none]",
+        )
+        if job.get("background_file_by_stain"):
+            for stain_file, background_file in list(job.get("background_file_by_stain", {}).items())[:24]:
+                fdebug("q map:", stain_file, "->", background_file)
+        if job.get("missing_backgrounds"):
+            fdebug("missing q backgrounds:", "; ".join(job.get("missing_backgrounds", [])[:12]))
 
-        # masks from cell seg (same as you were doing)
-        segi = np.asarray(tiff.imread(os.path.join(sfold, cell_sfile)), dtype=np.int32)
-        dprint('SEG SHAPE:', segi.shape, 'MARKERS:', len(job["st_files"]), 'QC:', len(job["qc_files"]), 'DEBUG PNGS:', SAVE_DEBUG_PNGS)
-        mask1, mask3, qc_mask, edge_tissue_mask = getMasks(segi)
-        if DEVMODE:
-            showIm(qc_mask,'mask for qc')
-        del segi
+        # masks from cell seg - build only the masks needed by the requested corrections
+        requested_mask_steps = [step for step in COM if str(step).lower() in ("q", "b", "t", "e")]
+        needs_masks = len(requested_mask_steps) > 0
+        if needs_masks:
+            seg_t0 = time.perf_counter()
+            segi = np.asarray(tiff.imread(os.path.join(sfold, cell_sfile)), dtype=np.int32)
+            fdebug(
+                'SEG SHAPE:',
+                segi.shape,
+                'MARKERS:', len(job["st_files"]),
+                'QC:', len(job["qc_files"]),
+                'DEBUG PNGS:', SAVE_DEBUG_PNGS,
+                'MASK_ENGINE:', "distance_transform" if USE_DISTANCE_TRANSFORM_MASKS else "legacy_erosion",
+                'read_elapsed=', f"{time.perf_counter() - seg_t0:.1f}s",
+            )
+            mask1, mask3, qc_mask, edge_tissue_mask = getMasks(segi, requested_steps=requested_mask_steps)
+            if DEVMODE and qc_mask is not None:
+                showIm(qc_mask,'mask for qc')
+            del segi
+        else:
+            fdebug('SEG SHAPE (skipping masks, no corrections):', 'MARKERS:', len(job["st_files"]), 'QC:', len(job["qc_files"]))
+            mask1 = mask3 = qc_mask = edge_tissue_mask = None
 
-        # QC combine
-        qcimD = load_qc_images(job)
+        needs_qc_images = any(step in COM for step in ("q", "t"))
+        if needs_qc_images:
+            qc_t0 = time.perf_counter()
+            qcimD = load_qc_images(job)
+            fdebug("QC image load done:", "elapsed=", f"{time.perf_counter() - qc_t0:.1f}s")
+        else:
+            qcimD = {}
+            fdebug("QC images not loaded because no q/t corrections were requested")
 
         # Process each stim file independently
         for file in job["st_files"]:
             marker, chan = parse_marker_chan(file)
             if marker is None:
+                fdebug("skip unparsable marker file:", file)
                 continue
+            marker = job.get("marker_by_stain", {}).get(file, marker)
+            background_file = job.get("background_file_by_stain", {}).get(file)
 
             # ---- marker-level skip if corrected TIFF already exists ----
             if SAVE_TIFF and SKIP_MARKER_IF_TIFF_EXISTS:
@@ -1460,11 +1605,20 @@ def process_core(job):
             executed_steps = []
             for step in COM:
                 step_ran = False
+                step_t0 = time.perf_counter()
                 if step == 'q':
-                    stim_entry = apply_qc_sub(stim_entry, qcimD, qc_mask)
+                    fdebug("correction start:", slide_scene, marker, "c"+str(chan), step)
+                    stim_entry = apply_qc_sub(
+                        stim_entry,
+                        qcimD,
+                        qc_mask,
+                        background_file=background_file,
+                        marker_name=marker,
+                    )
                     step_ran = True
 
                 elif step == 'e':
+                    fdebug("correction start:", slide_scene, marker, "c"+str(chan), step)
                     edge_sub = compute_edge_sub(
                         current_base,
                         edge_mask=mask1,
@@ -1478,8 +1632,9 @@ def process_core(job):
                     step_ran = True
 
                 elif step == 't':
-                    qc_key = 'QC_c' + str(chan)
-                    qc_for_mask = qcimD[qc_key][1] if qc_key in qcimD else None
+                    fdebug("correction start:", slide_scene, marker, "c"+str(chan), step)
+                    qc_key, qc_entry = _qc_entry_for_marker(chan, qcimD, background_file=background_file)
+                    qc_for_mask = qc_entry[1] if qc_entry is not None else None
                     tile_sub = compute_tile_sub(current_base, border_mask=mask3, qcim_for_mask=qc_for_mask)
 
                     if type(stim_entry[4]) == type(0):
@@ -1489,10 +1644,12 @@ def process_core(job):
                     step_ran = True
 
                 elif step == 'b':
+                    fdebug("correction start:", slide_scene, marker, "c"+str(chan), step)
                     stim_entry[5] = compute_background_sub(current_base, qc_mask)
                     step_ran = True
 
                 if step_ran:
+                    fdebug("correction done:", slide_scene, marker, "c"+str(chan), step, "elapsed=", f"{time.perf_counter() - step_t0:.1f}s")
                     executed_steps.append(step)
                     current_base = compose_final_simple(
                         copy.copy(stim_entry),
@@ -1540,6 +1697,14 @@ def process_core(job):
 
 
     try:
+        extract_t0 = time.perf_counter()
+        fdebug(
+            "calling extract_core_features:",
+            "markers=", len(marker_paths),
+            "cell=", cell_path,
+            "nuc=", nuc_path,
+            "core_csv=", core_csv_path,
+        )
         df_core = extract_core_features(
             nuc_path=nuc_path,
             cell_path=cell_path,
@@ -1554,6 +1719,7 @@ def process_core(job):
             scene=scene,
             devmode=DEVMODE
         )
+        fdebug("extract_core_features done:", "elapsed=", f"{time.perf_counter() - extract_t0:.1f}s", "rows=", df_core.shape[0])
     except Exception as e:
         # dump debug artifacts *for this core* then re-raise so your outer try/except prints it
         dbg = os.path.join(FOLD + SAVEEXT, "FAIL_extract")
@@ -1580,6 +1746,8 @@ def process_core(job):
         # 3) record the exception text
         with open(os.path.join(dbg, "error.txt"), "w", encoding="utf-8") as f:
             f.write(repr(e) + "\n")
+            f.write(traceback.format_exc() + "\n")
+        fdebug("extract_core_features failed:", repr(e), "| debug folder:", dbg)
 
         release_runtime_memory()
         raise
@@ -1606,10 +1774,12 @@ def run_jobs(jobs, save_combined=True, combined_csv_path=None):
                     dfs.append(df_core)
             except Exception as e:
                 print("CORE FAILED:", job.get("FOLD", "unknown"), "ERROR:", e)
+                fdebug("core traceback:", traceback.format_exc())
                 release_runtime_memory()
 
     pieces = list(RESUME_DFS) + dfs
     if len(pieces) == 0:
+        fdebug("run_jobs produced no dataframes:", "jobs=", len(jobs), "resume_dfs=", len(RESUME_DFS))
         return None
 
     big = pd.concat(pieces, axis=0, ignore_index=False)

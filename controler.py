@@ -617,6 +617,7 @@ def _save_project_config(
     figure_folder: str | Path,
     *,
     segmentation_root: str | Path | None = None,
+    confirm_data_folder: bool = False,
 ) -> None:
     resolved = _resolve_usable_folder(data_folder, "project data_folder")
     if resolved is None:
@@ -627,6 +628,8 @@ def _save_project_config(
         figure_path = _default_figure_folder(resolved)
     config_path = resolved / PROJECT_CONFIG_FILE
     values = _load_config_file(config_path)
+    if confirm_data_folder:
+        values["data_folder"] = _normalize_path_text(resolved)
     values["figure_folder"] = _normalize_path_text(figure_path)
     if segmentation_root is not None:
         segmentation_path = _resolve_usable_folder(segmentation_root, "segmentation_root")
@@ -776,6 +779,63 @@ def _prompt_figure_folder(current: Path, data_folder: Path) -> Path:
     figure_folder = _require_usable_folder(figure_folder, "figure/output folder")
     figure_folder.mkdir(parents=True, exist_ok=True)
     return figure_folder
+
+
+def _project_folder_is_confirmed(data_folder: str | Path) -> bool:
+    folder = _resolve_usable_folder(data_folder, "project data_folder", log_ignore=False)
+    if folder is None:
+        return False
+    configured = str(_load_project_config(folder).get("data_folder", "")).strip()
+    return configured != "" and _same_folder(configured, folder)
+
+
+def _confirm_project_folder(state: SessionState) -> None:
+    _save_project_config(
+        state.data_folder,
+        state.figure_folder,
+        segmentation_root=state.segmentation_root,
+        confirm_data_folder=True,
+    )
+
+
+def _session_log_is_in_project(state: SessionState) -> bool:
+    current = str(io.get_session_log_path() or "").strip()
+    if current == "":
+        return False
+    try:
+        current_dir = Path(current).expanduser().resolve().parent
+        target_dir = (state.project_root / "session_logs").resolve()
+    except OSError:
+        return False
+    return current_dir == target_dir
+
+
+def _ensure_session_log_in_project(state: SessionState) -> None:
+    if _session_log_is_in_project(state):
+        return
+    session_log_path = io.start_session_log(state.project_root)
+    if session_log_path:
+        io.iprint(f"Session log: {session_log_path}")
+        io.flush_session_log(force=True)
+
+
+def _ensure_prepare_data_project_context(state: SessionState) -> None:
+    if _project_folder_is_confirmed(state.data_folder):
+        _ensure_session_log_in_project(state)
+        return
+
+    selected = _prompt_project_root(state.data_folder, "project output folder")
+    changed = not _same_folder(selected, state.data_folder)
+    if changed:
+        _adopt_project_context(state, data_folder=selected, build_folder=selected)
+        state.stem = _preferred_stem_for_folder(state.data_folder)
+    _confirm_project_folder(state)
+    _record_project_use(state, last_action="prepare_data_project_confirmed")
+    _ensure_session_log_in_project(state)
+    if changed:
+        io.iprint(f"Project root set to: {state.data_folder}")
+    else:
+        io.iprint(f"Project root confirmed: {state.data_folder}")
 
 
 def _adopt_project_context(
@@ -1176,6 +1236,7 @@ def startup_build_data(state: SessionState) -> None:
 
 
 def startup_prepare_data(state: SessionState) -> None:
+    _ensure_prepare_data_project_context(state)
     functions = [
         startup_image_registration,
         startup_cell_segmentation,
@@ -1264,8 +1325,22 @@ def startup_cell_segmentation(state: SessionState) -> None:
         io.iprint("Cellpose segmentation is not wired yet.")
 
 
+def _default_stardist_input_folder(state: SessionState) -> Path:
+    config = _load_project_config(state.data_folder)
+    configured = str(config.get("seg_input_folder", "")).strip()
+    if configured:
+        path = _resolve_usable_folder(configured, "configured StarDist image folder")
+        if path is not None:
+            return path
+
+    registered = state.build_folder / "registeredImages"
+    if registered.is_dir():
+        return registered
+    return state.build_folder
+
+
 def _run_stardist_segmentation(state: SessionState) -> None:
-    default_input = state.segmentation_root or state.build_folder
+    default_input = _default_stardist_input_folder(state)
     default_output = state.segmentation_root or (state.build_folder / "segmentation_stardist")
     old_input = builtins.input
     old_print = builtins.print
@@ -1277,13 +1352,20 @@ def _run_stardist_segmentation(state: SessionState) -> None:
         output_root = importlib.import_module("segmentation_bridge").run_stardist_interactive(
             default_input=default_input,
             default_output=default_output,
+            project_root=state.data_folder,
         )
     finally:
         builtins.input = old_input
         builtins.print = old_print
         os.chdir(old_cwd)
     if output_root is not None:
-        _adopt_project_context(state, segmentation_root=Path(output_root).resolve())
+        _adopt_project_context(
+            state,
+            data_folder=state.data_folder,
+            build_folder=state.build_folder,
+            figure_folder=state.figure_folder,
+            segmentation_root=Path(output_root).resolve(),
+        )
         io.iprint(f"segmentation root set to: {state.segmentation_root}")
 
 

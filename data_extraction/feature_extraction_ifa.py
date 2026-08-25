@@ -14,6 +14,7 @@ OBS_COLUMNS = ("slide", "scene", "slide_scene", "cellid", "seg_label")
 XY_COLUMNS = ("DAPI_X", "DAPI_Y")
 LASTRUN_FILE = "feature_extraction_lastrun.txt"
 PROJECT_CONFIG_FILE = "project_config.txt"
+TIFF_SUFFIXES = (".tif", ".tiff")
 
 _IFA5 = None
 _STAIN = None
@@ -388,6 +389,71 @@ def _prompt_yes_no_default(legacy, prompt: str, *, default: bool = False) -> boo
 
 def _default_figure_folder(data_folder: str) -> str:
     return os.path.normpath(os.path.join(data_folder, "temp"))
+
+
+def _immediate_subdirs(folder: str) -> list[str]:
+    try:
+        return [
+            os.path.join(folder, name)
+            for name in os.listdir(folder)
+            if os.path.isdir(os.path.join(folder, name))
+        ]
+    except OSError:
+        return []
+
+
+def _has_direct_tiff(folder: str) -> bool:
+    try:
+        return any(
+            os.path.isfile(os.path.join(folder, name))
+            and name.lower().endswith(TIFF_SUFFIXES)
+            for name in os.listdir(folder)
+        )
+    except OSError:
+        return False
+
+
+def _single_child_tiff_folder(folder: str) -> str:
+    child_hits = [path for path in _immediate_subdirs(folder) if _has_direct_tiff(path)]
+    if len(child_hits) == 1:
+        return os.path.normpath(child_hits[0])
+    return ""
+
+
+def _newest_dir(candidates: Sequence[str]) -> str:
+    existing = [path for path in candidates if os.path.isdir(path)]
+    if not existing:
+        return ""
+    return os.path.normpath(max(existing, key=lambda path: os.path.getmtime(path)))
+
+
+def _suggest_registered_images_root(project_root: str) -> str:
+    project_root = os.path.normpath(str(project_root))
+    exact = os.path.join(project_root, "registeredImages")
+    if os.path.isdir(exact):
+        child = _single_child_tiff_folder(exact)
+        return child or os.path.normpath(exact)
+
+    candidates = [
+        path
+        for path in _immediate_subdirs(project_root)
+        if "registered" in os.path.basename(path).lower()
+    ]
+    return _newest_dir(candidates)
+
+
+def _suggest_project_seg_root(project_root: str) -> str:
+    project_root = os.path.normpath(str(project_root))
+    exact = os.path.join(project_root, "Segmentation")
+    if os.path.isdir(exact):
+        return os.path.normpath(exact)
+
+    candidates = [
+        path
+        for path in _immediate_subdirs(project_root)
+        if ("segmentation" in os.path.basename(path).lower() or "seg" in os.path.basename(path).lower())
+    ]
+    return _newest_dir(candidates)
 
 
 def _suggest_seg_root(images_root: str) -> str:
@@ -766,6 +832,17 @@ def run_with_legacy(legacy, df=9, obs=9, dfxy=9, project_defaults: Optional[dict
         prompt_defaults["corrections"] = list(project_config.get("corrections", prompt_defaults.get("corrections", [])))
         prompt_defaults["save_debug_pngs"] = bool(project_config.get("save_debug_pngs", prompt_defaults.get("save_debug_pngs", False)))
         prompt_defaults["run_feature_extraction"] = bool(project_config.get("run_feature_extraction", prompt_defaults.get("run_feature_extraction", False)))
+    if str(project_config.get("images_root", "") or "").strip() == "":
+        suggested_images_root = _suggest_registered_images_root(data_folder)
+        if suggested_images_root:
+            prompt_defaults["images_root"] = suggested_images_root
+    if (
+        str(project_config.get("seg_root", "") or "").strip() == ""
+        and str(project_config.get("segmentation_root", "") or "").strip() == ""
+    ):
+        suggested_seg_root = _suggest_project_seg_root(data_folder)
+        if suggested_seg_root:
+            prompt_defaults["segmentation_root"] = suggested_seg_root
     if os.path.isfile(lastrun_path):
         try:
             lastrun_config = load_last_run_config(lastrun_path)
@@ -911,6 +988,13 @@ def run_with_legacy(legacy, df=9, obs=9, dfxy=9, project_defaults: Optional[dict
         existing_extracted_csv=existing_extracted_csv,
         selected_markers=selected_markers,
     )
+    try:
+        session_log_path = load_io_adapter().get_session_log_path()
+    except Exception:
+        session_log_path = ""
+    if str(session_log_path or "").strip():
+        pfun("active session log:", session_log_path)
+
     stain, jobs = resolve_jobs(
         seed_path=seed_path,
         seg_root=seg_root,
