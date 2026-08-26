@@ -282,5 +282,97 @@ def main(registered_dir=None, pixel_size_um=None):
     print("done")
 
 
+def _has_multichannel_ome(folder):
+    """Return True if folder already contains a *_multichannel.ome.tiff."""
+    try:
+        entries = _retry_io("iterdir", folder, lambda: list(folder.iterdir()))
+    except OSError:
+        return False
+    for path in entries:
+        if path.name.lower().endswith("_multichannel.ome.tiff") and _is_file(path):
+            return True
+    return False
+
+
+def _has_registered_ome_tiffs(folder):
+    """Return True if folder looks like it contains single-channel registered OME-TIFFs."""
+    try:
+        entries = _retry_io("iterdir", folder, lambda: list(folder.iterdir()))
+    except OSError:
+        return False
+    has_fixed = False
+    has_moving = False
+    for path in entries:
+        name = path.name.lower()
+        if not (name.endswith(".ome.tif") or name.endswith(".ome.tiff")):
+            continue
+        if name.endswith("_multichannel.ome.tiff"):
+            continue
+        if "_fixed" in name:
+            has_fixed = True
+        else:
+            has_moving = True
+    return has_fixed and has_moving
+
+
+def standalone_batch(slides_root, pixel_size_um=None):
+    """Walk slides_root for RegisteredImages folders and generate multichannel OME-TIFFs."""
+    slides_root = Path(slides_root)
+    if not _is_dir(slides_root):
+        print("ERROR: not a valid directory:", slides_root)
+        return
+    entries = _retry_io("iterdir", slides_root, lambda: list(slides_root.iterdir()))
+    slide_folders = sorted(
+        [p for p in entries if _is_dir(p)],
+        key=lambda p: p.name,
+    )
+    candidates = []
+    for slide_folder in slide_folders:
+        try:
+            children = _retry_io("iterdir", slide_folder, lambda sf=slide_folder: list(sf.iterdir()))
+        except OSError:
+            continue
+        for child in children:
+            if child.name.lower().startswith("registeredimages") and _is_dir(child):
+                candidates.append(child)
+
+    print("standalone batch: found", len(candidates), "RegisteredImages folder(s) under", slides_root)
+    processed = 0
+    skipped_existing = 0
+    skipped_no_data = 0
+    failed = 0
+    for reg_dir in sorted(candidates, key=lambda p: str(p)):
+        slide_name = reg_dir.parent.name
+        label = slide_name + "/" + reg_dir.name
+        if _has_multichannel_ome(reg_dir):
+            print("  SKIP (already exists):", label)
+            skipped_existing += 1
+            continue
+        if not _has_registered_ome_tiffs(reg_dir):
+            print("  SKIP (no registered OME-TIFFs):", label)
+            skipped_no_data += 1
+            continue
+        print("  PROCESSING:", label)
+        try:
+            main(reg_dir, pixel_size_um)
+            processed += 1
+        except Exception as exc:
+            print("  FAILED:", label, "->", type(exc).__name__ + ":", exc)
+            failed += 1
+    print()
+    print("standalone batch done. processed:", processed,
+          "skipped (exists):", skipped_existing,
+          "skipped (no data):", skipped_no_data,
+          "failed:", failed)
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--standalone" in sys.argv:
+        args = [a for a in sys.argv[1:] if a != "--standalone"]
+        if len(args) < 1:
+            print("usage: make_registered_multichannel_ome.py --standalone <slides_root>")
+            sys.exit(1)
+        standalone_batch(args[0])
+    else:
+        main()
