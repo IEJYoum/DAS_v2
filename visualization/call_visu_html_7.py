@@ -1,7 +1,6 @@
 ﻿"""
 call_visu_html_7:
-- minimal non-recursive scene expansion (no os.walk)
-- fast sibling scene resolution via os.listdir-only logic
+- slide_scene-keyed viewer asset ingestion
 - IFanalysisPackage5-compatible main(df, obs, dfxy) signature
 """
 
@@ -95,9 +94,6 @@ PROJECT_LEVEL_FIGURE_FAMILY_TOKENS = {
     "volcanoplots",
 }
 
-SCENE_RE = re.compile(r"scene([_-]?)([A-Za-z])0*(\d{1,3})", re.IGNORECASE)
-CORE_STR_RE = re.compile(r"^([A-Za-z])0*(\d{1,3})$")
-CORE_IN_NAME_RE = re.compile(r"(?<![A-Za-z])([A-Ia-i])0*(\d{1,3})$")
 TMA_RE = re.compile(r"(?i)(ptma\d+)")
 MISSING_LABELS = set(["", "nan", "none", "null", "na", "n/a"])
 PROJECT_CONFIG_FILE = "project_config.txt"
@@ -362,19 +358,9 @@ def main(df=9, obs=9, dfxy=9, *args, **kwargs):
             print("Done.")
             return (df, obs, dfxy)
 
-    templates = build_templates(filepaths)
-    scene_templates = [t for t in templates if t.get("scene") is not None]
-    if should_use_direct_viewer_buckets(templates, scene_templates):
-        by_core = build_direct_viewer_buckets(templates)
-        print("Convention-aware viewer discovery:", len(by_core), "slide_scene value(s)")
-    else:
-        if len(scene_templates) == 0:
-            print("No scene-tagged files found. Nothing to render.")
-            return (df, obs, dfxy)
-        scene_keys = collect_scene_keys(scene_templates)
-        print("Scene expansion:", len(scene_templates), "seed file(s) ->", len(scene_keys), "scene(s)")
-        by_core = build_core_buckets(scene_keys, scene_templates)
-    catalog = build_catalog(by_core, obs)
+    catalog = build_manual_asset_catalog(filepaths, obs)
+    if catalog is None:
+        return (df, obs, dfxy)
     _set_cvh_meta(
         cvh_mode="manual",
         cvh_out_root=os.path.abspath(out_root),
@@ -413,19 +399,9 @@ def run_manual_asset_creation(out_root, obs):
             print("Done.")
             return os.path.abspath(default_seed)
 
-    templates = build_templates(filepaths)
-    scene_templates = [t for t in templates if t.get("scene") is not None]
-    if should_use_direct_viewer_buckets(templates, scene_templates):
-        by_core = build_direct_viewer_buckets(templates)
-        print("Convention-aware viewer discovery:", len(by_core), "slide_scene value(s)")
-    else:
-        if len(scene_templates) == 0:
-            print("No scene-tagged files found. Nothing to render.")
-            return ""
-        scene_keys = collect_scene_keys(scene_templates)
-        print("Scene expansion:", len(scene_templates), "seed file(s) ->", len(scene_keys), "scene(s)")
-        by_core = build_core_buckets(scene_keys, scene_templates)
-    catalog = build_catalog(by_core, obs)
+    catalog = build_manual_asset_catalog(filepaths, obs)
+    if catalog is None:
+        return ""
     _set_cvh_meta(
         cvh_mode="manual",
         cvh_out_root=os.path.abspath(out_root),
@@ -1459,23 +1435,9 @@ def build_templates(filepaths):
     i = 0
     while i < len(filepaths):
         t = make_template(filepaths[i])
-        if t.get("scene") is None and normalize_slide_scene(t.get("slide_scene", "")) == "":
-            print("IGNORING NON-SCENE FILE:", t["sample_path"])
         out.append(t)
         i += 1
     return out
-
-
-def should_use_direct_viewer_buckets(templates, scene_templates):
-    direct = [t for t in list(templates or []) if normalize_slide_scene(t.get("slide_scene", "")) != ""]
-    if len(direct) == 0:
-        return False
-    if len(scene_templates) == 0:
-        return True
-    for t in direct:
-        if str(t.get("viewer_convention", "")).strip() == "DAS":
-            return True
-    return False
 
 
 def build_direct_viewer_buckets(templates):
@@ -1497,6 +1459,77 @@ def build_direct_viewer_buckets(templates):
         else:
             add_path_to_bucket_by_kind(by_core[slide_scene], str(t.get("sample_path", "")), kind)
     return by_core
+
+
+def _scene_list_text(values, limit=6):
+    values = list(values or [])
+    text = ", ".join([str(value) for value in values[:limit]])
+    if len(values) > limit:
+        text += ", ..."
+    return text
+
+
+def build_manual_asset_catalog(filepaths, obs):
+    """Build a catalog from asset paths with explicit slide_scene identities."""
+    templates = build_templates(filepaths)
+    by_scene = build_direct_viewer_buckets(templates)
+    unresolved = [
+        str(template.get("sample_path", ""))
+        for template in templates
+        if normalize_slide_scene(template.get("slide_scene", "")) == ""
+    ]
+    print(
+        "Viewer asset discovery:",
+        len(templates),
+        "file(s) ->",
+        len(by_scene),
+        "parsed slide_scene value(s).",
+    )
+    if len(unresolved) > 0:
+        print(
+            "Skipped",
+            len(unresolved),
+            "file(s) without a slide_scene identity:",
+            _scene_list_text([os.path.basename(path) for path in unresolved]),
+        )
+    if len(by_scene) == 0:
+        print("No supplied viewer assets could be mapped to slide_scene. Nothing was written.")
+        return None
+
+    active_scenes = _obs_slide_scene_values(obs)
+    selected = by_scene
+    if len(active_scenes) > 0:
+        active_set = set(active_scenes)
+        selected = {scene: bucket for scene, bucket in by_scene.items() if scene in active_set}
+        skipped_scenes = sorted([scene for scene in by_scene if scene not in active_set], key=natural_sort_key)
+        missing_scenes = sorted([scene for scene in active_scenes if scene not in by_scene], key=natural_sort_key)
+        print(
+            "Viewer asset match:",
+            len(selected),
+            "of",
+            len(active_scenes),
+            "current slide_scene value(s) have supplied assets.",
+        )
+        if len(skipped_scenes) > 0:
+            print(
+                "Skipped asset slide_scene value(s) not in current obs:",
+                len(skipped_scenes),
+                "::",
+                _scene_list_text(skipped_scenes),
+            )
+        if len(missing_scenes) > 0:
+            print(
+                "Current slide_scene value(s) without supplied assets:",
+                len(missing_scenes),
+                "::",
+                _scene_list_text(missing_scenes),
+            )
+        if len(selected) == 0:
+            print("No supplied viewer assets match the current obs slide_scene values. Nothing was written.")
+            return None
+
+    manifest = build_identity_manifest_from_direct_buckets(selected)
+    return build_catalog_from_identity_manifest(manifest, obs)
 
 
 def make_template(fp):
@@ -1524,12 +1557,7 @@ def make_template(fp):
         }
         out["viewer_convention"] = str(viewer_record.convention)
         out["slide_scene"] = str(viewer_record.slide_scene)
-
-    if kind == "segmentation_tiff":
         return out
-    info = extract_scene_template_info(ap)
-    if info is not None:
-        out.update(info)
     return out
 
 
@@ -1557,251 +1585,6 @@ def png_has_alpha(fp):
     except Exception:
         return False
     return False
-
-
-def extract_scene_template_info(path):
-    p = os.path.normpath(path)
-    parent = os.path.dirname(p)
-    bn = os.path.basename(p)
-    parts = parent.split(os.sep)
-
-    i = 0
-    while i < len(parts):
-        seg = parts[i]
-        m = SCENE_RE.search(seg)
-        if m is not None:
-            parent_root = normalize_drive_root(os.sep.join(parts[:i]))
-            rel_after_parts = parts[i + 1:] + [bn]
-            rel_after = os.path.join(*rel_after_parts) if len(rel_after_parts) > 0 else bn
-            return {
-                "scene": (m.group(2).upper(), int(m.group(3))),
-                "scene_num_width": len(m.group(3)),
-                "scene_delim": m.group(1),
-                "mode": "dir",
-                "scene_parent_root": parent_root,
-                "scene_dir_prefix": seg[:m.start()],
-                "scene_dir_suffix": seg[m.end():],
-                "rel_after_scene_dir": rel_after
-            }
-        i += 1
-
-    m = SCENE_RE.search(bn)
-    if m is not None:
-        return {
-            "scene": (m.group(2).upper(), int(m.group(3))),
-            "scene_num_width": len(m.group(3)),
-            "scene_delim": m.group(1),
-            "mode": "file_scene",
-            "file_dir": parent,
-            "file_prefix": bn[:m.start()],
-            "file_suffix": bn[m.end():]
-        }
-
-    # ROI convention: ROI number in filename (and possibly folder name)
-    stem, ext = os.path.splitext(bn)
-    roi_m = re.search(r"(?i)_?(ROI0*(\d{1,3}))$", stem)
-    if roi_m is not None:
-        roi_num = int(roi_m.group(2))
-        roi_tag = roi_m.group(1)          # e.g. "ROI06"
-        roi_width = len(roi_m.group(2))   # e.g. 2 for "06"
-        prefix_end = roi_m.start()
-        # include the underscore before ROI in the prefix if present
-        file_prefix = stem[:prefix_end]
-        return {
-            "scene": ("A", roi_num),
-            "scene_num_width": max(roi_width, 2),
-            "mode": "file_roi",
-            "file_dir": parent,
-            "file_prefix": file_prefix,
-            "file_suffix": ext,
-            "roi_tag": roi_tag,
-        }
-
-    m2 = CORE_IN_NAME_RE.search(stem)
-    if m2 is not None:
-        return {
-            "scene": (m2.group(1).upper(), int(m2.group(2))),
-            "scene_num_width": len(m2.group(2)),
-            "mode": "file_core",
-            "file_dir": parent,
-            "file_prefix": stem[:m2.start()],
-            "file_suffix": stem[m2.end():] + ext
-        }
-
-    return None
-
-
-def normalize_drive_root(path_text):
-    if path_text is None:
-        return path_text
-    if len(path_text) == 2 and path_text[1] == ":":
-        return path_text + os.sep
-    return path_text
-
-
-def collect_scene_keys(scene_templates):
-    keys = set()
-    dir_cache = {}
-    file_cache = {}
-
-    i = 0
-    while i < len(scene_templates):
-        t = scene_templates[i]
-        keys.add(t["scene"])
-
-        mode = t.get("mode", "none")
-        if mode == "dir":
-            smap = get_scene_dir_map(t, dir_cache)
-            for k in smap:
-                keys.add(k)
-        elif mode in ["file_scene", "file_core", "file_roi"]:
-            fkeys = get_scene_keys_from_file_listing(t, file_cache)
-            for k in fkeys:
-                keys.add(k)
-        i += 1
-
-    return sorted_core_keys(list(keys))
-
-
-def get_scene_dir_map(t, cache):
-    parent_root = t.get("scene_parent_root", None)
-    prefix = t.get("scene_dir_prefix", "")
-    suffix = t.get("scene_dir_suffix", "")
-
-    if parent_root is None or parent_root == "" or not os.path.isdir(parent_root):
-        return {}
-
-    key = (parent_root.lower(), prefix.lower(), suffix.lower())
-    if key in cache:
-        return cache[key]
-
-    pat = re.compile(
-        "^" + re.escape(prefix) + r"scene[_-]?([A-Za-z])(\d{1,3})" + re.escape(suffix) + "$",
-        re.IGNORECASE
-    )
-
-    out = {}
-    try:
-        names = os.listdir(parent_root)
-    except Exception:
-        names = []
-
-    i = 0
-    while i < len(names):
-        nm = names[i]
-        full = os.path.join(parent_root, nm)
-        if os.path.isdir(full):
-            m = pat.match(nm)
-            if m is not None:
-                out[(m.group(1).upper(), int(m.group(2)))] = full
-        i += 1
-
-    cache[key] = out
-    return out
-
-
-def get_scene_keys_from_file_listing(t, cache):
-    d = t.get("file_dir", "")
-    mode = t.get("mode", "")
-    prefix = t.get("file_prefix", "")
-    suffix = t.get("file_suffix", "")
-    if d == "" or (not os.path.isdir(d)):
-        return set()
-
-    key = (d.lower(), mode, prefix.lower(), suffix.lower())
-    if key in cache:
-        return cache[key]
-
-    out = set()
-
-    if mode == "file_roi":
-        # ROI convention: siblings are in sibling ROI folders with matching filenames
-        parent_name = os.path.basename(d)
-        if re.match(r"(?i)^ROI\d+$", parent_name):
-            grandparent = os.path.dirname(d)
-            try:
-                siblings = os.listdir(grandparent)
-            except Exception:
-                siblings = []
-            for sib in siblings:
-                sib_m = re.match(r"(?i)^ROI0*(\d{1,3})$", sib)
-                if sib_m is not None and os.path.isdir(os.path.join(grandparent, sib)):
-                    out.add(("A", int(sib_m.group(1))))
-        cache[key] = out
-        return out
-
-    if mode == "file_scene":
-        pat = re.compile(
-            "^" + re.escape(prefix) + r"scene[_-]?([A-Za-z])(\d{1,3})" + re.escape(suffix) + "$",
-            re.IGNORECASE
-        )
-    else:
-        pat = re.compile(
-            "^" + re.escape(prefix) + r"([A-Ia-i])(\d{1,3})" + re.escape(suffix) + "$"
-        )
-
-    try:
-        names = os.listdir(d)
-    except Exception:
-        names = []
-
-    i = 0
-    while i < len(names):
-        nm = names[i]
-        full = os.path.join(d, nm)
-        if os.path.isfile(full):
-            m = pat.match(nm)
-            if m is not None:
-                out.add((m.group(1).upper(), int(m.group(2))))
-        i += 1
-
-    cache[key] = out
-    return out
-
-
-def resolve_template_for_scene(t, core_key, dir_cache):
-    mode = t.get("mode", "none")
-    letter, num = core_key
-
-    if mode == "dir":
-        smap = get_scene_dir_map(t, dir_cache)
-        scene_dir = smap.get(core_key, None)
-        if scene_dir is None:
-            return None
-        rel_after = t.get("rel_after_scene_dir", "")
-        if rel_after == "":
-            return None
-        p = os.path.normpath(os.path.join(scene_dir, rel_after))
-        return p if os.path.exists(p) else None
-
-    if mode == "file_scene":
-        width = t.get("scene_num_width", 0)
-        delim = t.get("scene_delim", "")
-        scene_txt = "scene" + delim + letter + str(num).zfill(width if width > 0 else 1)
-        fn = t.get("file_prefix", "") + scene_txt + t.get("file_suffix", "")
-        p = os.path.normpath(os.path.join(t.get("file_dir", ""), fn))
-        return p if os.path.exists(p) else None
-
-    if mode == "file_core":
-        width = t.get("scene_num_width", 0)
-        core_txt = letter + str(num).zfill(width if width > 0 else 1)
-        fn = t.get("file_prefix", "") + core_txt + t.get("file_suffix", "")
-        p = os.path.normpath(os.path.join(t.get("file_dir", ""), fn))
-        return p if os.path.exists(p) else None
-
-    if mode == "file_roi":
-        width = t.get("scene_num_width", 2)
-        roi_txt = "ROI" + str(num).zfill(width)
-        fn = t.get("file_prefix", "") + "_" + roi_txt + t.get("file_suffix", "")
-        d = t.get("file_dir", "")
-        # If parent folder is itself an ROI folder, swap it for the target ROI
-        parent_name = os.path.basename(d)
-        if re.match(r"(?i)^ROI\d+$", parent_name):
-            d = os.path.join(os.path.dirname(d), roi_txt)
-        p = os.path.normpath(os.path.join(d, fn))
-        return p if os.path.exists(p) else None
-
-    return None
 
 
 def marker_label_from_path(fp):
@@ -1839,85 +1622,6 @@ def marker_label_from_path(fp):
     return name
 
 
-def build_seed_marker_templates(scene_templates):
-    tiffs = []
-    i = 0
-    while i < len(scene_templates):
-        if scene_templates[i].get("kind") == "tiff":
-            tiffs.append(scene_templates[i])
-        i += 1
-
-    if len(tiffs) == 0:
-        return None, []
-
-    seed_scene = tiffs[0]["scene"]
-    out = []
-    seen = set()
-
-    i = 0
-    while i < len(tiffs):
-        t = tiffs[i]
-        if t.get("scene") == seed_scene:
-            mk = marker_label_from_path(t["sample_path"])
-            if mk not in seen:
-                seen.add(mk)
-                out.append((mk, t))
-        i += 1
-
-    return seed_scene, out
-
-
-def build_core_buckets(scene_keys, scene_templates):
-    by_core = {}
-    i = 0
-    while i < len(scene_keys):
-        by_core[scene_keys[i]] = empty_bucket()
-        i += 1
-
-    dir_cache = {}
-    seed_scene, marker_templates = build_seed_marker_templates(scene_templates)
-    if seed_scene is not None:
-        print("Seed scene for markers:", core_name_from_key(seed_scene), "markers:", len(marker_templates))
-
-    # TIFFs: use seed-scene marker templates only.
-    i = 0
-    while i < len(scene_keys):
-        core = scene_keys[i]
-        j = 0
-        while j < len(marker_templates):
-            mk, t = marker_templates[j]
-            rp = resolve_template_for_scene(t, core, dir_cache)
-            if rp is not None:
-                append_unique(by_core[core]["tiffs"], rp)
-            else:
-                print("MISSING MARKER FOR", core_name_from_key(core), "::", mk)
-            j += 1
-        i += 1
-
-    # Figures/overlays: expand by same scene logic.
-    non_tiff = []
-    i = 0
-    while i < len(scene_templates):
-        t = scene_templates[i]
-        if t.get("kind") != "tiff":
-            non_tiff.append(t)
-        i += 1
-
-    i = 0
-    while i < len(scene_keys):
-        core = scene_keys[i]
-        j = 0
-        while j < len(non_tiff):
-            t = non_tiff[j]
-            rp = resolve_template_for_scene(t, core, dir_cache)
-            if rp is not None:
-                add_path_to_bucket_by_kind(by_core[core], rp, t.get("kind", "other"))
-            j += 1
-        i += 1
-
-    return by_core
-
-
 def empty_bucket():
     return {
         "tiffs": [],
@@ -1942,15 +1646,6 @@ def add_path_to_bucket_by_kind(bucket, fp, kind):
         append_unique(bucket["opaque_pngs"], fp)
     else:
         append_unique(bucket["other_files"], fp)
-
-
-def sorted_core_keys(keys):
-    keys = list(keys)
-    return sorted(keys, key=lambda x: (x[0], x[1]))
-
-
-def core_name_from_key(key):
-    return str(key[0]).upper() + str(int(key[1]))
 
 
 def natural_sort_key(text):
@@ -2019,67 +1714,22 @@ def _obs_slide_scene_values(obs):
     return sorted(list(set([v for v in vals if v != ""])), key=natural_sort_key)
 
 
-def _identity_key_text(key):
-    if isinstance(key, tuple) and len(key) >= 2:
-        try:
-            return core_name_from_key(key)
-        except Exception:
-            return ""
-    return normalize_slide_scene(key)
-
-
-def _slide_scene_candidates_for_bucket(key, bucket):
-    out = []
-    key_text = _identity_key_text(key)
-    key_is_tuple = isinstance(key, tuple)
-    if key_text != "" and not key_is_tuple:
-        append_unique(out, key_text)
-    if isinstance(bucket, dict):
-        for field in ["slide_scene", "core", "scene"]:
-            value = normalize_slide_scene(bucket.get(field, ""))
-            if value != "":
-                append_unique(out, value)
-    for fp in _bucket_paths(bucket):
-        value = extract_slide_scene_from_path(fp)
-        if value != "":
-            append_unique(out, value)
-    if key_text != "" and key_is_tuple:
-        append_unique(out, key_text)
-    return out
-
-
-def build_identity_manifest_from_core_buckets(by_core, obs=None):
+def build_identity_manifest_from_direct_buckets(by_scene):
     manifest = {}
-    if not isinstance(by_core, dict):
+    if not isinstance(by_scene, dict):
         return manifest
-    obs_scenes = _obs_slide_scene_values(obs)
-    obs_scene_set = set(obs_scenes)
-    one_obs_scene = obs_scenes[0] if len(obs_scenes) == 1 and len(by_core) == 1 else ""
-    for key in by_core:
-        bucket = dict(by_core.get(key, {}) or {})
-        candidates = _slide_scene_candidates_for_bucket(key, bucket)
-        slide_scene = ""
-        if len(obs_scene_set) > 0:
-            for value in candidates:
-                if value in obs_scene_set:
-                    slide_scene = value
-                    break
-            if slide_scene == "" and one_obs_scene != "":
-                slide_scene = one_obs_scene
-            if slide_scene == "":
-                raise ValueError("Could not map viewer asset bucket to obs slide_scene: " + str(key))
-        else:
-            for value in candidates:
-                if value != "":
-                    slide_scene = value
-                    break
+    for key in by_scene:
+        slide_scene = normalize_slide_scene(key)
         if slide_scene == "":
             raise ValueError("Viewer asset bucket has no slide_scene identity: " + str(key))
         if slide_scene in manifest:
             raise ValueError("Duplicate viewer asset bucket for slide_scene: " + slide_scene)
+        bucket = dict(by_scene.get(key, {}) or {})
         bucket["slide_scene"] = slide_scene
-        bucket["display_label"] = display_label_from_slide_scene(slide_scene)
-        bucket["segmentation_tif"] = _first_segmentation_tif(_bucket_paths(bucket))
+        if str(bucket.get("display_label", "")).strip() == "":
+            bucket["display_label"] = display_label_from_slide_scene(slide_scene)
+        if str(bucket.get("segmentation_tif", "")).strip() == "":
+            bucket["segmentation_tif"] = _first_segmentation_tif(_bucket_paths(bucket))
         manifest[slide_scene] = bucket
     validate_slide_scene_manifest(manifest)
     return manifest
@@ -3997,11 +3647,6 @@ def build_catalog_from_identity_manifest(manifest, obs):
         "asset_type_catalog": asset_type_catalog,
         "default_asset_types": default_types
     }
-
-
-def build_catalog(by_core, obs):
-    manifest = build_identity_manifest_from_core_buckets(by_core, obs=obs)
-    return build_catalog_from_identity_manifest(manifest, obs)
 
 
 def add_default_full_dataset_grouping(obs, core_names, groupings):
