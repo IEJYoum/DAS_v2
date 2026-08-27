@@ -18,17 +18,17 @@
  * or getCurrentViewer() inside the project loop.
  *
  * Match modes:
- *   MARKER    - (default) Strips the slide-specific prefix
- *               (NK_{experiment}_{slideID}_C{cycle}R{round}_) and matches on
- *               the remaining suffix. Use for cross-slide APPLY / APPLY_ALL.
+ *   MARKER    - (default) Strips everything up to the _C{cycle}R{round}_
+ *               delimiter and matches on the remaining suffix.
+ *               Works across any prefix convention (NK_, KB_UCSD_, etc.).
  *   FULL_NAME - Matches on the full QuPath channel name. Only useful when
  *               source and target have identical channel names.
  */
 
 // ===================== USER SETTINGS =====================
 
-def MODE = "CAPTURE"          // "CAPTURE", "APPLY", or "APPLY_ALL"
-def PRESET_NAME = "IY-test"   // saved_display_presets/${PRESET_NAME}.json
+def MODE = "APPLY_ALL"          // "CAPTURE", "APPLY", or "APPLY_ALL"
+def PRESET_NAME = "IY-test1"   // saved_display_presets/${PRESET_NAME}.json
 
 // MARKER (default): strip slide-specific prefix, match on marker suffix.
 //   NK_3xTLS_403932_C02R2_CD3_fixed  ->  CD3_FIXED
@@ -97,14 +97,18 @@ def stripDisplaySuffix = { String name ->
 
 /**
  * Extract marker suffix from a full channel name.
- *   "NK_3xTLS_403932_C02R2_CD3_fixed (C1)" -> "CD3_FIXED"
- *   "NK_SCREEN_B171_C02R2_CD3_fixed"       -> "CD3_FIXED"
- *   "NK_3xTLS_403932_C01R1_B220"           -> "B220"
- *   "SomeOtherFormat"                      -> "SOMEOTHERFORMAT" (fallback)
+ * Strips everything up to and including the _C{cycle}R{round}_ delimiter,
+ * regardless of the project-specific prefix.
+ *
+ *   "NK_3xTLS_403932_C02R2_CD3_fixed (C1)"       -> "CD3_FIXED"
+ *   "NK_SCREEN_B171_C02R2_CD3_fixed"              -> "CD3_FIXED"
+ *   "KB_UCSD_FCPDAC005_D30_C03R1_CD3_fixed"       -> "CD3_FIXED"
+ *   "NK_3xTLS_403932_C01R1_B220"                  -> "B220"
+ *   "SomeOtherFormat"                             -> "SOMEOTHERFORMAT" (fallback)
  */
 def extractMarker = { String channelName ->
     def base = stripDisplaySuffix(channelName)
-    def match = (base =~ /NK_\w+_\w+_C\d+R\d+_(.+)$/)
+    def match = (base =~ /.*_C\d+R\d+_(.+)$/)
     if (match.matches())
         return match.group(1).toUpperCase()
     return base.toUpperCase()
@@ -393,13 +397,14 @@ if (mode == "CAPTURE") {
     println "Applying to   : ${imageData.getServerMetadata().getName()}"
     println ""
 
-    def result = applyToDisplay(display, preset)
+    // Apply colors first, then refresh, then display settings (min/max, visibility).
+    // refreshChannelOptions() rebuilds channel objects, so display settings must
+    // be applied AFTER it runs or they get wiped.
     def colorsChanged = applyColorsToImageData(imageData, preset)
-
     if (colorsChanged) {
-        // Refresh display so it picks up the new metadata colors
         display.refreshChannelOptions()
     }
+    def result = applyToDisplay(display, preset)
 
     // Persist display state (min/max, visibility, colors) into imageData properties
     display.saveChannelColorProperties()
@@ -450,13 +455,15 @@ if (mode == "CAPTURE") {
             def imageData = entry.readImageData()
             def display = ImageDisplay.create(imageData)
 
-            def result = applyToDisplay(display, preset)
+            // Apply colors first, then refresh, then display settings.
+            // refreshChannelOptions() rebuilds channel objects, so display
+            // settings must be applied AFTER it runs or they get wiped.
             def colorsChanged = applyColorsToImageData(imageData, preset)
-
             if (colorsChanged) {
                 display.refreshChannelOptions()
                 totalColorChanged++
             }
+            def result = applyToDisplay(display, preset)
 
             // Persist display state into imageData properties
             display.saveChannelColorProperties()
