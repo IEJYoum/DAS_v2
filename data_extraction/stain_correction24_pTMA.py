@@ -6,6 +6,7 @@ import warnings
 import sys
 import traceback
 import time
+import re
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +55,12 @@ SAVE_DEBUG_PNGS = True
 SAVE_TIFF = True   # recommended if you want extractor to use corrected images
 PROGRESS_TICK = None
 BAD_CORE_TOKENS = ['BC-NAT', 'OMETIFF', 'IY', 'ipynb', '_pTMA']
+
+# Extra nuclear/DAPI readout for tissue-loss filtering.
+# "all" measures every registered c1 round as DAPI_R#.
+# "last" measures only the highest-numbered c1 round.
+# "none" restores the old marker-only extraction behavior.
+EXTRACT_DAPI_ROUNDS = "all"
 
 # Ordered operations per marker (can include repeats like ['t','q','t'])
 # q = AF-sub (QC subtraction)
@@ -162,6 +169,7 @@ def estimate_job_progress_ticks(job):
         if marker is None or chan is None:
             continue
         marker_total += 1
+    marker_total += len(job.get("extra_extract_markers", []))
 
     total = marker_total
     if marker_total == 0:
@@ -418,6 +426,75 @@ def _collect_marker_files(core_folder, qc_tokens, stain_tokens, allowed_markers=
     )
 
 
+def _round_token_from_registered_tiff(file_name):
+    stem = os.path.splitext(os.path.basename(str(file_name)))[0]
+    match = re.match(r"^(R\d+[A-Za-z]*)_", stem, re.IGNORECASE)
+    if match is None:
+        return ""
+    return match.group(1)
+
+
+def _round_sort_key(round_token):
+    match = re.search(r"R(\d+)([A-Za-z]*)", str(round_token), re.IGNORECASE)
+    if match is None:
+        return 999999, str(round_token).upper()
+    return int(match.group(1)), match.group(2).upper()
+
+
+def _collect_dapi_extract_markers(core_folder):
+    mode = str(EXTRACT_DAPI_ROUNDS or "none").strip().lower()
+    if mode in ("", "0", "n", "no", "false", "none", "off"):
+        return []
+
+    rows = []
+    for file in sorted(os.listdir(core_folder)):
+        low = file.lower()
+        if not (low.endswith(".tif") or low.endswith(".tiff")):
+            continue
+        stem = os.path.splitext(file)[0]
+        if re.search(r"_c1(?:_|$)", stem, re.IGNORECASE) is None:
+            continue
+        round_token = _round_token_from_registered_tiff(file)
+        if round_token == "":
+            continue
+        rows.append({
+            "path": os.path.join(core_folder, file),
+            "name": "DAPI_" + round_token.upper(),
+            "round": round_token,
+        })
+
+    rows = sorted(rows, key=lambda row: (_round_sort_key(row["round"]), os.path.basename(row["path"]).lower()))
+    names = [row["name"].lower() for row in rows]
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate DAPI round names in " + str(core_folder) + ": " + str(names))
+
+    if mode == "last":
+        return rows[-1:] if rows else []
+    if mode != "all":
+        raise ValueError("EXTRACT_DAPI_ROUNDS must be 'all', 'last', or 'none', not " + repr(EXTRACT_DAPI_ROUNDS))
+    return rows
+
+
+def _append_extra_extract_markers(marker_paths, extra_markers):
+    out = list(marker_paths or [])
+    seen = {os.path.normcase(os.path.abspath(str(_marker_path_for_seen(item)))) for item in out}
+    for item in extra_markers or []:
+        path = item["path"]
+        key = os.path.normcase(os.path.abspath(str(path)))
+        if key not in seen:
+            out.append(item)
+            seen.add(key)
+    return out
+
+
+def _marker_path_for_seen(item):
+    if isinstance(item, dict):
+        return item["path"]
+    if isinstance(item, (list, tuple)) and len(item) >= 1:
+        return item[0]
+    return item
+
+
 def _selected_output_tiff_stems(job):
     stems = set()
     marker_overrides = job.get("marker_by_stain", {})
@@ -534,6 +611,9 @@ def _build_job_from_core_folder(core_folder, seg_root, qc_tokens, stain_tokens, 
     if len(st_files) == 0:
         fdebug("SKIP core: no stain files resolved:", fol, "QC:", len(qc_files))
         return None
+    extra_extract_markers = _collect_dapi_extract_markers(core_folder)
+    if len(extra_extract_markers) > 0:
+        fdebug("DAPI extraction rounds:", fol, len(extra_extract_markers), EXTRACT_DAPI_ROUNDS)
 
     slide, scene = _split_slide_scene(fol)
 
@@ -548,6 +628,7 @@ def _build_job_from_core_folder(core_folder, seg_root, qc_tokens, stain_tokens, 
         "nuc_sfile": nuc_file,
         "qc_files": qc_files,
         "st_files": st_files,
+        "extra_extract_markers": extra_extract_markers,
         "panel_path": panel_plan.panel_path if panel_plan is not None else "",
         "marker_by_stain": dict(panel_plan.marker_by_stain) if panel_plan is not None else {},
         "background_file_by_stain": dict(panel_plan.background_file_by_stain) if panel_plan is not None else {},
@@ -1731,6 +1812,11 @@ def process_core(job):
         marker_paths = [os.path.join(FOLD, f) for f in job["st_files"]]
         marker_paths = sorted(marker_paths)
         dprint("NOTE: extractor using RAW marker paths (SAVE_TIFF=False or no corrected tiffs found).")
+
+    extra_extract_markers = job.get("extra_extract_markers", [])
+    if len(extra_extract_markers) > 0:
+        marker_paths = _append_extra_extract_markers(marker_paths, extra_extract_markers)
+        fdebug("extra DAPI extraction markers:", slide_scene, len(extra_extract_markers))
 
     # Prefer explicit resolved metadata over reparsing folder names.
     F = FOLD.split('/')[-1].split("\\")[-1]
