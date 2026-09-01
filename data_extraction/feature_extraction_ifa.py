@@ -645,11 +645,13 @@ def print_run_summary(*, print_fn=print, project_root: str, figure_folder: str, 
 
 def print_preflight_summary(*, print_fn=print, jobs, resume_dfs, corrections: Sequence[str]):
     total_markers = sum(len(job.get("st_files", [])) for job in jobs)
+    total_dapi = sum(len(job.get("extra_extract_markers", [])) for job in jobs)
     total_qc = sum(len(job.get("qc_files", [])) for job in jobs)
     print_fn("\npreflight summary")
     print_fn("resolved cores:", len(jobs))
     print_fn("resumed core tables:", len(resume_dfs))
     print_fn("marker files:", total_markers)
+    print_fn("extra DAPI rounds:", total_dapi)
     print_fn("qc files:", total_qc)
     print_fn("correction steps:", list(corrections))
     for job in jobs[:10]:
@@ -658,6 +660,8 @@ def print_preflight_summary(*, print_fn=print, jobs, resume_dfs, corrections: Se
             job.get("slide_scene", os.path.basename(str(job.get("FOLD", "")))),
             "| markers:",
             len(job.get("st_files", [])),
+            "| dapi:",
+            len(job.get("extra_extract_markers", [])),
             "| qc:",
             len(job.get("qc_files", [])),
             "| seg:",

@@ -1,0 +1,182 @@
+CELL INTERACTION QUPATH ANNOTATION ENGINE — PLAN v0
+
+Purpose
+-------
+Generate candidate spatial-niche annotations in a QuPath project from a user-defined
+cell-interaction rule. The output is an annotation layer plus measurements explaining
+why every region was selected.
+
+This is a hotspot/niche-discovery tool. It identifies regions consistent with a
+specified spatial pattern; it does not by itself prove cell-cell interaction.
+
+
+Two parallel input engines
+--------------------------
+
+1. Image-only engine
+   Use when classified cells/centroids are unavailable or when the desired signal is
+   defined directly by mIHC image channels.
+
+   a. Choose source channels/markers and an optional tissue or user-drawn analysis ROI.
+   b. Downsample to a user-selected working resolution in microns/pixel.
+   c. Correct crude background before combining signals:
+      - establish a per-marker background floor (manual, ROI-derived, or robust
+        image statistic);
+      - subtract the floor and clamp at zero;
+      - optionally normalize/clamp the remaining intensity to a specified range.
+   d. Smooth each corrected marker map with a Gaussian kernel expressed in microns.
+   e. Create an interaction score map.
+   f. Detect local score maxima and turn qualifying components around them into
+      QuPath annotations.
+
+   Important: image-only scores reflect marker signal, not necessarily cell density.
+   They are sensitive to staining variation, bleed-through/unmixing quality,
+   autofluorescence, artifacts, and diffuse expression. Use an analysis/tissue mask
+   and inspect channel overlays before accepting annotations.
+
+2. Phenotype/centroid engine
+   Use when cells have already been detected and assigned phenotypes.
+
+   a. Convert centroids for each selected phenotype into point-density maps.
+   b. Smooth those maps with a Gaussian kernel expressed in microns.
+   c. Apply the same interaction scoring, peak selection, and annotation rules as
+      the image-only engine.
+
+   This is the preferred mode for a literal "cells of type A near cells of type B"
+   question. It should be retained as a parallel engine, not substituted for the
+   image-only approach.
+
+
+Interaction-rule model
+----------------------
+
+Example question: find CD8-rich regions near FAP and away from CD4.
+
+For either input mode, let P_CD8, P_FAP, and P_CD4 be corrected, smoothed positive
+maps (marker signal maps in image-only mode; density maps in centroid mode). Any
+context marker is simply another positive term or required gate; it does not require
+pre-defining a clean anatomical compartment.
+
+Simple interpretable score:
+    S = (P_CD8 ^ wCD8) * (P_FAP ^ wFAP) / (1 + alpha * P_CD4)
+
+Equivalent, more stable score used internally:
+    logS = wCD8*log(epsilon + P_CD8)
+         + wFAP*log(epsilon + P_FAP)
+         - wCD4*log(1 + alpha*P_CD4)
+
+Suggested mandatory gates:
+    P_CD8 >= min_CD8
+    P_FAP >= min_FAP
+    total signal/cell density >= min_total (optional)
+    pixel is inside the valid image/tissue mask (if available)
+
+The gates are important: they prevent a low-CD4 empty/background region from being
+selected merely because the denominator is small.
+
+Example: "CD4 and CD8 interaction in tumor" can be expressed directly as a
+CD4-and-CD8 positive interaction score with P_PanCK >= min_PanCK as an additional
+positive gate (or with PanCK included as another weighted numerator term). It is not
+necessary to first generate a separate tumor-compartment annotation. This keeps the
+search focused on the joint CD4/CD8/PanCK pattern and avoids depending on a clean
+compartment boundary.
+
+Negative-marker background handling
+-----------------------------------
+
+For CD4 (or any marker acting as a penalty), raw low-level background must not affect
+the score. Apply a crude floor BEFORE smoothing and scoring:
+
+    CD4_corrected = max(0, CD4_raw_normalized - CD4_background_floor)
+
+Only signal above this floor contributes a penalty. The same principle should be used
+for positive markers, although their floors/gates may differ. In centroid mode this
+becomes a phenotype-confidence or density floor instead of raw-channel subtraction.
+
+Do not let an unmasked black/background area be interpreted as "far from CD4".
+
+
+Hotspot-to-annotation procedure
+-------------------------------
+
+1. Find local maxima of S among pixels passing all gates.
+2. Apply non-maximum suppression/minimum separation so the top N peaks represent
+   distinct niches rather than adjacent pixels from one niche.
+3. For each peak, start at its score and lower the threshold only within the
+   peak's connected component.
+4. Stop when the component reaches the requested minimum/target area, e.g.
+   1,000 um^2, subject to:
+      - minimum score floor;
+      - maximum allowed area;
+      - optional compactness/shape constraint;
+      - remaining within the optional analysis ROI or valid tissue mask.
+5. Convert the component into an annotation; optionally smooth its boundary and
+   discard components below the final minimum area.
+6. Enforce no overlap or resolve overlap by assigning shared pixels to the higher
+   scoring peak.
+
+Selecting the first connected component that reaches the target area is preferable to
+globally lowering a threshold until ANY area reaches that size: the latter can merge
+unrelated high-score regions or allow a single region to spread excessively.
+
+
+Global user knobs (initial set)
+-------------------------------
+
+- optional analysis ROI / tissue mask and excluded classes
+- input engine: image-only or phenotype/centroid
+- selected positive and negative markers/phenotypes
+- per-marker background floor and intensity normalization/clipping limits
+- working resolution/downsample (microns per pixel)
+- Gaussian smoothing radius per marker/phenotype (microns)
+- marker weights and negative-marker penalty alpha
+- positive-signal gates and optional total-density gate
+- number of requested regions (top N)
+- minimum inter-peak distance (microns)
+- seed/peak-score threshold or percentile
+- target/minimum and maximum annotation area (um^2)
+- boundary smoothing and connected-component connectivity
+- output annotation class/name and whether to retain intermediate maps
+
+All physical-size knobs should be specified in microns or um^2 and converted using
+the image calibration. Never expose only pixel-sized parameters as the biological
+controls.
+
+
+Outputs and audit trail
+-----------------------
+
+For every annotation, store at minimum:
+    interaction name, engine type, area, peak score, mean/max score,
+    marker/density summaries, parameters used, and source image/optional ROI.
+
+Also save optional intermediate score maps and corrected marker maps. This makes
+threshold choices visually reviewable and lets the exact analysis be rerun.
+
+
+Quality controls / future refinements
+-------------------------------------
+
+- Use a tissue mask where feasible to exclude slide background, folds, necrosis, and
+  known artifacts. Do not require a compartment mask when a context marker can be
+  incorporated directly into the interaction rule.
+- In image-only mode, use channel-specific floors and review compensation/unmixing.
+- Tune smoothing radius and target area together: they encode the biological scale
+  being called an interaction niche.
+- For centroid mode, optionally add explicit distance fields or neighbor counts;
+  density overlap alone is a proxy for proximity.
+- Compare selected regions against phenotype-label permutations within the same valid
+  tissue region to determine whether apparent co-localization exceeds spatial density
+  structure expected by chance.
+- Create annotations as candidate regions for review; validate on held-out images
+  before treating thresholds as a project-wide rule.
+
+
+Implementation boundary for v0
+------------------------------
+
+The first Groovy implementation should prioritize explicit knobs, reproducible output,
+and saved measurements over sophisticated statistics. Keep the shared parts
+(masking, map processing, scoring, peak/component extraction, annotation creation)
+independent from the input adapter so image-only and centroid modes use the same
+annotation logic.

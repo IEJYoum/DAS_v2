@@ -47,6 +47,24 @@ def _progress_tick(phase=""):
             pass
 
 
+def _marker_path_and_name(marker_input):
+    if isinstance(marker_input, dict):
+        path = marker_input["path"]
+        name = str(marker_input.get("name") or "").strip()
+        if name == "":
+            name = os.path.splitext(os.path.basename(path))[0]
+        return path, name
+    if isinstance(marker_input, (list, tuple)) and len(marker_input) >= 2:
+        path = marker_input[0]
+        name = str(marker_input[1]).strip()
+        if name == "":
+            name = os.path.splitext(os.path.basename(path))[0]
+        return path, name
+    path = marker_input
+    name = os.path.splitext(os.path.basename(path))[0]
+    return path, name
+
+
 # -----------------------
 # Shape matching (pad/crop bottom/right only)
 # -----------------------
@@ -364,10 +382,9 @@ def _extract_markers(
 ):
     n_markers = len(marker_paths)
     for i, mp in enumerate(marker_paths):
-        bname = os.path.basename(mp)
-        bname = os.path.splitext(bname)[0]
+        marker_path, bname = _marker_path_and_name(mp)
 
-        im = tiff.imread(mp)
+        im = tiff.imread(marker_path)
         if im.ndim != 2:
             im = im[0, :, :]
         im = np.asarray(im, dtype=np.float32)
