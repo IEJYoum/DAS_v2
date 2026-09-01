@@ -5386,14 +5386,20 @@ function knownRoiIds() {
 function resolveRoiId(rawRoi) {
   const raw = String(rawRoi || '').trim();
   if (!raw) return '';
-  // Strip legacy Nuclei_ prefix before matching
-  const stripped = /^Nuclei_/i.test(raw) ? raw.slice(7) : raw;
+  // Strip known prefixes before matching
+  const stripped = raw.replace(/^(Nuclei_|CellObjects_)/i, '');
+  // Generic fallback: drop first token before underscore
+  var dropFirst = raw.indexOf('_') > 0 ? raw.slice(raw.indexOf('_') + 1) : '';
+  var candidates = [raw, stripped];
+  if (dropFirst && candidates.indexOf(dropFirst) < 0) candidates.push(dropFirst);
   const roiIds = knownRoiIds();
   for (const roi of roiIds) {
-    if (roi === raw || roi === stripped) return roi;
+    for (var ci = 0; ci < candidates.length; ci++) {
+      if (roi === candidates[ci]) return roi;
+    }
   }
   const matches = roiIds.filter(function(roi) {
-    return roi.toLowerCase().endsWith(stripped.toLowerCase());
+    return candidates.some(function(c) { return c && roi.toLowerCase().endsWith(c.toLowerCase()); });
   });
   return matches.length === 1 ? matches[0] : stripped;
 }

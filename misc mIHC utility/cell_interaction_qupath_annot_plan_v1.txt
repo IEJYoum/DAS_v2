@@ -1,0 +1,295 @@
+CELL INTERACTION ENGINE v1 - PYTHON PIVOT PLAN
+================================================
+
+Summary
+-------
+Move the image processing engine from QuPath Groovy to Python. QuPath is used
+only to import the resulting GeoJSON annotations. Python reads the QuPath
+project file to discover image paths, so it works with projects cobbled
+together from multiple source directories.
+
+The improvements document (cell_interaction_improvements.txt) remains the
+design reference. This plan covers the architecture, I/O contracts, and
+implementation order.
+
+
+Architecture
+------------
+
+    ┌────────────────────────────────────────────┐
+    │  cell_interaction_v1.py                    │
+    │                                            │
+    │  Input:  QuPath project.qpproj             │
+    │          + user config (markers, knobs)     │
+    │                                            │
+    │  Steps:                                    │
+    │   1. Parse project.qpproj → image URIs     │
+    │   2. Read selected ome.tiff via tifffile   │
+    │   3. Resolve channel names → band indices  │
+    │   4. Process marker maps (numpy/scipy)     │
+    │   5. Score, find peaks, grow components    │
+    │   6. Convert regions → GeoJSON polygons    │
+    │                                            │
+    │  Output (per image, to debug folder):      │
+    │   - annotations.geojson                    │
+    │   - debug PNGs (marker maps, score, etc.)  │
+    │   - run_parameters.json                    │
+    │   - channel_report.csv                     │
+    │   - score_summary.csv                      │
+    └────────────────────────────────────────────┘
+
+    ┌────────────────────────────────────────────┐
+    │  import_annotations.groovy  (~10 lines)    │
+    │                                            │
+    │  Reads annotations.geojson from the debug  │
+    │  folder and adds them to the current image │
+    │  via QuPath's importObjectsFromFile or     │
+    │  equivalent GeoJSON reader.                │
+    └────────────────────────────────────────────┘
+
+
+1. Project discovery and image resolution
+-----------------------------------------
+
+Python reads the QuPath project.qpproj (JSON). Each image entry contains:
+
+    entry.serverBuilder.uri → file:/Z:/path/to/slide.ome.tiff
+    entry.imageName         → "slide.ome.tiff - Image0"
+
+The script:
+- Accepts a path to project.qpproj (prompted or CLI arg).
+- Parses all image entries and their URIs.
+- Converts file: URIs back to OS paths (urllib.parse.unquote, handle
+  Windows/Mac path differences).
+- Lets the user select which image(s) to process (by index, name, or "all").
+- Verifies each tiff exists on disk before processing.
+
+This means the script works regardless of how the project was assembled —
+images from NR/, R/, 4x/ subdirectories, different drives, etc. The project
+file is the single source of truth for where files live.
+
+
+2. Channel name resolution
+--------------------------
+
+Channel names in ome.tiff metadata follow project-specific conventions:
+
+    NK_3xTLS_403932_C02R2_CD3_fixed   (AP mouse project)
+    KB_UCSD_FCPDAC005_D30_C03R1_CD3_fixed  (KB UCSD project)
+
+The user specifies markers by suffix only (e.g., "CD8", "FAP", "PanCK").
+The script extracts the marker suffix from each channel name using the same
+logic as transfer_display_settings_v2.groovy:
+
+    regex: .*_C\d+R\d+_(.+)$
+    fallback: full channel name
+
+Matching is case-insensitive. If a user-specified marker doesn't match any
+channel, the script aborts with a clear message listing available markers
+(both full names and extracted suffixes).
+
+
+3. Image reading
+----------------
+
+Use tifffile to read the ome.tiff. Read only the channels needed (positive +
+negative + any penalty markers), not all 9-31 channels. Read at the pyramid
+level closest to WORKING_PIXEL_SIZE_UM.
+
+ome.tiff pyramid levels are stored as sub-resolutions. tifffile exposes them
+via series[0].levels or pages. Pick the level whose pixel size is closest to
+(but not coarser than) the requested working resolution, then downsample the
+remainder with skimage.transform.downscale_local_mean or similar.
+
+Memory estimate: report before processing. For a 70k x 40k image at 8x
+downsample = ~8750 x 5000 = 43M pixels. At float32, one channel = ~175 MB.
+3 channels = ~525 MB. Manageable. Report this in dry-run mode so the user
+can adjust.
+
+
+4. Processing pipeline (numpy/scipy)
+-------------------------------------
+
+For each marker channel:
+
+    a. Read raw pixel values at working resolution (float32).
+    b. Floor correction: values <= floor become 0.
+    c. Ceiling normalization: values >= ceiling become 1.
+       Intermediate: (raw - floor) / (ceiling - floor), clipped to [0, 1].
+    d. Gaussian blur: scipy.ndimage.gaussian_filter(sigma_pixels).
+    e. Gate: values below gate threshold become 0.
+
+Score map:
+
+    S = product(positive_i ^ weight_i)
+        / product((1 + penalty_j * negative_j) ^ weight_j)
+        / (1 + broadPenalty * broadExcess)       [if broad penalty enabled]
+
+Peak finding:
+
+    scipy.ndimage.maximum_filter + comparison to find local maxima.
+    Filter by PEAK_SCORE_FLOOR.
+    Sort descending by score.
+    Enforce MIN_PEAK_SEPARATION_UM between accepted peaks.
+
+Component growth:
+
+    Binary search on threshold (not 80 fixed steps).
+    For each accepted peak, binary-search the highest threshold whose
+    flood-fill connected component reaches TARGET_AREA_UM2.
+    scipy.ndimage.label for connected components.
+    Enforce MAX_AREA_UM2 and non-overlap with previously accepted regions.
+
+Contour extraction:
+
+    skimage.measure.find_contours on the label mask to get polygon vertices.
+    Scale vertices back to full-resolution pixel coordinates.
+    Convert to GeoJSON Polygon geometry.
+
+
+5. Output: GeoJSON annotations
+------------------------------
+
+Write one .geojson file per image. Format follows QuPath's GeoJSON import
+expectations:
+
+    {
+      "type": "FeatureCollection",
+      "features": [
+        {
+          "type": "Feature",
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[x1,y1], [x2,y2], ...]]
+          },
+          "properties": {
+            "objectType": "annotation",
+            "name": "Interaction hotspot 01",
+            "classification": { "name": "Cell interaction hotspot" },
+            "measurements": {
+              "Interaction peak score": 0.42,
+              "Interaction area um2": 1200.0,
+              "Interaction threshold": 0.15,
+              ...
+            }
+          }
+        }
+      ]
+    }
+
+Coordinates are in full-resolution image pixels (QuPath's coordinate system).
+
+
+6. Output: debug PNGs and reports
+---------------------------------
+
+Per-image output folder:
+
+    cell_interaction_output/
+      {image_name}_{timestamp}/
+        annotations.geojson
+        run_parameters.json
+        channel_report.csv
+        score_summary.csv
+        debug_marker_{MARKER_NAME}.png      (each positive/negative channel)
+        debug_score_map.png
+        debug_gate_mask.png
+        debug_labels.png
+        debug_composite.png                 (score overlay on tissue image)
+
+All PNGs at working resolution with colorbars and labels. The composite
+overlay uses one of the marker channels (or HEM if available) as a grayscale
+background with score contours and peak markers overlaid.
+
+run_parameters.json: all knobs, image path, calibration, effective working
+resolution, blur sigma in pixels, timestamp, Python/library versions.
+
+channel_report.csv: for each requested channel — full name, extracted marker,
+band index, pixel type, min/max/mean, p01/p05/p50/p95/p99, fraction above
+floor, fraction above gate post-normalization.
+
+score_summary.csv: for each candidate peak — rank, peak score, accepted/
+rejected + reason, final threshold, raster area, polygon area, peak
+coordinates (working px, full-res px, microns).
+
+
+7. Groovy import script
+------------------------
+
+Minimal QuPath Groovy script (~10 lines) to import annotations:
+
+    def geojsonPath = Dialogs.promptForFile("Select annotations.geojson", null)
+    if (geojsonPath == null) return
+    def annotations = PathIO.readObjects(geojsonPath)
+    getCurrentHierarchy().addObjects(annotations)
+    fireHierarchyUpdate()
+    println "Imported ${annotations.size()} annotations from ${geojsonPath.name}"
+
+Safety: this only ADDS annotations. It does not modify image data, channels,
+or project structure. If the user doesn't like the result, they delete the
+annotations or don't save.
+
+
+8. Dry-run mode
+---------------
+
+With DRY_RUN = true, the script:
+- Parses the project and resolves image paths.
+- Reads channel metadata (without loading full pixel data if possible).
+- Reports channel statistics (requires reading pixel data at working res for
+  one image, or a sampled subset).
+- Reports memory estimates, effective resolution, blur sigma in pixels.
+- Does NOT compute scores, find peaks, or write annotations.
+- DOES write channel_report.csv and run_parameters.json.
+
+This lets the user validate channel names, floor/ceiling values, and memory
+before committing to a full run.
+
+
+9. Python dependencies
+----------------------
+
+    tifffile          — read ome.tiff (with pyramid level access)
+    numpy             — array processing
+    scipy             — gaussian_filter, ndimage.label, ndimage.maximum_filter
+    scikit-image      — find_contours, downscale_local_mean
+    matplotlib        — debug PNGs
+    json (stdlib)     — project.qpproj parsing, GeoJSON output, run params
+    csv (stdlib)      — channel_report, score_summary
+    urllib (stdlib)    — file: URI parsing
+    argparse (stdlib) — CLI interface
+
+No QuPath, ImageJ, or Java dependencies.
+
+
+10. Implementation order
+------------------------
+
+Phase 1 — Minimum viable: single image, hardcoded knobs
+    a. Project parser: read project.qpproj, resolve image URIs to paths.
+    b. Channel resolver: tifffile metadata → marker suffix matching.
+    c. Image reader: read selected channels at working resolution.
+    d. Marker processing: floor/ceiling/blur/gate pipeline (numpy/scipy).
+    e. Score map + peak finding.
+    f. Binary-search component growth + contour extraction.
+    g. GeoJSON output.
+    h. Debug PNGs (marker maps, score map, composite overlay).
+    i. Groovy import script.
+
+Phase 2 — Usability
+    a. CLI interface with argparse (project path, image selection, knobs).
+    b. Dry-run mode with channel statistics.
+    c. channel_report.csv and score_summary.csv.
+    d. run_parameters.json.
+    e. Batch mode (process multiple/all images).
+
+Phase 3 — Robustness
+    a. Tiling with halo for large slides that don't fit in memory.
+    b. Broad-signal penalty support.
+    c. Area-threshold diagnostic curve (optional audit output).
+    d. Config file support (YAML/JSON) so knobs don't live in source.
+
+Not in scope (future engine):
+    - Phenotype/centroid-based adjacency ("CD4 cells within X um of CD8").
+    - Cell segmentation or detection.
+    - These require a different engine built on cell objects, not pixel signal.

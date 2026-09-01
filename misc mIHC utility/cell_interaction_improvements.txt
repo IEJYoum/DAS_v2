@@ -1,0 +1,241 @@
+CELL INTERACTION ENGINE - IMPROVEMENTS / DESIGN DECISIONS
+==========================================================
+
+Scope
+-----
+This document records decisions made after the v0 image-only QuPath Groovy draft.
+It is intended to guide the next implementation pass, rather than to prescribe a
+final API.
+
+
+1. Downsample and memory policy
+-------------------------------
+
+Do NOT silently raise the downsample to satisfy a hard MAX_WORKING_PIXELS limit.
+The user wants direct control over the biological/image resolution and can manually
+increase downsampling when speed or memory is limiting.
+
+Replace the automatic cap with these explicit controls:
+
+- WORKING_PIXEL_SIZE_UM: requested analysis resolution.
+- optional MAX_WORKING_PIXELS warning limit, disabled by default or used only to
+  stop and report the required memory/resolution tradeoff.
+- DRY_RUN: calculate and report working-image dimensions, estimated RAM, effective
+  working pixel size, blur sigma in working pixels, and pixels representing the
+  requested minimum/target area. Do not create annotations in dry-run mode.
+
+If a safeguard limit would be exceeded, abort with a clear message showing the
+required coarser working pixel size instead of changing it. The user then makes the
+choice knowingly.
+
+
+2. Channel values: inspect before setting floors
+-----------------------------------------------
+
+The v0 placeholder range (100 to 3000) must not be used as a default. This dataset
+may store normalized intensities from 0 to 1, in which case those defaults suppress
+every signal and yield no hotspots.
+
+The script should have a channel-inspection/dry-run stage that, for every requested
+channel, reports:
+
+- exact metadata channel name and resolved raster-band index;
+- pixel type / nominal value range, if available;
+- min, max, mean, and robust percentiles (at least p01, p05, p50, p95, p99) within
+  the requested image or optional selected ROI;
+- fraction of pixels above the proposed background floor and above the proposed
+  positive gate after normalization;
+- warnings when a proposed floor/ceiling is outside the observed range, when the
+  range is 0 to 1 but a user entered values greater than 1, or when ceiling <= floor.
+
+The user still supplies biological/assay-specific floors. Image-derived percentile
+defaults can be offered as a convenience, but should be opt-in and recorded in the
+run metadata.
+
+
+3. Image-only "adjacency" has a limit
+--------------------------------------
+
+Lower downsample, lower blur, and a small target area can make the image-only engine
+more spatially local. It can therefore be useful for finding very small local
+co-enrichment regions.
+
+However, it is not identical to true adjacency between two phenotyped cells:
+
+- the score sees marker signal, not cell identities or centroids;
+- overlapping channels may come from one multi-positive cell, bleed-through,
+  registration error, or adjacent cells;
+- a blur smaller than roughly a cell diameter will emphasize signal overlap more
+  than a neighborhood; a blur in the one-to-few-cell-diameter range is a local
+  neighborhood proxy.
+
+Keep this engine for image-only spatial signal discovery. For a literal question
+such as "CD4 cells within X um of CD8 cells", the future phenotype/centroid engine
+must use centroids, explicit neighbor distances, and phenotype rules.
+
+
+4. Masks and non-specific-signal penalties
+------------------------------------------
+
+Do not require a compartment mask. A context marker such as PanCK should be a
+positive required gate or score term, e.g. CD4 x CD8 x PanCK, rather than a separate
+tumor mask.
+
+For the signal-only image path, a tissue mask should remain optional. The dataset's
+stains generally occur in tissue, and positive-marker gates should already eliminate
+empty background.
+
+Add optional support for a weak broad-signal penalty to reduce folds, bright debris,
+and broadly fluorescent artifacts without making a tissue/compartment mask mandatory.
+Suggested form after floor correction and smoothing:
+
+    S = product(positive_i ^ weight_i)
+        / product((1 + explicitPenalty_j * negative_j) ^ weight_j)
+        / (1 + broadPenalty * broadSignalExcess)
+
+where broadSignalExcess is a normalized aggregate of user-selected OTHER/PENALTY
+channels above a separate floor. Its weight should default to weak. Do not define it
+from the same positive channels unless that behavior is explicitly desired: otherwise
+a true high-signal interaction can penalize itself.
+
+Explicit negatives (for example CD4 when looking for CD8-FAP away from CD4) remain
+separate, stronger penalties. Their raw background floor is applied BEFORE blur:
+
+    negativeCorrected = max(0, rawNormalized - negativeFloor)
+
+
+5. Thresholding and hotspot count
+---------------------------------
+
+Keep the user-facing controls conceptually separate:
+
+- N_HOTSPOTS controls whether the user asks for one region, two regions, or 50.
+- TARGET_AREA_UM2 / MIN_AREA_UM2 controls the footprint requested around each seed.
+- MIN_COMPONENT_SCORE and MAX_AREA_UM2 constrain runaway growth or merging.
+
+The current 80-step threshold descent is not ideal. For each peak it repeatedly
+flood-fills a component, so its worst-case cost is approximately proportional to:
+
+    number of image pixels x threshold steps x accepted/candidate peaks
+
+It can be acceptable for a small working image and a few peaks, but is not a good
+scaling plan for 50 hotspots or large slides.
+
+Preferred options:
+
+A. Binary search (simple default)
+   Component area increases monotonically as threshold falls. Use a binary search to
+   find the highest threshold whose component reaches TARGET_AREA_UM2. This is much
+   cheaper than 80 evenly spaced thresholds, but yields one final annotation per peak.
+
+B. Continuous area-threshold profile (advanced/audit mode)
+   Produce a table for every peak containing threshold, connected-component area,
+   and merge events while the threshold decreases. This gives users an interpretable
+   continuous area curve and lets them choose a target area after inspecting it.
+   A true efficient implementation should use score-ordered pixels and a union-find
+   / component-tree approach rather than independently flood-filling every threshold.
+   It is roughly O(N log N) due to sorting, then near-linear union operations, rather
+   than repeated whole-component searches.
+
+Recommended v1 behavior: binary-search the chosen output annotation; optionally
+write a coarse diagnostic area curve, then add the full union-find sweep only if it
+proves necessary.
+
+Non-overlap policy needs to be explicit. The v0 implementation prevents later peaks
+from using pixels already assigned to an earlier annotation. This is sensible for
+non-overlapping output but may truncate a nearby secondary component. Alternatives:
+
+- retain the ranked non-overlap policy (default);
+- allow overlaps; or
+- segment the score map by seeded watershed / watershed-like partition before growth.
+
+
+6. Tiling and computational scaling
+-----------------------------------
+
+Most image operations are linear in the number of working pixels per tile: reading,
+floor/clamp, score calculation, and connected-component labeling. Gaussian blur is
+also efficient in standard image libraries, but its cost and memory still increase
+with pixel count and blur width. Repeating flood fills at many thresholds/peaks is
+the expensive part in v0; use binary search or a component tree to control it.
+
+Tiling is appropriate for large slides and should be designed, not bolted on:
+
+- process tiles at the user-requested working resolution;
+- use an overlap/halo of at least 3 x BLUR_SIGMA_UM (4 x is safer) so scores near a
+  tile edge match whole-slide blur results;
+- retain only tile interiors after filtering;
+- collect candidate peaks globally, apply global non-maximum suppression/ranking,
+  and then grow final components with enough neighboring data to avoid edge cuts;
+- merge/deduplicate annotations that meet across tile boundaries.
+
+Whole-slide-at-downsample remains fine for a moderate image if dry-run memory and
+resolution diagnostics are satisfactory.
+
+
+7. Debug outputs and reproducibility
+------------------------------------
+
+Debug output is required. It should make tuning auditable without modifying project
+structure beyond the requested annotations.
+
+Create one run-specific debug folder outside the QuPath hierarchy, preferably under
+the project directory when a project is open. Use a timestamp/run ID. Do not store
+debug images as permanent QuPath annotations or detections.
+
+Requested artifacts:
+
+- run_parameters.txt or JSON: all global knobs, QuPath version, image name/path,
+  calibration, requested/effective working resolution, and timestamp;
+- channel_report.csv: channel names, band indices, distribution statistics, and
+  floor/ceiling/gate checks;
+- score_summary.csv: ranked local peaks, accepted/rejected reason, final threshold,
+  raster area, final annotation area, and peak coordinates in full-resolution
+  pixels and microns;
+- visual debug images at working resolution: corrected positive maps, corrected
+  negative/other-penalty maps, combined score map, gate mask, and final label map;
+- optional composite PNG with selected annotation outlines over a display image.
+
+Use QuPath/ImageJ's normal image-writing APIs or simple buffered-image/PNG output.
+The script should first verify that a project/output directory exists and fail with a
+clear message or use a user-specified folder; it should never silently scatter files
+through the project.
+
+
+8. Output measurements and safety checks
+----------------------------------------
+
+For each final annotation, add both geometry and score measurements:
+
+- actual traced annotation area in um^2 (not only raster-estimated area);
+- peak score, mean score, max score, final component threshold;
+- marker-map means/maxima and optional raw-channel summaries;
+- peak coordinates in full-resolution pixels and microns;
+- working pixel size, blur sigma, and run ID.
+
+Before writing annotations, validate:
+
+- image has micron calibration;
+- requested marker names resolve to image bands;
+- proposed floors, ceilings, gates, weights, penalty weights, and areas are valid;
+- effective working resolution provides a user-configured minimum number of pixels
+  per target area (warn or abort; do not silently alter it);
+- if using a selected ROI mask, it is one valid area ROI.
+
+Default DELETE_PREVIOUS_OUTPUT should remain false. If enabled, delete only objects
+tagged with this engine's run metadata/class/name prefix, never broadly matching
+user-created annotations.
+
+
+9. Proposed implementation sequence
+-----------------------------------
+
+1. Replace silent MAX_WORKING_PIXELS downsample escalation with dry-run diagnostics
+   and explicit user choice.
+2. Add real channel statistics and floor/ceiling validation; update defaults to fit
+   normalized 0-1 data or require users to fill them in.
+3. Add run-specific text/CSV and debug-map output.
+4. Replace fixed 80-step growth with binary search and record the area curve.
+5. Add optional OTHER/PENALTY marker support and actual annotation measurements.
+6. Add tiled execution with halo/merge handling when whole-slide reads are limiting.
+7. Build the independent phenotype/centroid engine for true adjacency questions.
