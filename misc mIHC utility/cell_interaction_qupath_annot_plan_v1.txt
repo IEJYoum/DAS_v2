@@ -19,7 +19,8 @@ Architecture
     ┌────────────────────────────────────────────┐
     │  cell_interaction_v1.py                    │
     │                                            │
-    │  Input:  QuPath project.qpproj             │
+    │  Input:  QuPath project.qpproj              │
+    │          OR direct .ome.tiff path           │
     │          + user config (markers, knobs)     │
     │                                            │
     │  Steps:                                    │
@@ -51,22 +52,53 @@ Architecture
 1. Project discovery and image resolution
 -----------------------------------------
 
-Python reads the QuPath project.qpproj (JSON). Each image entry contains:
+Two input modes — the user provides EITHER:
 
-    entry.serverBuilder.uri → file:/Z:/path/to/slide.ome.tiff
-    entry.imageName         → "slide.ome.tiff - Image0"
+    A. A QuPath project.qpproj path (project mode).
+    B. A direct path to one .ome.tiff file (standalone mode).
 
-The script:
-- Accepts a path to project.qpproj (prompted or CLI arg).
-- Parses all image entries and their URIs.
-- Converts file: URIs back to OS paths (urllib.parse.unquote, handle
-  Windows/Mac path differences).
-- Lets the user select which image(s) to process (by index, name, or "all").
-- Verifies each tiff exists on disk before processing.
+Mode A — project mode:
+
+    Python reads the QuPath project.qpproj (JSON). Each image entry contains:
+
+        entry.serverBuilder.uri → file:/Z:/path/to/slide.ome.tiff
+        entry.imageName         → "slide.ome.tiff - Image0"
+        entry.serverBuilder.args → ["--series", "0"]   (series index)
+
+    The script:
+    - Accepts a path to project.qpproj (prompted or CLI arg).
+    - Parses all image entries and their URIs.
+    - Converts file: URIs back to OS paths (urllib.parse.unquote, handle
+      Windows/Mac path differences).
+    - Lets the user select which image(s) to process (by index, name, or "all").
+    - Verifies each tiff exists on disk before processing.
+    - Extracts the series index from entry.serverBuilder.args (default 0).
+
+    Path resilience: if a URI doesn't resolve to an existing file, the script
+    checks an optional PATH_REMAP table — a dict of {old_prefix: new_prefix}
+    pairs. This handles the common case where project.qpproj was written on a
+    different machine (e.g., Mac /Volumes/... vs Windows Z:\...) without
+    editing the project file. If the file still doesn't exist after remapping,
+    the entry is skipped with a warning (not a fatal error) so other images
+    can still be processed.
+
+    Example PATH_REMAP:
+        { "/Volumes/Coussens-Secure/": "Z:/" }
+
+Mode B — standalone mode:
+
+    The user provides a direct path to one .ome.tiff file. The script:
+    - Skips project parsing entirely.
+    - Uses series index 0 (or a --series CLI arg).
+    - Reads calibration from OME metadata (see section 3a).
+    - Processes that single image.
+
+    This is useful for quick tests or images that aren't in a QuPath project.
 
 This means the script works regardless of how the project was assembled —
 images from NR/, R/, 4x/ subdirectories, different drives, etc. The project
-file is the single source of truth for where files live.
+file is the single source of truth for where files live, but direct paths
+bypass it entirely when convenient.
 
 
 2. Channel name resolution
@@ -82,29 +114,121 @@ The script extracts the marker suffix from each channel name using the same
 logic as transfer_display_settings_v2.groovy:
 
     regex: .*_C\d+R\d+_(.+)$
-    fallback: full channel name
+    fallback: full channel name (used as-is if regex doesn't match)
 
-Matching is case-insensitive. If a user-specified marker doesn't match any
-channel, the script aborts with a clear message listing available markers
-(both full names and extracted suffixes).
+Matching rules — strict, no fuzzy:
+- Exact case-insensitive string equality between user-supplied marker name
+  and extracted suffix. No substring, no Levenshtein, no startswith.
+- If a user marker matches zero suffixes → abort with a clear message listing
+  all available suffixes.
+- If a user marker matches more than one suffix (ambiguous) → abort, listing
+  the conflicting full channel names. This can happen if two channels share
+  a suffix after extraction (unlikely but possible with non-standard naming).
+- The abort message always shows both the full channel name AND the extracted
+  suffix for every channel, so the user can see exactly what went wrong and
+  correct their input.
+
+Why no fuzzy: fuzzy matching silently binds to the wrong channel, producing
+wrong biology. An abort with a clear list is safer and faster to fix.
 
 
 3. Image reading
 ----------------
 
-Use tifffile to read the ome.tiff. Read only the channels needed (positive +
-negative + any penalty markers), not all 9-31 channels. Read at the pyramid
-level closest to WORKING_PIXEL_SIZE_UM.
+3a. Series and axes
 
-ome.tiff pyramid levels are stored as sub-resolutions. tifffile exposes them
-via series[0].levels or pages. Pick the level whose pixel size is closest to
-(but not coarser than) the requested working resolution, then downsample the
-remainder with skimage.transform.downscale_local_mean or similar.
+    The ome.tiff may contain multiple series (scenes). The script uses the
+    series index from the QuPath project entry's args (["--series", "0"]) or
+    from the --series CLI arg in standalone mode. Default is 0.
 
-Memory estimate: report before processing. For a 70k x 40k image at 8x
-downsample = ~8750 x 5000 = 43M pixels. At float32, one channel = ~175 MB.
-3 channels = ~525 MB. Manageable. Report this in dry-run mode so the user
-can adjust.
+    tifffile exposes series via TiffFile.series[series_index]. Each series
+    has .axes (e.g., "CYX", "ZCYX", "TZCYX"). The script must handle at
+    least CYX and ZCYX:
+
+        axes == "CYX":  data shape is (C, Y, X) — use directly.
+        axes == "ZCYX": data shape is (Z, C, Y, X) — take z=0 slice.
+        axes == "YXC":  data shape is (Y, X, C) — transpose to (C, Y, X).
+
+    If axes contain T, take t=0. If an unrecognized layout is encountered,
+    abort with a message showing the axes string and shape so the user can
+    report it.
+
+    Channel names come from the OME-XML metadata. tifffile parses this into
+    series[n].pages[0].description (raw XML) or via tifffile.xml2dict. The
+    script reads OME > Image > Pixels > Channel elements to get Name and
+    the channel count. If channel names are missing from OME-XML, fall back
+    to QuPath's server.json metadata.channels[].name if running in project
+    mode, or abort with a message in standalone mode.
+
+3b. Calibration contract
+
+    Pixel size comes from OME-XML metadata:
+
+        OME > Image > Pixels > @PhysicalSizeX / @PhysicalSizeY (in µm)
+
+    The script reads these values via tifffile's OME-XML parsing. If the
+    ome.tiff lacks PhysicalSize attributes, the script aborts — calibration
+    is required for all spatial parameters (blur sigma, target area, etc.).
+
+    When running in project mode, the script also reads QuPath's stored
+    calibration from data/{entryID}/server.json > metadata.pixelCalibration.
+    If both sources are available and they disagree by more than 1%, the
+    script prints a warning showing both values and uses the OME-XML value
+    (it's the ground truth from the file itself). A --use-qupath-calibration
+    flag overrides this to trust QuPath's value instead.
+
+    run_parameters.json records both calibration sources and which was used.
+
+3c. Pyramid level selection
+
+    ome.tiff pyramid levels are stored as sub-resolutions. tifffile exposes
+    them via series[n].levels. Pick the level whose pixel size is closest to
+    (but not coarser than) the requested WORKING_PIXEL_SIZE_UM, then
+    downsample the remainder with skimage.transform.downscale_local_mean or
+    scipy.ndimage.zoom(order=1).
+
+    Read only the channels needed (positive + negative + any penalty markers),
+    not all 9-31 channels. tifffile supports reading individual pages or
+    sub-IFDs to avoid loading unneeded channels into memory.
+
+3d. Memory estimate — honest accounting
+
+    The plan must not undercount memory. The real cost includes:
+
+    Per-channel working-resolution arrays (float32):
+        N_channels × H_working × W_working × 4 bytes
+
+    Score map (float32):
+        H_working × W_working × 4 bytes
+
+    Labels array (int32):
+        H_working × W_working × 4 bytes
+
+    BFS queue, visited array (int32 each):
+        2 × H_working × W_working × 4 bytes
+
+    Raw channel read buffer (before downsampling, uint8 or uint16):
+        H_level × W_level × dtype_bytes  (one channel at a time, freed after)
+
+    Contour vertices, GeoJSON strings, matplotlib figures:
+        Small relative to above, but matplotlib can spike if working image
+        is large (see section 6).
+
+    Worked example for 70k × 40k image, 8× downsample, 3 channels:
+        Working image: 8788 × 4975 = 43.7M pixels
+        3 smoothed maps:  3 × 43.7M × 4 = 524 MB
+        Score map:        43.7M × 4     = 175 MB
+        Labels:           43.7M × 4     = 175 MB
+        Queue + visited:  2 × 43.7M × 4 = 350 MB
+        Raw read buffer:  8788 × 4975 × 1 = 44 MB  (uint8, one channel)
+        ─────────────────────────────────────────
+        Total ~1.3 GB array data; with Python/numpy overhead expect ~1.5 GB
+        resident. With matplotlib debug figures open: ~1.8-2.0 GB peak.
+
+    The dry-run mode reports this estimate. If the estimate exceeds a
+    configurable WARNING_MEMORY_GB (default 4.0), the script prints a
+    warning suggesting a coarser WORKING_PIXEL_SIZE_UM. It does NOT
+    silently change the resolution (see improvements doc section 1).
 
 
 4. Processing pipeline (numpy/scipy)
@@ -142,9 +266,41 @@ Component growth:
 
 Contour extraction:
 
-    skimage.measure.find_contours on the label mask to get polygon vertices.
-    Scale vertices back to full-resolution pixel coordinates.
-    Convert to GeoJSON Polygon geometry.
+    Use cv2.findContours with RETR_CCOMP mode on each label's binary mask.
+    RETR_CCOMP returns a two-level hierarchy: outer contours and holes. This
+    correctly handles donut-shaped components (which arise when a region
+    surrounds a sub-threshold interior). skimage.measure.find_contours
+    returns unstructured iso-lines without parent/hole relationships, making
+    it unsuitable for producing valid GeoJSON Polygon rings.
+
+    For each label:
+    - Extract the binary mask (labels == label_id).
+    - cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE).
+    - The hierarchy array identifies which contours are holes (parent >= 0)
+      and which are outer boundaries.
+    - Build GeoJSON Polygon: first ring = outer boundary, subsequent rings =
+      holes. If a label has multiple disconnected outer boundaries, emit a
+      MultiPolygon.
+    - Simplify vertices with cv2.approxPolyDP (epsilon = 0.5-1.0 working
+      pixels) to reduce GeoJSON size without visually losing shape.
+    - Scale vertices back to full-resolution pixel coordinates:
+        full_x = working_x * downsample
+        full_y = working_y * downsample
+    - Ensure ring orientation: outer rings counter-clockwise, holes clockwise
+      (GeoJSON spec / RFC 7946). cv2 returns contours in a consistent winding
+      order; verify and reverse if needed.
+
+    GeoJSON validation: before writing the final file, validate that each
+    Polygon's coordinate rings are closed (first == last vertex) and that
+    the geometry is non-degenerate (>= 4 coordinate pairs per ring, i.e.,
+    3 unique vertices + closure).
+
+    IMPORTANT — test GeoJSON import early: as the first integration task in
+    Phase 1, create a tiny synthetic GeoJSON (2-3 rectangles with known
+    coordinates) and verify that QuPath's import_annotations.groovy loads
+    them at the correct positions on a test image. This catches coordinate
+    system mismatches, ring orientation issues, or missing GeoJSON properties
+    before the full pipeline is built.
 
 
 5. Output: GeoJSON annotations
@@ -197,9 +353,21 @@ Per-image output folder:
         debug_labels.png
         debug_composite.png                 (score overlay on tissue image)
 
-All PNGs at working resolution with colorbars and labels. The composite
-overlay uses one of the marker channels (or HEM if available) as a grayscale
-background with score contours and peak markers overlaid.
+Debug image scaling: if the working-resolution image exceeds 4000 pixels on
+its long edge, downsample the debug PNGs by an additional integer factor so
+the long edge is <= 4000 px. This prevents matplotlib from allocating huge
+figure buffers (a 9000 × 5000 figure at 100 dpi would be a ~180 MP image).
+The downsampling factor is recorded in run_parameters.json.
+
+For users who need the full numerical data at working resolution (e.g., to
+inspect exact score values), the script optionally writes .npy files
+alongside the PNGs when a --save-npy flag is set:
+    debug_score_map.npy, debug_marker_{NAME}.npy, debug_labels.npy
+These are compact, lossless, and loadable with numpy.load().
+
+All PNGs include colorbars and labels. The composite overlay uses one of the
+marker channels (or HEM if available) as a grayscale background with score
+contours and peak markers overlaid.
 
 run_parameters.json: all knobs, image path, calibration, effective working
 resolution, blur sigma in pixels, timestamp, Python/library versions.
@@ -249,15 +417,21 @@ before committing to a full run.
 9. Python dependencies
 ----------------------
 
-    tifffile          — read ome.tiff (with pyramid level access)
+    tifffile          — read ome.tiff (with pyramid level access + OME-XML)
     numpy             — array processing
     scipy             — gaussian_filter, ndimage.label, ndimage.maximum_filter
-    scikit-image      — find_contours, downscale_local_mean
+    opencv-python     — cv2.findContours (RETR_CCOMP for hole hierarchy),
+                        cv2.approxPolyDP (vertex simplification)
+    scikit-image      — downscale_local_mean (optional, scipy.ndimage.zoom
+                        is an alternative)
     matplotlib        — debug PNGs
     json (stdlib)     — project.qpproj parsing, GeoJSON output, run params
     csv (stdlib)      — channel_report, score_summary
     urllib (stdlib)    — file: URI parsing
+    pathlib (stdlib)  — cross-platform path handling
     argparse (stdlib) — CLI interface
+    xml.etree (stdlib)— OME-XML parsing fallback if tifffile doesn't expose
+                        PhysicalSizeX/Y directly
 
 No QuPath, ImageJ, or Java dependencies.
 
@@ -266,15 +440,29 @@ No QuPath, ImageJ, or Java dependencies.
 ------------------------
 
 Phase 1 — Minimum viable: single image, hardcoded knobs
-    a. Project parser: read project.qpproj, resolve image URIs to paths.
-    b. Channel resolver: tifffile metadata → marker suffix matching.
-    c. Image reader: read selected channels at working resolution.
-    d. Marker processing: floor/ceiling/blur/gate pipeline (numpy/scipy).
-    e. Score map + peak finding.
-    f. Binary-search component growth + contour extraction.
-    g. GeoJSON output.
-    h. Debug PNGs (marker maps, score map, composite overlay).
-    i. Groovy import script.
+    a. GeoJSON smoke test: hand-craft a tiny GeoJSON with 2-3 rectangles at
+       known full-resolution coordinates. Verify QuPath import places them
+       correctly. This validates the coordinate contract before building the
+       pipeline.
+    b. Project parser: read project.qpproj, resolve image URIs to paths,
+       extract series index from args. Support PATH_REMAP for cross-platform
+       projects. Also accept a direct .ome.tiff path (standalone mode).
+    c. Channel resolver: OME-XML metadata → marker suffix extraction via
+       regex. Exact case-insensitive match, abort on zero or ambiguous hits.
+    d. Image reader: read selected channels at working resolution. Handle
+       CYX and ZCYX axes. Read series index from project or CLI. Read
+       calibration from OME-XML PhysicalSizeX/Y; warn if QuPath disagrees.
+    e. Memory estimate: compute and print honest RSS estimate before loading
+       pixel data. Warn if > WARNING_MEMORY_GB.
+    f. Marker processing: floor/ceiling/blur/gate pipeline (numpy/scipy).
+    g. Score map + peak finding.
+    h. Binary-search component growth.
+    i. Contour extraction: cv2.findContours(RETR_CCOMP) → GeoJSON Polygons
+       with correct ring orientation, hole handling, and vertex simplification.
+    j. GeoJSON output with validation (closed rings, non-degenerate).
+    k. Debug PNGs (marker maps, score map, composite overlay) with scale
+       limiting for large working images. Optional --save-npy.
+    l. Groovy import script.
 
 Phase 2 — Usability
     a. CLI interface with argparse (project path, image selection, knobs).
@@ -288,6 +476,9 @@ Phase 3 — Robustness
     b. Broad-signal penalty support.
     c. Area-threshold diagnostic curve (optional audit output).
     d. Config file support (YAML/JSON) so knobs don't live in source.
+    e. Union-find / component-tree sweep for efficient growth when
+       N_HOTSPOTS > ~10. Binary search is adequate for Phase 1's typical
+       2-5 hotspots but scales poorly with many candidates.
 
 Not in scope (future engine):
     - Phenotype/centroid-based adjacency ("CD4 cells within X um of CD8").

@@ -954,18 +954,52 @@ def autotype(df,obs,dfxy,chanT=True,name="autoCellType res: ",res=None): #the ol
 def manThresh(df,obs,dfxy):
     ch = input("import manual thresholds from csv? (y)")
     if ch == "y":
-        obs["Manual Celltype"] = ""
         chh = input("subtract thresholds? (y)")
         path = input('filepath/name:')
         thresh = pd.read_csv(path)
-        for biom in thresh.columns:
-            th = float(thresh[biom].iloc[0])
-            print(biom,th)
-            key = df[biom] > th
-            obs.loc[key,"Manual Celltype"] += biom
-            if chh == "y":
-                df[biom] -= th
-                df.loc[df[biom]<0,biom] = 0
+        if "Markers" in thresh.columns:
+            if "slide_scene" not in obs.columns:
+                print("WARNING: obs has no slide_scene column; cannot match ROI-specific thresholds")
+            else:
+                thresh = thresh.set_index("Markers")
+                if "Cells" in thresh.index:
+                    thresh = thresh.drop(index="Cells")
+                scenes = set(obs["slide_scene"].astype(str).unique())
+                threshScenes = set(thresh.columns.astype(str))
+                missingObs = sorted(threshScenes - scenes)
+                missingThresh = sorted(scenes - threshScenes)
+                if missingObs:
+                    print("WARNING: threshold slide_scene labels not found in obs:", missingObs)
+                if missingThresh:
+                    print("WARNING: obs slide_scene labels with no threshold column:", missingThresh)
+                funcs = pd.DataFrame("-",index=obs.index,
+                                     columns=[biom+"_func" for biom in thresh.index if biom in df.columns])
+                cellScenes = obs["slide_scene"].astype(str)
+                for biom in thresh.index:
+                    if biom not in df.columns:
+                        print("WARNING: threshold marker not found in df:", biom)
+                        continue
+                    biomThresh = thresh.loc[biom]
+                    cellThresh = cellScenes.map(biomThresh)
+                    sceneKey = cellThresh.notna()
+                    key = sceneKey & (df[biom] > cellThresh)
+                    funcs.loc[key,biom+"_func"] = "+"
+                    print(biom,key.sum(),"positive cells")
+                    if chh == "y":
+                        df.loc[sceneKey,biom] -= cellThresh.loc[sceneKey]
+                        df.loc[sceneKey & (df[biom]<0),biom] = 0
+                obs[funcs.columns] = funcs
+                return(df,obs,dfxy)
+        else:
+            obs["Manual Celltype"] = ""
+            for biom in thresh.columns:
+                th = float(thresh[biom].iloc[0])
+                print(biom,th)
+                key = df[biom] > th
+                obs.loc[key,"Manual Celltype"] += biom
+                if chh == "y":
+                    df[biom] -= th
+                    df.loc[df[biom]<0,biom] = 0
     else:
         if input("manually add annoations for every combination of positivies for custom biomarker set? (y)") == 'y':
             ch,uch = obMenu(obs,'repeat for each unique annotation in: ')

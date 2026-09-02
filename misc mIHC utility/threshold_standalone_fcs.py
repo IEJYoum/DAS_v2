@@ -91,7 +91,7 @@ def parse_object_csv_filename(object_csv):
     path = Path(object_csv)
     if not path.is_file():
         raise ValueError("object_csv is not a file: " + str(path))
-    m = re.match(r"(?i)^(?:Nuclei|CellObjects)_(.+)\.csv$", path.name)
+    m = re.match(r"(?i)^(?:Nuclei|CellObjects)_(.+)\.(?:csv|cpout)$", path.name)
     if m is None:
         raise ValueError("object_csv name does not match Nuclei_*.csv or CellObjects_*.csv: " + str(path))
     slide_scene = str(m.group(1)).strip()
@@ -230,9 +230,10 @@ def discover_processed_roi_datasets(processed_root, slide_name=None):
     if len(roi_folders) == 0:
         return discover_roi_datasets(root)
     for roi_folder in roi_folders:
-        object_hits = sorted(roi_folder.glob("CellObjects_*.csv"), key=lambda p: natural_sort_key(p.name))
-        if len(object_hits) == 0:
-            object_hits = sorted(roi_folder.glob("Nuclei_*.csv"), key=lambda p: natural_sort_key(p.name))
+        object_hits = sorted(
+            [p for p in roi_folder.iterdir() if re.match(r"(?i)^(?:CellObjects|Nuclei)_.+\.(?:csv|cpout)$", p.name)],
+            key=lambda p: natural_sort_key(p.name),
+        )
         object_csv = object_hits[0] if len(object_hits) > 0 else None
         if object_csv is not None:
             roi_id, scene, _folder = parse_object_csv_filename(object_csv)

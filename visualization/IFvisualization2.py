@@ -108,10 +108,12 @@ DONE = []
 CATS = []
 BATCH = ''
 PROGRESS_ENABLED = False
+SILHOUETTE_EXACT_WARN_ROWS = 50000
+_MISSING_CLUSTER_LABELS = {'', 'nan', 'none', 'na', '<na>', 'null', '-'}
 CLUSTER_COLUMN_PATTERNS = {
-    '0': ('Kmeans', [re.compile(r'^Kmeans(?:_| )(?P<value>\d+(?:\.\d+)?)$')]),
-    '1': ('GMM', [re.compile(r'^GMM_(?P<value>\d+(?:\.\d+)?)$')]),
-    '2': ('Leiden', [re.compile(r'^Leiden_n(?P<value>\d+(?:\.\d+)?)$'), re.compile(r'^Leiden_(?P<value>\d+(?:\.\d+)?)$')]),
+    '0': ('Kmeans', [re.compile(r'^Kmeans(?:_| )(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
+    '1': ('GMM', [re.compile(r'^GMM_(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
+    '2': ('Leiden', [re.compile(r'^Leiden_n(?P<value>\d+(?:\.\d+)?)(?:__.+)?$'), re.compile(r'^Leiden_(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
 }
 
 MSORD = [
@@ -3286,6 +3288,37 @@ def _value_sort_key(val):
         return(1,text)
 
 
+def _valid_cluster_label_mask(labels):
+    text = labels.astype(str).str.strip().str.lower()
+    return(labels.notna() & (~text.isin(_MISSING_CLUSTER_LABELS)))
+
+
+def _cluster_scoring_subset(ndf, obs, col):
+    raw_labels = obs.loc[:, col]
+    valid = _valid_cluster_label_mask(raw_labels)
+    valid = valid.reindex(ndf.index).fillna(False).astype(bool)
+    sub_df = ndf.loc[valid, :]
+    labels = raw_labels.reindex(ndf.index).loc[valid].astype(str).str.strip()
+    dropped = int(ndf.shape[0] - sub_df.shape[0])
+    if dropped > 0:
+        print(str(col)+': scoring '+str(sub_df.shape[0])+' labeled rows; skipped '+str(dropped)+' blank/non-subset rows')
+    return(sub_df, labels, dropped)
+
+
+def _allow_exact_silhouette(n_rows, col, guard_state):
+    limit = int(SILHOUETTE_EXACT_WARN_ROWS)
+    if n_rows <= limit or guard_state.get("approved", False):
+        return(True)
+    print('WARNING: exact silhouette for '+str(col)+' will use '+str(n_rows)+' cells.')
+    print('This can be slow and memory-heavy because silhouette uses pairwise distances.')
+    resp = logInput('proceed anyways? (y): ').strip().lower()
+    if resp.startswith('y'):
+        guard_state["approved"] = True
+        return(True)
+    print('skipping exact silhouette for', col)
+    return(False)
+
+
 def clusteringEvaluation(dfs,com=[],cat=''):
     print('clustering evaluation')
     op = ['silhouette score','cluster score sweep','elbow plot','confusion plot']
@@ -3328,14 +3361,19 @@ def clusterSilhouette(dfs,com=[],cat=''):
         return(dfs,9)
     ndf = df.apply(pd.to_numeric, errors='coerce').fillna(0)
     scored = []
+    detail_mode = str(com[2]) if len(com) > 2 else '0'
+    silhouette_guard = {"approved": False}
     for col in cols:
-        labels = obs.loc[:,col].astype(str)
+        score_df, labels, dropped = _cluster_scoring_subset(ndf, obs, col)
         ncl = len(sorted(list(labels.unique())))
-        if ncl < 2 or ncl >= ndf.shape[0]:
+        if ncl < 2 or ncl >= score_df.shape[0]:
+            continue
+        if not _allow_exact_silhouette(score_df.shape[0], col, silhouette_guard):
             continue
         try:
-            sco = silhouette_score(ndf, labels)
-            silhouette_vals = silhouette_samples(ndf, labels)
+            need_samples = detail_mode == '1' or (detail_mode == '2' and len(com) > 3 and str(com[3]) == str(col))
+            sco = silhouette_score(score_df, labels)
+            silhouette_vals = silhouette_samples(score_df, labels) if need_samples else None
             scored.append([col, ncl, sco, silhouette_vals, labels, _cluster_param_value(col)])
         except Exception as e:
             print('could not score',col,e)
@@ -3381,7 +3419,6 @@ def clusterSilhouette(dfs,com=[],cat=''):
         )
         plt.savefig(saveF(0,"clustering evaluation/silhouette",famn),bbox_inches='tight')
     plt.show()
-    detail_mode = str(com[2])
     detail_cols = []
     if detail_mode == '1':
         detail_cols = [item[0] for item in scored]
@@ -3390,6 +3427,9 @@ def clusterSilhouette(dfs,com=[],cat=''):
             detail_cols = [str(com[3])]
     for col,ncl,sco,silhouette_vals,labels,pv in scored:
         if col not in detail_cols:
+            continue
+        if silhouette_vals is None:
+            print('no detailed silhouette samples available for', col)
             continue
         fig,ax1 = plt.subplots(figsize=(9,6))
         y_lower = 0
@@ -3448,15 +3488,18 @@ def clusterScoreSweep(dfs,com=[],cat=''):
         return(dfs,9)
     ndf = df.apply(pd.to_numeric, errors='coerce').fillna(0)
     out = []
+    silhouette_guard = {"approved": False}
     for col in cols:
-        labels = obs.loc[:,col].astype(str)
+        score_df, labels, dropped = _cluster_scoring_subset(ndf, obs, col)
         ncl = len(sorted(list(labels.unique())))
-        if ncl < 2 or ncl >= ndf.shape[0]:
+        if ncl < 2 or ncl >= score_df.shape[0]:
+            continue
+        if not _allow_exact_silhouette(score_df.shape[0], col, silhouette_guard):
             continue
         try:
-            sil = silhouette_score(ndf, labels)
-            chs = calinski_harabasz_score(ndf, labels)
-            dbs = davies_bouldin_score(ndf, labels)
+            sil = silhouette_score(score_df, labels)
+            chs = calinski_harabasz_score(score_df, labels)
+            dbs = davies_bouldin_score(score_df, labels)
             out.append([col,ncl,sil,chs,dbs,_cluster_param_value(col)])
         except Exception as e:
             print('could not score',col,e)
@@ -3537,7 +3580,7 @@ def clusterElbow(dfs,com=[],cat=''):
     ndf = df.apply(pd.to_numeric, errors='coerce').fillna(0)
     out = []
     for col in cols:
-        labels = obs.loc[:,col].astype(str)
+        score_df, labels, dropped = _cluster_scoring_subset(ndf, obs, col)
         ulabels = sorted(list(labels.unique()))
         ncl = len(ulabels)
         if ncl < 1:
@@ -3545,13 +3588,13 @@ def clusterElbow(dfs,com=[],cat=''):
         sse = 0.0
         for lab in ulabels:
             key = labels == lab
-            sdf = ndf.loc[key,:]
+            sdf = score_df.loc[key,:]
             if sdf.shape[0] == 0:
                 continue
             cent = sdf.mean(axis=0)
             dif = sdf - cent
             sse += float((dif * dif).sum().sum())
-        out.append([col,ncl,sse/max(1,ndf.shape[0]),_cluster_param_value(col)])
+        out.append([col,ncl,sse/max(1,score_df.shape[0]),_cluster_param_value(col)])
     if len(out) == 0:
         print('no valid',famn,'cluster columns for elbow plot')
         return(dfs,9)
@@ -3615,9 +3658,18 @@ def clusterConfusion(dfs,com=[],cat=''):
     if len(cols) == 0:
         print('no',famn,'cluster columns found')
         return(dfs,9)
-    ref = obs.loc[:,cat].astype(str)
+    ref_raw = obs.loc[:,cat]
     for col in cols:
-        labs = obs.loc[:,col].astype(str)
+        lab_raw = obs.loc[:,col]
+        valid = _valid_cluster_label_mask(lab_raw) & _valid_cluster_label_mask(ref_raw)
+        dropped = int(obs.shape[0] - int(valid.sum()))
+        if dropped > 0:
+            print(str(col)+': confusion plot using '+str(int(valid.sum()))+' labeled rows; skipped '+str(dropped)+' blank/non-subset rows')
+        labs = lab_raw.loc[valid].astype(str).str.strip()
+        ref = ref_raw.loc[valid].astype(str).str.strip()
+        if labs.shape[0] == 0:
+            print('no labeled rows for confusion plot:', col)
+            continue
         ctab = pd.crosstab(labs, ref)
         ctab = ctab.loc[sorted(list(ctab.index), key=_value_sort_key), :]
         ctab = ctab.loc[:, sorted(list(ctab.columns), key=_value_sort_key)]
@@ -3629,6 +3681,8 @@ def clusterConfusion(dfs,com=[],cat=''):
         elif str(com[2]) == '2':
             plot_df = plot_df.div(plot_df.sum(axis=0).replace(0,1), axis=1)
             title += ' (column normalized)'
+        ari = None
+        ami = None
         try:
             ari = adjusted_rand_score(ref, labs)
             ami = adjusted_mutual_info_score(ref, labs)
@@ -3674,8 +3728,8 @@ def clusterConfusion(dfs,com=[],cat=''):
                     "normalization": str(norm_name),
                     "n_cluster_labels": int(ctab.shape[0]),
                     "n_category_labels": int(ctab.shape[1]),
-                    "ari": float(ari) if 'ari' in locals() else None,
-                    "ami": float(ami) if 'ami' in locals() else None,
+                    "ari": float(ari) if ari is not None else None,
+                    "ami": float(ami) if ami is not None else None,
                     "overlap_lines": overlap_lines,
                 },
             )
