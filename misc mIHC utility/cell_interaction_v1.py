@@ -75,7 +75,7 @@ BLUR_SIGMA_UM = 120.0              # Gaussian blur sigma in microns
 
 # Peak and annotation rules
 N_HOTSPOTS = 8                    # how many hotspots to find
-PEAK_SCORE_FLOOR = 0.00003           # minimum peak score to consider
+PEAK_SCORE_FLOOR = 0.003           # minimum peak score to consider
 MIN_COMPONENT_SCORE = 0.000005      # lowest threshold for component growth
 MIN_PEAK_SEPARATION_UM = 3000.0   # minimum distance between accepted peaks
 TARGET_AREA_UM2 = 17000000.0         # desired component area (~17 mm^2)
@@ -525,10 +525,12 @@ def binary_search_component(score: np.ndarray,
                             min_threshold: float,
                             steps: int,
                             connectivity: int
-                            ) -> tuple[list[tuple[int, int]], float] | None:
+                            ) -> tuple[list[tuple[int, int]], float, bool]:
     """Binary-search for the highest threshold whose component reaches target area.
 
-    Returns (component_pixels, threshold) or None if no valid component found.
+    Returns (component_pixels, threshold, reached_target).
+    Always returns a component (the best it could find at min_threshold if
+    target was unreachable).
     """
     peak_score = score[seed_y, seed_x]
     lo = min_threshold
@@ -546,22 +548,28 @@ def binary_search_component(score: np.ndarray,
             # Threshold too low, raise it
             lo = mid
         elif area >= target_area_px:
-            # Found a valid component — try higher threshold
+            # Found a valid component -- try higher threshold
             best_component = comp
             best_threshold = mid
             lo = mid
         else:
-            # Component too small — lower threshold
+            # Component too small -- lower threshold
             hi = mid
 
-    # If binary search didn't find target area, try the lowest threshold
-    if best_component is None:
-        comp = grow_component_bfs(score, seed_y, seed_x, min_threshold, labels, connectivity)
-        if len(comp) >= target_area_px and len(comp) <= max_area_px:
-            best_component = comp
-            best_threshold = min_threshold
+    if best_component is not None:
+        return (best_component, best_threshold, True)
 
-    return (best_component, best_threshold) if best_component is not None else None
+    # Target not reached -- return largest component at min_threshold
+    comp = grow_component_bfs(score, seed_y, seed_x, min_threshold, labels, connectivity)
+    if len(comp) >= target_area_px and len(comp) <= max_area_px:
+        return (comp, min_threshold, True)
+
+    # Undersized or oversized -- return it anyway with reached_target=False
+    if len(comp) > 0:
+        return (comp, min_threshold, False)
+
+    # Truly empty (shouldn't happen since seed has score > 0)
+    return ([(seed_y, seed_x)], peak_score, False)
 
 
 # =============================================================================
@@ -1070,6 +1078,7 @@ def process_image(image_desc: dict,
           f"max={MAX_AREA_UM2} um^2)...")
     labels = np.zeros((working_h, working_w), dtype=np.int32)
     accepted = []
+    undersized = []
     min_sep_px_sq = (MIN_PEAK_SEPARATION_UM / effective_pixel_size) ** 2
     score_summary_rows = []
     next_label = 1
@@ -1104,7 +1113,7 @@ def process_image(image_desc: dict,
             continue
 
         # Binary search for component
-        result = binary_search_component(
+        component, threshold, reached_target = binary_search_component(
             score, py, px, labels,
             target_area_px=int(target_area_px),
             max_area_px=int(max_area_px),
@@ -1112,15 +1121,26 @@ def process_image(image_desc: dict,
             steps=BINARY_SEARCH_STEPS,
             connectivity=CONNECTIVITY)
 
-        if result is None:
+        if not reached_target:
+            raster_area_um2 = len(component) * working_pixel_area_um2
             score_summary_rows.append({
                 "rank": rank + 1, "peak_score": pscore,
-                "status": "rejected", "reason": "no_valid_component",
+                "status": "rejected", "reason": "undersized",
+                "threshold": threshold,
+                "raster_area_um2": raster_area_um2,
+                "n_pixels": len(component),
                 "seed_y_work": py, "seed_x_work": px,
             })
+            # Stash for potential fallback
+            undersized.append({
+                "component": component,
+                "threshold": threshold,
+                "seed_y": py, "seed_x": px,
+                "peak_score": pscore,
+                "raster_area_um2": raster_area_um2,
+                "n_pixels": len(component),
+            })
             continue
-
-        component, threshold = result
 
         # Label the component
         for cy, cx in component:
@@ -1158,6 +1178,45 @@ def process_image(image_desc: dict,
               f"threshold={threshold:.4f}, "
               f"area={raster_area_um2:.0f} um^2 ({len(component)} px)")
         next_label += 1
+
+    # --- Rejection diagnostics ---
+    reasons = {}
+    for row in score_summary_rows:
+        if row["status"] == "rejected":
+            r = row["reason"]
+            reasons[r] = reasons.get(r, 0) + 1
+    if reasons:
+        parts = ", ".join(f"{v} {k}" for k, v in reasons.items())
+        print(f"  Rejections: {parts}")
+
+    # --- Fallback: if 0 accepted, promote undersized components ---
+    if len(accepted) == 0 and undersized:
+        print(f"\n  WARNING: 0 hotspots reached target area ({TARGET_AREA_UM2:.0f} um^2).")
+        print(f"  Falling back: accepting top {min(N_HOTSPOTS, len(undersized))} "
+              f"undersized components so you can see them.")
+        # Sort undersized by peak score descending
+        undersized.sort(key=lambda u: u["peak_score"], reverse=True)
+        for u in undersized[:N_HOTSPOTS]:
+            for cy, cx in u["component"]:
+                labels[cy, cx] = next_label
+            acc_entry = {
+                "label": next_label,
+                "seed_y": u["seed_y"],
+                "seed_x": u["seed_x"],
+                "peak_score": u["peak_score"],
+                "threshold": u["threshold"],
+                "raster_area_um2": u["raster_area_um2"],
+                "n_pixels": u["n_pixels"],
+                "seed_y_fullres": u["seed_y"] * effective_downsample,
+                "seed_x_fullres": u["seed_x"] * effective_downsample,
+                "seed_y_um": u["seed_y"] * effective_pixel_size,
+                "seed_x_um": u["seed_x"] * effective_pixel_size,
+            }
+            accepted.append(acc_entry)
+            print(f"    Fallback hotspot {next_label}: peak={u['peak_score']:.6f}, "
+                  f"area={u['raster_area_um2']:.0f} um^2 "
+                  f"({u['raster_area_um2']/TARGET_AREA_UM2*100:.1f}% of target)")
+            next_label += 1
 
     print(f"\n  Accepted {len(accepted)} of {N_HOTSPOTS} requested hotspots.")
 
