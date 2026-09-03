@@ -60,7 +60,7 @@ def _json_default(obj):
 # gate is applied AFTER normalization and smoothing, on the 0–1 map.
 POSITIVE_MARKERS = [
     {"name": "CD11b", "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.0008},
-    {"name": "CD44",      "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.0008},
+    #{"name": "CD44",      "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.0008},
     {"name": "CD56",      "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.0008},
 ]
 
@@ -71,15 +71,15 @@ NEGATIVE_MARKERS = [
 
 # Working resolution and smoothing
 WORKING_PIXEL_SIZE_UM = 16.0       # target analysis resolution in microns
-BLUR_SIGMA_UM = 400.0              # Gaussian blur sigma in microns
+BLUR_SIGMA_UM = 120.0              # Gaussian blur sigma in microns
 
 # Peak and annotation rules
-N_HOTSPOTS = 6                    # how many hotspots to find
-PEAK_SCORE_FLOOR = 0.00005           # minimum peak score to consider
-MIN_COMPONENT_SCORE = 0.00001       # lowest threshold for component growth
-MIN_PEAK_SEPARATION_UM = 150.0    # minimum distance between accepted peaks
-TARGET_AREA_UM2 = 1000000.0          # desired component area
-MAX_AREA_UM2 = 200000000.0            # maximum allowed component area
+N_HOTSPOTS = 8                   # how many hotspots to find
+PEAK_SCORE_FLOOR = 0.00003           # minimum peak score to consider
+MIN_COMPONENT_SCORE = 0.000005       # lowest threshold for component growth
+MIN_PEAK_SEPARATION_UM = 3000.0    # minimum distance between accepted peaks
+TARGET_AREA_UM2 = 20000000.0          # desired component area
+MAX_AREA_UM2 = 900000000.0            # maximum allowed component area
 BINARY_SEARCH_STEPS = 20          # precision of threshold search
 CONNECTIVITY = 8                  # 4 or 8
 MAX_CANDIDATE_PEAKS = 20000       # cap on local maxima to evaluate
