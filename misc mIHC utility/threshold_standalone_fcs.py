@@ -879,7 +879,11 @@ def run_slide_batch(input_root, output_root, layout="both", study_thresholds_pat
     results = {}
     all_datasets = []
     for slide_name, processed in slide_roots:
-        datasets = discover_processed_roi_datasets(processed, slide_name=slide_name)
+        try:
+            datasets = discover_processed_roi_datasets(processed, slide_name=slide_name)
+        except Exception as exc:
+            print("Skipping slide", slide_name + ":", exc)
+            continue
         datasets = filter_roi_datasets(datasets, roi_values)
         all_datasets.extend(datasets)
         if mode in ["per-slide", "per_slide", "both"]:
