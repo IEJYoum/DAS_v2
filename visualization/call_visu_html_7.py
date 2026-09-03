@@ -343,10 +343,18 @@ def main(df=9, obs=9, dfxy=9, *args, **kwargs):
     else:
         print("Manual mode: using viewer assets/output folder:", out_root)
     default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
-    filepaths = prompt_filepaths(default_items=default_files, default_label=default_seed)
+    project_folder = str(resolved.get("data_folder", "") if isinstance(resolved, dict) else meta.get("data_folder", "")).strip()
+    saved_inputs = load_inherited_viewer_asset_inputs(project_folder)
+    filepaths, input_lines = prompt_filepaths(
+        default_items=default_files,
+        default_label=default_seed,
+        default_input_lines=saved_inputs,
+        return_input_lines=True,
+    )
     if len(filepaths) == 0:
         print("No filepaths provided. Returning.")
         return (df, obs, dfxy)
+    save_viewer_asset_inputs(project_folder, input_lines)
 
     if should_reuse_default_seed_viewer(filepaths, default_files, default_seed, out_root):
         seed_viewer = load_json_file(default_seed, default={})
@@ -376,7 +384,7 @@ def main(df=9, obs=9, dfxy=9, *args, **kwargs):
     return (df, obs, dfxy)
 
 
-def run_manual_asset_creation(out_root, obs):
+def run_manual_asset_creation(out_root, obs, project_folder=""):
     out_root = str(out_root or "").strip()
     if out_root == "":
         out_root = prompt_output_root(DEFAULT_OUT_ROOT)
@@ -384,10 +392,17 @@ def run_manual_asset_creation(out_root, obs):
         print("Manual asset creation: using viewer assets/output folder:", out_root)
 
     default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
-    filepaths = prompt_filepaths(default_items=default_files, default_label=default_seed)
+    saved_inputs = load_inherited_viewer_asset_inputs(project_folder)
+    filepaths, input_lines = prompt_filepaths(
+        default_items=default_files,
+        default_label=default_seed,
+        default_input_lines=saved_inputs,
+        return_input_lines=True,
+    )
     if len(filepaths) == 0:
         print("No filepaths provided. Returning without creating viewer assets.")
         return ""
+    save_viewer_asset_inputs(project_folder, input_lines)
 
     if should_reuse_default_seed_viewer(filepaths, default_files, default_seed, out_root):
         seed_viewer = load_json_file(default_seed, default={})
@@ -587,21 +602,32 @@ def has_reusable_viewer_assets(out_root, obs=None):
     return len(core_tiles) > 0
 
 
-def prompt_filepaths(default_items=None, default_label=""):
-    print(r'\\accsmb.ohsu.edu\CEDAR\ChinData\Cyclic_Workflow\cmIF_2023-04-07_pTMA1\RegisteredImages\pTMA1-25_sceneA1\IY_extracted\tiffs')
-    print("Submit file/glob lines (e.g. C:/path/*.tiff).")
+def prompt_filepaths(default_items=None, default_label="", default_input_lines=None, return_input_lines=False):
+    saved_inputs = [str(item).strip() for item in list(default_input_lines or []) if str(item).strip() != ""]
+    print("Submit an asset source folder, file, or glob (e.g. C:/path/*.tiff).")
+    print("A Sam/FCS Slides folder is accepted directly.")
     print("Press Enter on empty line to finish.")
-    if isinstance(default_items, list) and len(default_items) > 0:
+    if len(saved_inputs) > 0:
+        print("Press Enter immediately to reuse saved asset input(s):", " || ".join(saved_inputs))
+    elif isinstance(default_items, list) and len(default_items) > 0:
         label = str(default_label or "latest seed viewer").strip()
         print("Press Enter immediately to reuse defaults from:", label)
 
     out = []
+    input_lines = []
     while True:
         line = input("path: ").strip()
         if line == "":
-            if len(out) == 0 and isinstance(default_items, list) and len(default_items) > 0:
+            if len(out) == 0 and len(saved_inputs) > 0:
+                input_lines = list(saved_inputs)
+                i = 0
+                while i < len(saved_inputs):
+                    out.extend(expand_input_line(saved_inputs[i]))
+                    i += 1
+                print("  using saved input(s) ->", len(dedupe_keep_order(out)), "file(s)")
+            elif len(out) == 0 and isinstance(default_items, list) and len(default_items) > 0:
                 print("  using defaults ->", len(default_items), "file(s)")
-                return dedupe_keep_order([os.path.normpath(str(x)) for x in default_items])
+                out = [os.path.normpath(str(x)) for x in default_items]
             break
         line = strip_quotes(line)
         if line == "":
@@ -612,6 +638,7 @@ def prompt_filepaths(default_items=None, default_label=""):
             print("  no matches:", line)
             continue
 
+        input_lines.append(line)
         print("  expanded ->", len(exp), "file(s)")
         i = 0
         while i < len(exp):
@@ -619,6 +646,8 @@ def prompt_filepaths(default_items=None, default_label=""):
             i += 1
 
     out = dedupe_keep_order(out)
+    if return_input_lines:
+        return out, input_lines
     return out
 
 
@@ -1229,6 +1258,21 @@ def load_inherited_project_value(folder, key):
     ]:
         return normalize_stored_path(value) if str(value).strip() != "" else ""
     return value
+
+
+def load_inherited_viewer_asset_inputs(folder):
+    return _parse_saved_path_list(load_inherited_project_value(folder, "viewer_asset_inputs"))
+
+
+def save_viewer_asset_inputs(folder, input_lines):
+    folder = normalize_stored_path(folder)
+    values = [str(item).strip() for item in list(input_lines or []) if str(item).strip() != ""]
+    if folder == "" or len(values) == 0:
+        return
+    try:
+        save_project_config(folder, {"viewer_asset_inputs": "||".join(values)})
+    except Exception as exc:
+        print("Could not save viewer asset input(s):", exc)
 
 
 def _parse_saved_path_list(text):

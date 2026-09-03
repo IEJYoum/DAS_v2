@@ -621,7 +621,7 @@ def htmlViewer(df=9,obs=9,dfxy=9):
     transient_seed_viewer = ""
     if not cvh.has_reusable_viewer_assets(viewer_root, obs=obs):
         print("No reusable viewer assets detected. Starting manual asset creation runtime.")
-        built_seed = cvh.run_manual_asset_creation(viewer_root, obs)
+        built_seed = cvh.run_manual_asset_creation(viewer_root, obs, project_folder=current)
         if str(built_seed).strip() == "" or (not os.path.isfile(str(built_seed))):
             print("Manual asset creation did not produce reusable viewer assets. Returning without launching HTML viewer.")
             return(df,obs,dfxy)
