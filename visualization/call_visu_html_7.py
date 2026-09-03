@@ -47,11 +47,15 @@ try:
 except Exception:
     das_io = None
 try:
+    from image_conventions import list_sam_viewer_asset_paths as convention_list_sam_viewer_asset_paths
     from image_conventions import parse_viewer_asset_record
+    from image_conventions import resolve_sam_viewer_assets as convention_resolve_sam_viewer_assets
     from image_conventions import viewer_display_label as convention_viewer_display_label
     from image_conventions import viewer_marker_label_from_path as convention_marker_label_from_path
 except Exception:
+    convention_list_sam_viewer_asset_paths = None
     parse_viewer_asset_record = None
+    convention_resolve_sam_viewer_assets = None
     convention_viewer_display_label = None
     convention_marker_label_from_path = None
 try:
@@ -490,6 +494,89 @@ def build_core_tiles_from_asset_registry(out_root):
     return core_tiles
 
 
+def build_core_tiles_from_convention_roots(roots, obs):
+    """Build viewer core tiles from convention-resolved source folders."""
+    if not callable(convention_resolve_sam_viewer_assets):
+        return {}
+    scenes = _obs_slide_scene_values(obs)
+    if len(scenes) == 0:
+        return {}
+
+    clean_roots = []
+    for root in list(roots or []):
+        path = normalize_stored_path(root)
+        if path != "" and os.path.isdir(path) and path not in clean_roots:
+            clean_roots.append(path)
+
+    core_tiles = {}
+    root_by_scene = {}
+    for slide_scene in scenes:
+        for root in clean_roots:
+            try:
+                assets = convention_resolve_sam_viewer_assets(root, slide_scene)
+            except Exception:
+                assets = None
+            if assets is None or len(list(getattr(assets, "tiff_paths", []) or [])) == 0:
+                continue
+            tiffs = list(getattr(assets, "tiff_paths", []) or [])
+            segmentation_tif = str(getattr(assets, "segmentation_tif", "") or "").strip()
+            source_paths = list(tiffs)
+            if segmentation_tif != "":
+                append_unique(source_paths, segmentation_tif)
+            display_label = str(getattr(assets, "display_label", "") or "").strip() or display_label_from_slide_scene(slide_scene) or slide_scene
+            core_tiles[slide_scene] = [{
+                "tile_kind": "composite",
+                "core": slide_scene,
+                "slide_scene": slide_scene,
+                "label": display_label,
+                "display_label": display_label,
+                "asset_type_id": "composite:tiff_stack",
+                "asset_type_label": "Composite (channel-selectable)",
+                "tiff_paths": list(tiffs),
+                "channel_sources": [],
+                "overlay_paths": [],
+                "figure_path": None,
+                "source_paths": list(source_paths),
+                "segmentation_tif": segmentation_tif,
+                "all_markers": marker_labels_from_paths(tiffs),
+            }]
+            root_by_scene[slide_scene] = root
+            break
+
+    if len(core_tiles) > 0:
+        missing = [scene for scene in scenes if scene not in core_tiles]
+        print(
+            "Project viewer: convention asset resolver found",
+            len(core_tiles),
+            "of",
+            len(scenes),
+            "current slide_scene value(s).",
+        )
+        roots_used = sorted(list(set(root_by_scene.values())), key=natural_sort_key)
+        if len(roots_used) > 0:
+            print("Convention asset root(s):", "; ".join(roots_used[:3]))
+        if len(missing) > 0:
+            print("Convention assets missing slide_scene value(s):", _scene_list_text(missing))
+    return core_tiles
+
+
+def viewer_convention_root_candidates(meta, out_root, segmentation_roots):
+    roots = []
+    raw = [
+        out_root,
+        meta.get("viewer_root", "") if isinstance(meta, dict) else "",
+        meta.get("data_folder", "") if isinstance(meta, dict) else "",
+        meta.get("build_folder", "") if isinstance(meta, dict) else "",
+    ]
+    for root in list(segmentation_roots or []):
+        raw.append(root)
+    for root in raw:
+        path = normalize_stored_path(root)
+        if path != "" and path not in roots:
+            roots.append(path)
+    return roots
+
+
 def has_reusable_viewer_assets(out_root, obs=None):
     seed_path = discover_latest_seed_viewer(out_root, obs=obs)
     if seed_path not in [None, ""] and os.path.isfile(seed_path):
@@ -910,6 +997,13 @@ def list_supported_files_one_level(folder):
                         out.append(fp)
                     j += 1
             i += 1
+    if callable(convention_list_sam_viewer_asset_paths):
+        try:
+            for fp in convention_list_sam_viewer_asset_paths(folder):
+                if os.path.isfile(fp) and is_supported_asset_file(fp):
+                    out.append(os.path.normpath(fp))
+        except Exception:
+            pass
     return dedupe_keep_order(out)
 
 
@@ -2343,6 +2437,14 @@ def _find_seg_file_multi(segpaths, slide_scene, suffix=SEG_SUFFIX):
         found = _find_seg_file(roots[i], slide_scene, suffix=suffix)
         if found is not None:
             return found
+        if callable(convention_resolve_sam_viewer_assets):
+            try:
+                assets = convention_resolve_sam_viewer_assets(roots[i], slide_scene)
+                candidate = str(getattr(assets, "segmentation_tif", "") if assets is not None else "").strip()
+                if candidate != "" and os.path.isfile(candidate):
+                    return candidate
+            except Exception:
+                pass
         i += 1
     return None
 
@@ -4313,8 +4415,13 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
 
     if base_viewer is None:
         fresh_core_tiles = build_core_tiles_from_asset_registry(out_root)
+        used_convention_sources = False
         if len(fresh_core_tiles) == 0:
-            print("No reusable asset pool could be reconstructed for the current viewer root.")
+            roots = viewer_convention_root_candidates(meta, out_root, segmentation_roots)
+            fresh_core_tiles = build_core_tiles_from_convention_roots(roots, obs)
+            used_convention_sources = len(fresh_core_tiles) > 0
+        if len(fresh_core_tiles) == 0:
+            print("No reusable asset pool or convention-resolved source images could be reconstructed.")
             return None
         fresh_viewer = {"core_tiles": fresh_core_tiles}
         fresh_viewer = trim_seed_viewer_to_obs(fresh_viewer, obs)
@@ -4322,12 +4429,19 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
             print("Reusable asset pool does not match the current obs; no active cores remained after trimming.")
             return None
         base_viewer = fresh_viewer
+        provenance_kind = "asset_pool"
+        provenance_path = os.path.abspath(asset_registry_path(out_root))
+        provenance_label = "_asset_pool"
+        if used_convention_sources:
+            provenance_kind = "convention_sources"
+            provenance_path = os.path.abspath(out_root)
+            provenance_label = "Sam/FCS"
         provenance = {
-            "kind": "asset_pool",
-            "path": os.path.abspath(asset_registry_path(out_root)),
-            "label": "_asset_pool",
+            "kind": provenance_kind,
+            "path": provenance_path,
+            "label": provenance_label,
         }
-        print("Project viewer: building a fresh run structure from reusable asset pool.")
+        print("Project viewer: building a fresh run structure from", provenance_label + ".")
 
     build_df = df
     build_obs = obs

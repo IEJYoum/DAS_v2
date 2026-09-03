@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
@@ -130,6 +130,19 @@ class ViewerAssetRecord:
     marker: str = ""
     scene_letter: str = ""
     scene_number: Optional[int] = None
+
+
+@dataclass
+class SamViewerAssets:
+    """Sam/FCS ROI-folder assets resolved for one viewer slide_scene."""
+
+    convention: str
+    slide_scene: str
+    display_label: str
+    roi_folder: str
+    tiff_paths: list[str]
+    segmentation_tif: str = ""
+    source_paths: list[str] = field(default_factory=list)
 
 
 def sanitize_marker_name(marker_name: object) -> str:
@@ -890,6 +903,242 @@ def _find_koei_segmentation_pair_in_dir(folder: Path, core_name: str) -> Segment
     return SegmentationPair(cell_file, nuc_file, str(folder) if cell_file and nuc_file else None, "Koei")
 
 
+def resolve_sam_viewer_assets(
+    root: Union[str, os.PathLike[str]],
+    slide_scene: str,
+) -> Optional[SamViewerAssets]:
+    """Resolve Sam/FCS Processed/ROI assets for one slide_scene.
+
+    Accepted roots are intentionally small and convention-shaped: the project
+    folder containing Slides/, the Slides/ folder, a slide folder, a Processed/
+    folder, or one ROI## folder.
+    """
+
+    parsed = _split_sam_slide_scene(slide_scene)
+    if parsed is None:
+        return None
+    slide_name, roi_tag = parsed
+    root_path = Path(root)
+    if root_path.is_file():
+        root_path = root_path.parent
+    roi_folder = _find_sam_roi_folder(root_path, slide_name, roi_tag)
+    if roi_folder is None:
+        return None
+    tiffs = _sam_channel_tiff_paths(roi_folder)
+    label = _sam_label_tiff_path(roi_folder)
+    source_paths = list(tiffs)
+    if label != "":
+        source_paths.append(label)
+    return SamViewerAssets(
+        convention="Sam/FCS",
+        slide_scene=str(slide_scene).strip(),
+        display_label=viewer_display_label(str(slide_scene).strip()),
+        roi_folder=str(roi_folder),
+        tiff_paths=tiffs,
+        segmentation_tif=label,
+        source_paths=source_paths,
+    )
+
+
+def list_sam_viewer_asset_paths(root: Union[str, os.PathLike[str]]) -> list[str]:
+    """Return channel and label TIFFs from Sam/FCS ROI folders below root."""
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for roi_folder in _discover_sam_roi_folders(Path(root)):
+        for path in _sam_channel_tiff_paths(roi_folder):
+            key = os.path.abspath(os.path.normpath(path))
+            if key not in seen:
+                seen.add(key)
+                paths.append(path)
+        label = _sam_label_tiff_path(roi_folder)
+        if label != "":
+            key = os.path.abspath(os.path.normpath(label))
+            if key not in seen:
+                seen.add(key)
+                paths.append(label)
+    return paths
+
+
+def _split_sam_slide_scene(slide_scene: str) -> Optional[tuple[str, str]]:
+    text = str(slide_scene or "").strip()
+    match = re.match(r"(?i)^(.+?)[_-]?(ROI0*\d{1,4})$", text)
+    if match is None:
+        return None
+    slide_name = str(match.group(1)).strip("_- ")
+    roi_tag = _normalize_sam_roi_tag(match.group(2))
+    if slide_name == "" or roi_tag == "":
+        return None
+    return slide_name, roi_tag
+
+
+def _normalize_sam_roi_tag(value: str) -> str:
+    match = re.search(r"(?i)ROI0*(\d{1,4})", str(value or ""))
+    if match is None:
+        return ""
+    return "ROI" + str(int(match.group(1))).zfill(2)
+
+
+def _same_path_name(left: str, right: str) -> bool:
+    return str(left or "").strip().lower() == str(right or "").strip().lower()
+
+
+def _case_insensitive_child(folder: Path, name: str) -> Optional[Path]:
+    if not folder.is_dir() or str(name or "").strip() == "":
+        return None
+    direct = folder / str(name)
+    if direct.is_dir():
+        return direct
+    try:
+        matches = sorted(
+            child
+            for child in folder.iterdir()
+            if child.is_dir() and _same_path_name(child.name, name)
+        )
+    except Exception:
+        matches = []
+    return matches[0] if matches else None
+
+
+def _append_unique_path(paths: list[Path], path: Optional[Path]) -> None:
+    if path is None or not path.is_dir():
+        return
+    key = os.path.abspath(os.path.normpath(str(path))).lower()
+    existing = {os.path.abspath(os.path.normpath(str(item))).lower() for item in paths}
+    if key not in existing:
+        paths.append(path)
+
+
+def _sam_processed_root_candidates(root: Path, slide_name: str) -> list[Path]:
+    roots: list[Path] = []
+    if not root.is_dir():
+        return roots
+
+    if _same_path_name(root.name, "Processed"):
+        if _same_path_name(root.parent.name, slide_name):
+            _append_unique_path(roots, root)
+
+    if _same_path_name(root.name, slide_name):
+        _append_unique_path(roots, _case_insensitive_child(root, "Processed"))
+
+    slide_child = _case_insensitive_child(root, slide_name)
+    if slide_child is not None:
+        _append_unique_path(roots, _case_insensitive_child(slide_child, "Processed"))
+
+    slides_child = _case_insensitive_child(root, "Slides")
+    if slides_child is not None:
+        slide_child = _case_insensitive_child(slides_child, slide_name)
+        if slide_child is not None:
+            _append_unique_path(roots, _case_insensitive_child(slide_child, "Processed"))
+
+    return roots
+
+
+def _find_sam_roi_folder(root: Path, slide_name: str, roi_tag: str) -> Optional[Path]:
+    if root.is_dir() and _normalize_sam_roi_tag(root.name) == roi_tag:
+        parent = root.parent
+        grandparent = parent.parent
+        if _same_path_name(parent.name, "Processed") and _same_path_name(grandparent.name, slide_name):
+            return root
+
+    for processed in _sam_processed_root_candidates(root, slide_name):
+        roi_folder = _case_insensitive_child(processed, roi_tag)
+        if roi_folder is not None:
+            return roi_folder
+        try:
+            roi_matches = sorted(
+                child
+                for child in processed.iterdir()
+                if child.is_dir() and _normalize_sam_roi_tag(child.name) == roi_tag
+            )
+        except Exception:
+            roi_matches = []
+        if roi_matches:
+            return roi_matches[0]
+    return None
+
+
+def _discover_sam_processed_roots(root: Path) -> list[Path]:
+    roots: list[Path] = []
+    if not root.is_dir():
+        return roots
+
+    if _same_path_name(root.name, "Processed"):
+        _append_unique_path(roots, root)
+    _append_unique_path(roots, _case_insensitive_child(root, "Processed"))
+
+    slides_child = _case_insensitive_child(root, "Slides")
+    containers = [slides_child] if slides_child is not None else []
+    if _same_path_name(root.name, "Slides"):
+        containers.append(root)
+    containers.append(root)
+
+    for container in containers:
+        if container is None or not container.is_dir():
+            continue
+        try:
+            children = sorted([child for child in container.iterdir() if child.is_dir()], key=lambda p: _natural_sort_key(p.name))
+        except Exception:
+            children = []
+        for child in children:
+            _append_unique_path(roots, _case_insensitive_child(child, "Processed"))
+    return roots
+
+
+def _discover_sam_roi_folders(root: Path) -> list[Path]:
+    if root.is_dir() and _normalize_sam_roi_tag(root.name) != "" and _same_path_name(root.parent.name, "Processed"):
+        return [root]
+    out: list[Path] = []
+    seen: set[str] = set()
+    for processed in _discover_sam_processed_roots(root):
+        try:
+            children = sorted([child for child in processed.iterdir() if child.is_dir()], key=lambda p: _natural_sort_key(p.name))
+        except Exception:
+            children = []
+        for child in children:
+            if _normalize_sam_roi_tag(child.name) == "":
+                continue
+            key = os.path.abspath(os.path.normpath(str(child))).lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(child)
+    return out
+
+
+def _sam_label_tiff_path(roi_folder: Path) -> str:
+    try:
+        matches = sorted(
+            path
+            for path in roi_folder.iterdir()
+            if path.is_file()
+            and path.suffix.lower() in {".tif", ".tiff"}
+            and path.name.lower().startswith("label_")
+        )
+    except Exception:
+        matches = []
+    return str(matches[0]) if matches else ""
+
+
+def _sam_channel_tiff_paths(roi_folder: Path) -> list[str]:
+    try:
+        matches = [
+            path
+            for path in roi_folder.iterdir()
+            if path.is_file()
+            and path.suffix.lower() in {".tif", ".tiff"}
+            and not path.name.lower().startswith("label_")
+            and not path.name.lower().startswith("tiff_")
+        ]
+    except Exception:
+        matches = []
+    matches = sorted(matches, key=lambda path: (_natural_sort_key(viewer_marker_label_from_path(path.name)), _natural_sort_key(path.name)))
+    return [str(path) for path in matches]
+
+
+def _natural_sort_key(text: object) -> list[object]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"([0-9]+)", str(text))]
+
+
 def parse_viewer_asset_record(path: Union[str, os.PathLike[str]]) -> Optional[ViewerAssetRecord]:
     """
     Resolve an image path into the viewer's slide_scene identity.
@@ -972,6 +1221,10 @@ def _viewer_slide_scene_from_path(path: str) -> tuple[str, str]:
     if das_scene != "":
         return das_scene, "DAS"
 
+    sam_scene = _viewer_sam_slide_scene(segments)
+    if sam_scene != "":
+        return sam_scene, "Sam/FCS"
+
     roi_scene = _viewer_roi_slide_scene(segments)
     if roi_scene != "":
         return roi_scene, "Sam/FCS"
@@ -997,6 +1250,29 @@ def _viewer_registered_images_scene(segments: list[str]) -> str:
             candidate = segments[index + 1]
             if candidate.strip() != "" and not candidate.startswith("_"):
                 return candidate
+    return ""
+
+
+def _viewer_sam_slide_scene(segments: list[str]) -> str:
+    file_name = segments[-1] if segments else ""
+    file_roi = _normalize_sam_roi_tag(file_name)
+
+    for index in range(len(segments) - 1, -1, -1):
+        if _normalize_sam_roi_tag(segments[index]) == "":
+            continue
+        if index >= 2 and segments[index - 1].lower() == "processed":
+            slide_name = str(segments[index - 2]).strip("_- ")
+            roi_tag = _normalize_sam_roi_tag(segments[index])
+            if slide_name != "" and roi_tag != "":
+                return slide_name + roi_tag
+
+    if file_roi == "":
+        return ""
+    for index in range(len(segments) - 1, -1, -1):
+        if segments[index].lower() == "processed" and index >= 1:
+            slide_name = str(segments[index - 1]).strip("_- ")
+            if slide_name != "":
+                return slide_name + file_roi
     return ""
 
 
