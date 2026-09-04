@@ -128,10 +128,42 @@ MSORD = [
 
 
 VLOG = []
-def logInput(prompt):
-    inp = input(prompt)
+def logInput(prompt, default=None, prompt_meta=None):
+    try:
+        inp = input(prompt, default=default, prompt_meta=prompt_meta)
+    except TypeError:
+        inp = input(prompt)
+        if inp == '' and default is not None:
+            inp = default
     VLOG.append([prompt,inp])
     return(inp)
+
+
+def _prompt_yes_no_default_yes(prompt):
+    prompt_meta = {
+        "options": [
+            {
+                "value": "y",
+                "label": "Yes",
+                "description": "Use the default behavior.",
+            },
+            {
+                "value": "n",
+                "label": "No",
+                "description": "Skip this optional step.",
+            },
+        ]
+    }
+    raw = str(logInput(prompt, default='y', prompt_meta=prompt_meta)).strip().lower()
+    return raw in ['', 'y', 'yes', 'use', 'true', '1']
+
+
+def _zscore_embedding_input(df):
+    numeric = pd.DataFrame(df).astype(float)
+    means = numeric.mean(axis=0)
+    sds = numeric.std(axis=0, ddof=0)
+    sds = sds.mask((sds == 0) | (~np.isfinite(sds)), 1.0)
+    return (numeric - means) / sds
 
 
 def _ifv_meta_sink():
@@ -2221,14 +2253,18 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
             ch = int(logInput('number: '))
         except:
             ch = 0
-        return([],[ch])
+        normalize_embedding = _prompt_yes_no_default_yes('normalize before computing? (y/n) [y]: ')
+        return([],[ch, 'y' if normalize_embedding else 'n'])
     mode = str(com[1]) if len(com) > 1 else '0'
+    normalize_embedding = True
+    if len(com) > 2:
+        normalize_embedding = str(com[2]).strip().lower() in ['', 'y', 'yes', 'use', 'true', '1']
     mname = 'umap'
     if mode == '1':
         mname = 'tsne'
     elif mode == '2':
         mname = 'pca'
-    done_key = 'showEmbedding_'+mname
+    done_key = 'showEmbedding_'+mname+('_zscore' if normalize_embedding else '_raw')
     if done_key in DONE:
         print(mname,'already done')
         return(dfs,com)
@@ -2247,7 +2283,13 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
         obs = obs.astype(str)
         _embedding_detail("[DAS embedding detail] df index:", df.index)
         _embedding_detail("[DAS embedding detail] obs index:", obs.index)
-        embedding = compute_embedding(df, mname, log_fn=print)
+        if normalize_embedding:
+            print("[DAS embedding] z-scoring input features before computing", mname + ".")
+            embedding_df = _zscore_embedding_input(df)
+        else:
+            print("[DAS embedding] using raw input features for", mname + ".")
+            embedding_df = df
+        embedding = compute_embedding(embedding_df, mname, log_fn=print)
     except Exception as exc:
         print("[DAS embedding] failed to build", mname, "embedding.")
         print("[DAS embedding]", type(exc).__name__, exc)
