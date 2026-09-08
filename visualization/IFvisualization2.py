@@ -10,6 +10,8 @@ import pandas as pd
 import time
 import os
 import re
+import io
+import csv
 import traceback
 import textwrap
 from pathlib import Path
@@ -333,6 +335,21 @@ def _barplot_composition_distance_summary(fraction_matrix, bins):
     return near, far, near_by_bin, far_by_bin
 
 
+def _full_count_table_csv(bin_col, colors, bins, count_matrix):
+    #untruncated bin x category count table, for manually auditing misclassified cells
+    #that the (12-bin / 8-category capped) narrative facts below can hide.
+    #keyed dict (not a list) so the companion-fact renderer always emits one row per
+    #line regardless of row count, instead of its short-list inline-join heuristic.
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([str(bin_col)] + [str(c) for c in colors])
+    for i in range(len(bins)):
+        row = [str(bins[i])] + [str(int(np.round(count_matrix[i, j]))) for j in range(len(colors))]
+        writer.writerow(row)
+    lines = buf.getvalue().rstrip("\r\n").splitlines()
+    return {f"row_{i:04d}": line for i, line in enumerate(lines)}
+
+
 def _build_barplot_summary(bin_col, cat_col, bins, colors, count_matrix, fraction_matrix, plot_kind, *, sort_mode='default'):
     count_matrix = np.asarray(count_matrix)
     fraction_matrix = np.asarray(fraction_matrix)
@@ -420,6 +437,7 @@ def _build_barplot_summary(bin_col, cat_col, bins, colors, count_matrix, fractio
         "farthest_bin_by_bin": far_by_bin,
         "truncated_bins": int(not show_all_bins),
         "truncated_categories": int(not show_all_cats),
+        "full_count_table_csv": _full_count_table_csv(bin_col, colors, bins, count_matrix),
     }
     return summary_text, how_made_text, orientation_text, facts
 
@@ -3074,29 +3092,23 @@ def hist(dfs,com=[],cat=''): #['Primary Celltype autoCellType res: 1.0','Primary
         return([],[])
     colNames = [cat]
     for col in df.columns:
-        cdf = df.copy()
-        cobs = obs.copy()
-        trimmedCol,key = trimExtremes(df.loc[:,col])
-        trimmed_cutoff = None
+        colSeries = df[col]
+        _,key = trimExtremes(colSeries)
         try:
-            trimmed_cutoff = float(df.loc[:,col].sort_values().iloc[int(df.loc[:,col].shape[0] * .99)])
+            trimmed_cutoff = float(np.quantile(colSeries, 0.99))
         except Exception:
             trimmed_cutoff = None
-        cobs = cobs.loc[key,:]
-        cdf = cdf.loc[key,:]
+        trimmedColSeries = colSeries.loc[key]
         for CN in colNames:
-        #continue                                  # f!!!!!!!!!! !!! !!!!!!!!!!!!!!!!
+            catSeries = obs.loc[key,CN]
             xs,ys = [],[]
-            sCN = sorted(list(cobs[CN].unique()))
+            sCN = sorted(list(catSeries.unique()))
             category_lines = []
             for ty in sCN:
-                tdf = cdf.loc[cobs[CN]==ty,:]
-                tcol = tdf[col]
-                #tcol = trimExtremes(tdf[col])
-                x,y = makeHist(tcol,tdf.shape[0]/2)
-                print(x,y,'xy0')
+                tcol = trimmedColSeries.loc[catSeries==ty]
+                x,y = makeHist(tcol,tcol.shape[0]/2)
                 xs.append(x)
-                nroll = max(1, int(tdf.shape[0]/20))
+                nroll = max(1, int(tcol.shape[0]/20))
                 try:
                     if len(y) <= 2:
                         ys.append(list(y))
@@ -3110,20 +3122,17 @@ def hist(dfs,com=[],cat=''): #['Primary Celltype autoCellType res: 1.0','Primary
                     q75 = float(np.quantile(tcol, 0.75))
                     q95 = float(np.quantile(tcol, 0.95))
                     category_lines.append(
-                        f"{ty}: cells={int(tdf.shape[0])}; q25={_fmt_num(q25, digits=4)}; "
+                        f"{ty}: cells={int(tcol.shape[0])}; q25={_fmt_num(q25, digits=4)}; "
                         f"median={_fmt_num(q50, digits=4)}; q75={_fmt_num(q75, digits=4)}; q95={_fmt_num(q95, digits=4)}"
                     )
                 except Exception:
                     pass
             fig,ax=plt.subplots()
-            print(xs,ys,'xsys')
             for i in range(len(xs)):
                 try:
                     x,y,c,ty = xs[i],ys[i],allc.amcolors[i],sCN[i]
-                    print(x,y,'xy1')
                     ax.plot(x,y,color=c,label=ty, alpha=0.5)
                 except:
-                    print("hist can't use amcolors")
                     x,y,c,ty = xs[i],ys[i],allc.colors[i],sCN[i]
                     ax.plot(x,y,color=c,label=ty, alpha=0.5)
             ax.legend(fontsize='large')
@@ -4386,40 +4395,47 @@ def coOccurrence(dfs,com=[],cat=''):
         plt.show()
     return(dfs,9)
 
-def rollingAve(l,n=4): #n in each direction
-    newL = []
-    for i in range(len(l)):
-        nears = []
-        for j in range(n):
-            left = i - j - 1
-            right = i + j + 1
-            if  left >= 0:
-                nears.append(l[left])
-            if right < len(l):
-                nears.append(l[right])
-        #print(nears)
-        newL.append(stat.mean(nears))
-    return(newL)
+def rollingAve(l,n=4): #n in each direction, excluding the center point itself
+    #vectorized equivalent of the old O(len(l)*n) nested-loop version: uses a
+    #prefix sum so each position's neighbor average is O(1) instead of O(n)
+    l = np.asarray(l,dtype=float)
+    m = len(l)
+    if m == 0:
+        return([])
+    csum = np.concatenate(([0.0],np.cumsum(l)))
+    idx = np.arange(m)
+    left = np.maximum(0,idx-n)
+    right = np.minimum(m,idx+n+1)
+    window_sum = csum[right]-csum[left]
+    window_count = right-left
+    neighbor_sum = window_sum-l
+    neighbor_count = window_count-1
+    safe_count = np.where(neighbor_count <= 0,1,neighbor_count)
+    avg = np.where(neighbor_count <= 0,0.0,neighbor_sum/safe_count)
+    return(list(avg))
 
 
 
 def makeHist(x,nb,orientation="vertical"):
-    mx,Mx = min(x),max(x)
+    #vectorized equivalent of the old per-bin O(n) masking loop (was O(n*nb) total,
+    #and nb scales with n, making it effectively O(n^2) for large populations)
+    x = np.asarray(x,dtype=float)
+    if x.size == 0:
+        return(x,x)
+    #bin range from robust percentiles, not raw min/max: a single stray outlier
+    #(segmentation debris, autofluorescence spike) in min/max would otherwise blow
+    #up the bin width and cram the real population into one bin, wildly inflating
+    #that bin's count relative to a plot without such an outlier
+    mx,Mx = float(np.percentile(x,1)),float(np.percentile(x,99))
     rx = Mx-mx
     if rx == 0:
-        print("no cells in histogram!!!")
         return(x,x)
+    nb = max(1,int(nb))
     sx = rx/nb
-    binCts=[]
     bins = np.arange(mx,Mx+sx,sx)
-    for i in range(1,len(bins)):
-        key = x>=bins[i-1]
-        key1 = x<bins[i]
-        ss = x.loc[key&key1]
-        if ss.shape[0] > 1:
-            binCts.append(np.log10(ss.shape[0])/np.log10(2))
-        else:
-            binCts.append(0)
+    counts,_ = np.histogram(x,bins=bins)
+    safe_counts = np.where(counts > 1,counts,1)
+    binCts = np.where(counts > 1,np.log2(safe_counts),0.0)
     y = np.arange(len(binCts))*sx+mx
     X = binCts
     if orientation == "vertical":

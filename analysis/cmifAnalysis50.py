@@ -951,6 +951,59 @@ def autotype(df,obs,dfxy,chanT=True,name="autoCellType res: ",res=None): #the ol
         #return(df,obs,dfxy)
     return(odf,obs,dfxy)
 
+def applyManualThresholdsCSV(df,obs,path,subtract=False):
+    #the ROI/slide_scene-specific ("Markers") branch of manThresh, split out so it can be
+    #called without prompting (e.g. by samType for gating). Returns (df,obs) with
+    #<marker>_func +/- columns set, or None if the csv/obs don't match that format.
+    thresh = pd.read_csv(path,float_precision='round_trip')
+    if "Markers" not in thresh.columns:
+        return(None)
+    if "slide_scene" not in obs.columns:
+        print("WARNING: obs has no slide_scene column; cannot match ROI-specific thresholds")
+        return(None)
+    thresh = thresh.set_index("Markers")
+    if "Cells" in thresh.index:
+        thresh = thresh.drop(index="Cells")
+    threshCols = list(thresh.columns.astype(str))
+    threshColSet = set(threshCols)
+    #fallback for threshold columns carrying a prefix obs slide_scene values don't
+    #(e.g. thresh col "CellObjects_CTRLROI01" vs obs slide_scene "CTRLROI01")
+    aliasMap = {}
+    for col in threshCols:
+        if "_" in col:
+            stripped = col.split("_",1)[1]
+            aliasMap.setdefault(stripped,col)
+    rawScenes = obs["slide_scene"].astype(str)
+    cellScenes = rawScenes.map(lambda s: s if s in threshColSet else aliasMap.get(s,s))
+    resolvedCount = int((cellScenes != rawScenes).sum())
+    if resolvedCount:
+        print("matched",resolvedCount,"cells to threshold columns via prefix-stripped slide_scene fallback")
+    scenes = set(cellScenes.unique())
+    threshScenes = threshColSet
+    missingObs = sorted(threshScenes - scenes)
+    missingThresh = sorted(scenes - threshScenes)
+    if missingObs:
+        print("WARNING: threshold slide_scene labels not found in obs:", missingObs)
+    if missingThresh:
+        print("WARNING: obs slide_scene labels with no threshold column:", missingThresh)
+    funcs = pd.DataFrame("-",index=obs.index,
+                         columns=[biom+"_func" for biom in thresh.index if biom in df.columns])
+    for biom in thresh.index:
+        if biom not in df.columns:
+            print("WARNING: threshold marker not found in df:", biom)
+            continue
+        biomThresh = thresh.loc[biom]
+        cellThresh = cellScenes.map(biomThresh)
+        sceneKey = cellThresh.notna()
+        key = sceneKey & (df[biom] >= cellThresh)
+        funcs.loc[key,biom+"_func"] = "+"
+        print(biom,key.sum(),"positive cells")
+        if subtract:
+            df.loc[sceneKey,biom] -= cellThresh.loc[sceneKey]
+            df.loc[sceneKey & (df[biom]<0),biom] = 0
+    obs[funcs.columns] = funcs
+    return(df,obs)
+
 def manThresh(df,obs,dfxy):
     ch = input("import manual thresholds from csv? (y)")
     if ch == "y":
@@ -958,37 +1011,9 @@ def manThresh(df,obs,dfxy):
         path = input('filepath/name:')
         thresh = pd.read_csv(path)
         if "Markers" in thresh.columns:
-            if "slide_scene" not in obs.columns:
-                print("WARNING: obs has no slide_scene column; cannot match ROI-specific thresholds")
-            else:
-                thresh = thresh.set_index("Markers")
-                if "Cells" in thresh.index:
-                    thresh = thresh.drop(index="Cells")
-                scenes = set(obs["slide_scene"].astype(str).unique())
-                threshScenes = set(thresh.columns.astype(str))
-                missingObs = sorted(threshScenes - scenes)
-                missingThresh = sorted(scenes - threshScenes)
-                if missingObs:
-                    print("WARNING: threshold slide_scene labels not found in obs:", missingObs)
-                if missingThresh:
-                    print("WARNING: obs slide_scene labels with no threshold column:", missingThresh)
-                funcs = pd.DataFrame("-",index=obs.index,
-                                     columns=[biom+"_func" for biom in thresh.index if biom in df.columns])
-                cellScenes = obs["slide_scene"].astype(str)
-                for biom in thresh.index:
-                    if biom not in df.columns:
-                        print("WARNING: threshold marker not found in df:", biom)
-                        continue
-                    biomThresh = thresh.loc[biom]
-                    cellThresh = cellScenes.map(biomThresh)
-                    sceneKey = cellThresh.notna()
-                    key = sceneKey & (df[biom] > cellThresh)
-                    funcs.loc[key,biom+"_func"] = "+"
-                    print(biom,key.sum(),"positive cells")
-                    if chh == "y":
-                        df.loc[sceneKey,biom] -= cellThresh.loc[sceneKey]
-                        df.loc[sceneKey & (df[biom]<0),biom] = 0
-                obs[funcs.columns] = funcs
+            result = applyManualThresholdsCSV(df,obs,path,subtract=(chh=="y"))
+            if result is not None:
+                df,obs = result
                 return(df,obs,dfxy)
         else:
             obs["Manual Celltype"] = ""

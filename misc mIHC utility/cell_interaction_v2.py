@@ -81,7 +81,7 @@ BLUR_SIGMA_UM = 180.0              # Gaussian blur sigma in microns
 # FINAL_SCORE_THRESHOLD then defines the score mask. Each connected component
 # of that mask is a candidate annotation; no per-peak region growth is used.
 N_HOTSPOTS = 8                    # retain this many highest-scoring components
-FINAL_SCORE_THRESHOLD = 0.000005  # final product/penalty score required per pixel
+FINAL_SCORE_THRESHOLD = 0.002  # final product/penalty score required per pixel
 MIN_REGION_AREA_UM2 = 1_000_000.0 # discard tiny thresholded fragments (1 mm^2)
 MAX_REGION_AREA_UM2 = 10_000_000_000.0
 MORPH_CLOSE_RADIUS_UM = 32.0      # fill score-mask holes/gaps; 0 disables

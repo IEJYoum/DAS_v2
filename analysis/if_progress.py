@@ -71,7 +71,7 @@ def load_triplet_csvs(
     reset_progress(max_ticks, phase)
     try:
         tick_progress(f"{phase} | {Path(df_path).name}")
-        df = pd.read_csv(df_path, index_col=0)
+        df = pd.read_csv(df_path, index_col=0, float_precision='round_trip')
         tick_progress(f"{phase} | {Path(df_path).name}")
         tick_progress(f"{phase} | {Path(obs_path).name}")
         obs = pd.read_csv(obs_path, index_col=0)
@@ -79,7 +79,7 @@ def load_triplet_csvs(
             obs = obs.astype(str)
         tick_progress(f"{phase} | {Path(obs_path).name}")
         tick_progress(f"{phase} | {Path(dfxy_path).name}")
-        dfxy = pd.read_csv(dfxy_path, index_col=0)
+        dfxy = pd.read_csv(dfxy_path, index_col=0, float_precision='round_trip')
         tick_progress(f"{phase} | {Path(dfxy_path).name}")
         return df, obs, dfxy
     finally:

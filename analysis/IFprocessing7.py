@@ -25,6 +25,7 @@ fn = [revert,log2,scale1,zscore,elmarScale,outliers,equalizeTMA,combat,TMAcombat
 
 import os
 import sys
+import subprocess
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -526,8 +527,8 @@ def batchCorrection(dfs,com=[],cat=''):
 def celltyping(dfs,com=[],cat=''):
     print('celltyping')
 
-    op = ['SD-type','add labels to existing biomarker phenotype','Maxey type','vector/loss-weight celltyping','manual threshold phenotype']
-    fn = [autotype,labelPhenotype,maxeyType,vectorType,manThresh]
+    op = ['SD-type','add labels to existing biomarker phenotype','Maxey type','vector/loss-weight celltyping','manual threshold phenotype','SAM type']
+    fn = [autotype,labelPhenotype,maxeyType,vectorType,manThresh,samType]
     dfs,com=menu(dfs,op,fn,com,cat)
     #print(com,'com out from mainMenu')
     return(dfs,com)
@@ -1552,6 +1553,134 @@ def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName 
     return([df,obs,dfxy])
 
 
+def _resolve_shortcut_target(lnk_path):
+    #resolves a windows .lnk shortcut's target via WScript.Shell (no pywin32 dependency)
+    try:
+        script = ("$sh = New-Object -ComObject WScript.Shell; "
+                  "$lnk = $sh.CreateShortcut('" + str(lnk_path).replace("'","''") + "'); "
+                  "Write-Output $lnk.TargetPath")
+        result = subprocess.run(["powershell","-NoProfile","-NonInteractive","-Command",script],
+                                capture_output=True,text=True,timeout=15)
+        target = result.stdout.strip()
+        if target:
+            return(target)
+    except Exception as e:
+        print("WARNING: could not resolve shortcut",lnk_path,":",e)
+    return(None)
+
+
+def _resolve_resource_file(resources_dir,keywords):
+    #finds a single .csv in resources_dir whose filename contains all keywords; falls back
+    #to a same-named .lnk shortcut (e.g. network-share files kept as shortcuts locally)
+    csvs = [p for p in resources_dir.iterdir() if p.is_file() and p.suffix.lower() == ".csv"]
+    matches = [p for p in csvs if all(k in p.name.lower() for k in keywords)]
+    if len(matches) == 1:
+        return(str(matches[0]))
+    if len(matches) > 1:
+        return(None)
+    lnks = [p for p in resources_dir.iterdir() if p.is_file() and p.suffix.lower() == ".lnk"]
+    lnk_matches = [p for p in lnks if all(k in p.name.lower() for k in keywords)]
+    if len(lnk_matches) != 1:
+        return(None)
+    target = _resolve_shortcut_target(lnk_matches[0])
+    if target and Path(target).is_file() and Path(target).suffix.lower() == ".csv":
+        return(target)
+    return(None)
+
+
+def _find_resources_gating_files():
+    resources_dir = Path.cwd() / "resources"
+    if not resources_dir.is_dir():
+        return(None,None)
+    gate_path = _resolve_resource_file(resources_dir,("gating","config"))
+    thresh_path = _resolve_resource_file(resources_dir,("threshold",))
+    return(gate_path,thresh_path)
+
+
+def _create_resources_shortcut(source_path,keywords,canonical_stem):
+    #creates resources/ (if needed) and a .lnk to source_path so _resolve_resource_file
+    #finds it automatically next time, without re-prompting the user
+    try:
+        resources_dir = Path.cwd() / "resources"
+        resources_dir.mkdir(parents=True,exist_ok=True)
+        src = Path(source_path).resolve()
+        link_name = src.name if all(k in src.stem.lower() for k in keywords) else canonical_stem+src.suffix
+        link_path = resources_dir / (link_name+".lnk")
+        script = ("$sh = New-Object -ComObject WScript.Shell; "
+                  "$lnk = $sh.CreateShortcut('" + str(link_path).replace("'","''") + "'); "
+                  "$lnk.TargetPath = '" + str(src).replace("'","''") + "'; "
+                  "$lnk.Save()")
+        subprocess.run(["powershell","-NoProfile","-NonInteractive","-Command",script],
+                       capture_output=True,text=True,timeout=15)
+        if link_path.is_file():
+            print("linked into resources folder for future runs:",link_path)
+        else:
+            print("WARNING: resources shortcut was not created for",source_path)
+    except Exception as e:
+        print("WARNING: could not create resources shortcut for",source_path,":",e)
+
+
+def _applyGatingConfig(obs,path):
+    #default must be a non-empty string, not "" (e.g. spatialLite indexes ty[0], which breaks on "")
+    gate_df = pd.read_csv(path)
+    obs["Celltype: Gating"] = "unclassified"
+    obs["Subtype: Gating"] = "unclassified"
+    for _,row in gate_df.iterrows():
+        included = str(row.get("Include_Label","")).strip()
+        if included not in ("1","1.0"):
+            continue
+        cls = str(row.get("Class","")).strip()
+        parent = str(row.get("Include_Parent","")).strip()
+        if parent == "" or parent.lower() == "nan":
+            parent = cls
+        gate = str(row.get("Gate","")).strip()
+        tokens = [t for t in gate.split("_") if t != ""]
+        if tokens and tokens[0].lower() == "cellsp":
+            tokens = tokens[1:]
+        mask = pd.Series(True,index=obs.index)
+        valid = True
+        for tok in tokens:
+            marker,sign = tok[:-1],tok[-1]
+            func_col = marker+"_func"
+            if func_col not in obs.columns:
+                print("WARNING: gating marker not found in thresholded data:",marker,"(class:",cls,")")
+                valid = False
+                break
+            want = "+" if sign == "p" else "-"
+            mask &= (obs[func_col] == want)
+        if not valid:
+            continue
+        obs.loc[mask,"Subtype: Gating"] = cls
+        obs.loc[mask,"Celltype: Gating"] = parent
+        print(cls,":",int(mask.sum()),"cells")
+    return(obs)
+
+
+def samType(dfs,com=[],cat=''):
+    if len(com) == 0:
+        gate_path,thresh_path = _find_resources_gating_files()
+        if gate_path is not None and thresh_path is not None:
+            print("found gating config in resources folder:",gate_path)
+            print("found manual thresholds in resources folder:",thresh_path)
+        else:
+            if gate_path is None:
+                gate_path = logInput('gating config csv path: ')
+                _create_resources_shortcut(gate_path,("gating","config"),"gating_config")
+            if thresh_path is None:
+                thresh_path = logInput('manual thresholds csv path: ')
+                _create_resources_shortcut(thresh_path,("threshold",),"manual_thresholds")
+        return([], [gate_path,thresh_path])
+    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
+    gate_path,thresh_path = com[1],com[2]
+    result = cm.applyManualThresholdsCSV(df,obs,thresh_path,subtract=False)
+    if result is None:
+        print('samType failed: could not apply manual thresholds from',thresh_path)
+        return(dfs,[])
+    df,obs = result
+    obs = _applyGatingConfig(obs,gate_path)
+    return([df,obs,dfxy],[])
+
+
 def chanThresh(df):
     global MANUALtHRESHOLDS
     override = MANUALtHRESHOLDS
@@ -2147,20 +2276,49 @@ def _scoped_cluster_labels(labels, cat):
     return(out)
 
 
+def _prompt_normalize_before_clustering():
+    prompt = 'normalize (z-score) markers before clustering? (y/n) [y]: '
+    prompt_meta = {
+        "options": [
+            {"value": "y", "label": "Yes", "description": "Z-score each marker before clustering, so clustering isn't dominated by scale differences (e.g. cell size vs. marker intensity)."},
+            {"value": "n", "label": "No", "description": "Cluster on the raw marker values."},
+        ]
+    }
+    try:
+        inp = input(prompt, default='y', prompt_meta=prompt_meta)
+    except TypeError:
+        inp = input(prompt)
+    LOG.append([prompt,inp])
+    return(inp)
+
+
+def _normalize_flag_true(raw):
+    return str(raw).strip().lower() in ['', 'y', 'yes', 'use', 'true', '1']
+
+
+def _zscore_for_clustering(df,raw_normalize_flag):
+    #z-scores a copy for clustering only; never persisted onto the returned df
+    if not _normalize_flag_true(raw_normalize_flag):
+        return(df)
+    return(df.apply(ZSC))
+
+
 def torchCluster(dfs,com=[],cat=''):
     if len(com) == 0:
         ncl = int(input("n clusters:"))
         nit = int(input("number of iterations:"))
         lra = float(input("convergence tolerance (blank not allowed, 1e-4 is a reasonable start):"))
         output_col = input("output name (blank for TorchCluster_<n>): ")
-        return([],[ncl,nit,lra,output_col])
+        normalize = _prompt_normalize_before_clustering()
+        return([],[ncl,nit,lra,output_col,normalize])
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     ncl = int(com[1])
     nit = int(com[2])
     lra = float(com[3])
     output_col = str(com[4]).strip() if len(com) > 4 else ""
+    cdf = _zscore_for_clustering(df,com[5] if len(com) > 5 else 'n')
     labels,centroids,meta = ml_tc.cluster_dataframe(
-        df,
+        cdf,
         n_clusters=ncl,
         max_iter=nit,
         learning_rate=lra,
@@ -2181,16 +2339,40 @@ def torchCluster(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
+def _collect_multi_int(prompt):
+    #"send blank when done" style collection of several int values in one menu visit
+    vals = []
+    while True:
+        raw = logInput(prompt)
+        if str(raw).strip() == "":
+            break
+        try:
+            vals.append(int(raw))
+        except ValueError:
+            print("skipping invalid number:",raw)
+    return(vals)
+
+
+def _as_int_list(com_val):
+    #old saved lastrun commands recorded a single int here; new ones record a list
+    if isinstance(com_val,(list,tuple)):
+        return(list(com_val))
+    return([com_val])
+
+
 def kmeans(dfs,com=[],cat=''):
     if len(com) == 0:
-        ncl = int(input("n clusters:"))
-        return([],[ncl])
+        ncls = _collect_multi_int("n clusters (blank when done): ")
+        normalize = _prompt_normalize_before_clustering()
+        return([],[ncls,normalize])
     df,obs = dfs[0],dfs[1]
-    ncl = com[1]
-    km = KMeans(n_clusters=ncl)
-    km.fit(df)
-    cn = _scoped_cluster_output_name("Kmeans_"+str(ncl), cat)
-    obs[cn] = _scoped_cluster_labels(km.labels_, cat)
+    ncls = _as_int_list(com[1])
+    cdf = _zscore_for_clustering(df,com[2] if len(com) > 2 else 'n')
+    for ncl in ncls:
+        km = KMeans(n_clusters=ncl)
+        km.fit(cdf)
+        cn = _scoped_cluster_output_name("Kmeans_"+str(ncl), cat)
+        obs[cn] = _scoped_cluster_labels(km.labels_, cat)
     return([dfs[0],obs,dfs[2]],[])
 
 
@@ -2198,7 +2380,8 @@ def leiden(dfs,com=[],cat=''):
     if len(com) == 0:
         res = float(input("recluster with resolution:"))
         primo = input('only use primary markers? (y)')
-        return([],[res,primo])
+        normalize = _prompt_normalize_before_clustering()
+        return([],[res,primo,normalize])
     sc, anndata = _load_scanpy_stack("Leiden clustering")
     if sc is None:
         return([dfs[0],dfs[1],dfs[2]],[])
@@ -2208,7 +2391,8 @@ def leiden(dfs,com=[],cat=''):
     if primo == 'y':
         df,obs,dfxy = cm.onlyPrimaries(df,obs,dfxy)
     print(all(obs.index==df.index),"all index the same")
-    adata = anndata.AnnData(df,obs = obs)
+    cdf = _zscore_for_clustering(df,com[3] if len(com) > 3 else 'n')
+    adata = anndata.AnnData(cdf,obs = obs)
     sc.pp.neighbors(adata,use_rep='X')
     sc.tl.leiden(adata, key_added='Cluster', resolution=res)
     cn = _scoped_cluster_output_name("Leiden_"+str(res), cat)
@@ -2223,8 +2407,9 @@ def autoleiden(dfs,com=[],cat=''):
         target = int(input("get n clusters:"))
         res = float(input("starting Leiden resolution:"))
         primo = input('only use primary markers? (y)')
+        normalize = _prompt_normalize_before_clustering()
 
-        return([],[res,target,primo])
+        return([],[res,target,primo,normalize])
     sc, anndata = _load_scanpy_stack("Auto-Leiden clustering")
     if sc is None:
         return([dfs[0],dfs[1],dfs[2]],[])
@@ -2233,6 +2418,7 @@ def autoleiden(dfs,com=[],cat=''):
     odf = df.copy()
     if primo == 'y':
         df,obs,dfxy = cm.onlyPrimaries(df,obs,dfxy)
+    cdf = _zscore_for_clustering(df,com[4] if len(com) > 4 else 'n')
     incr = res/4
     ncl = 99
     tes = []
@@ -2247,7 +2433,7 @@ def autoleiden(dfs,com=[],cat=''):
         print(res,incr)
 
         #print("!! running with res",res)
-        adata = anndata.AnnData(df,obs = obs)
+        adata = anndata.AnnData(cdf,obs = obs)
         sc.pp.neighbors(adata,use_rep='X')
         sc.tl.leiden(adata, key_added='Cluster', resolution=res)
         cn = _scoped_cluster_output_name("Leiden_n" + str(target), cat)
@@ -2277,14 +2463,17 @@ def autoleiden(dfs,com=[],cat=''):
 
 def gmm(dfs,com=[],cat=''):
     if len(com) == 0:
-        ncl = int(input("n clusters:"))
-        return([],[ncl])
-    ncl = com[1]
+        ncls = _collect_multi_int("n clusters (blank when done): ")
+        normalize = _prompt_normalize_before_clustering()
+        return([],[ncls,normalize])
+    ncls = _as_int_list(com[1])
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
+    cdf = _zscore_for_clustering(df,com[2] if len(com) > 2 else 'n')
     #ctypes = ['full','tied','diag','spherical']
-    gmm = GMM(n_components=ncl).fit(df)
-    cn = _scoped_cluster_output_name("GMM_"+str(ncl), cat)
-    obs[cn] = _scoped_cluster_labels(gmm.predict(df), cat)
+    for ncl in ncls:
+        gmmModel = GMM(n_components=ncl).fit(cdf)
+        cn = _scoped_cluster_output_name("GMM_"+str(ncl), cat)
+        obs[cn] = _scoped_cluster_labels(gmmModel.predict(cdf), cat)
     return([df,obs,dfxy],[])
 
 
