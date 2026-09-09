@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -12,7 +13,15 @@ DEFAULT_STEM = "spectral_unmixed"
 FLOW_INPUT_EXTENSION = ".fcs"
 MIXED_CACHE_EXTENSION = ".csv"
 MIXED_CACHE_SUFFIX = "_spectral_mixed_cache.csv"
+LASTRUN_FILENAME = "spectral_lastrun.json"
 _CORE = None
+
+SOLVER_MODES = {
+    "nnls": {"solver_mode": 0.0},
+    "lasso": {"solver_mode": 1.0},
+    "nnls_normalize": {"solver_mode": 2.0},
+    "lasso_normalize": {"solver_mode": 3.0},
+}
 
 NOISE_MODES = {
     "per_marker_only": {
@@ -98,6 +107,7 @@ SHARED_TUNABLE_PARAMS = [
     "component_similarity_cleanup_enabled",
     "component_similarity_threshold",
     "component_similarity_shrink_factor",
+    "lasso_alpha",
 ]
 
 
@@ -193,6 +203,7 @@ def run_interactive(
         "spectral_save_mixed_cache",
         "spectral_mixed_cache_path",
         "spectral_noise_mode",
+        "spectral_solver_mode",
         "spectral_tuning_overrides",
     ]:
         if str(project_config.get(key, "")).strip() != "":
@@ -232,10 +243,57 @@ def run_interactive(
         input_sources, input_folder = _choose_input_sources(log_input, input_default, print_fn=print_fn, get_file_fn=get_file_fn)
         input_suffixes = [FLOW_INPUT_EXTENSION]
 
-    print_fn("")
-    print_fn("Step 3: choose how detector channels should become output marker values.")
-    strategy_default = str(prompt_defaults.get("spectral_strategy") or "consensus_score_and_cluster")
-    strategy = _choose_strategy(log_input, print_fn, strategy_default)
+    # --- Replay from previous run config ---
+    lastrun_default = str(Path(data_folder) / LASTRUN_FILENAME)
+    lastrun_exists = Path(lastrun_default).is_file()
+    replay_config = None
+    if lastrun_exists:
+        print_fn("")
+        print_fn("A previous run config was found: " + lastrun_default)
+        if _choose_yes_no(log_input, "replay previous run config? (y/N): ", default="n"):
+            replay_config = _load_lastrun(lastrun_default)
+            if replay_config:
+                print_fn("Loaded run config. Replaying settings:")
+                for key in ("strategy", "noise_mode", "solver_mode", "stem", "event_limit_per_file"):
+                    if key in replay_config:
+                        print_fn(f"  {key}: {replay_config[key]}")
+                if replay_config.get("tuning_overrides"):
+                    print_fn("  tuning overrides:", len(replay_config["tuning_overrides"]))
+                    for k, v in replay_config["tuning_overrides"].items():
+                        print_fn(f"    {k} = {v}")
+            else:
+                print_fn("Could not parse run config, continuing with manual setup.")
+                replay_config = None
+    else:
+        print_fn("")
+        print_fn("Replay from config: provide a path to a spectral_lastrun.json to skip setup, or send blank to configure manually.")
+        replay_path_raw = str(_call_input(log_input, "config path (blank to skip): ", default="")).strip().strip('"')
+        if replay_path_raw:
+            replay_config = _load_lastrun(replay_path_raw)
+            if replay_config:
+                print_fn("Loaded run config from:", replay_path_raw)
+                for key in ("strategy", "noise_mode", "solver_mode", "stem", "event_limit_per_file"):
+                    if key in replay_config:
+                        print_fn(f"  {key}: {replay_config[key]}")
+            else:
+                print_fn("Could not parse config, continuing with manual setup.")
+                replay_config = None
+
+    if replay_config:
+        strategy = str(replay_config.get("strategy", "consensus_score_and_cluster"))
+        noise_mode = str(replay_config.get("noise_mode", "both"))
+        solver_mode = str(replay_config.get("solver_mode", "nnls"))
+        stem_default = str(replay_config.get("stem", DEFAULT_STEM))
+        tuning_overrides = {}
+        if isinstance(replay_config.get("tuning_overrides"), dict):
+            tuning_overrides = {k: float(v) for k, v in replay_config["tuning_overrides"].items()}
+        event_limit_raw = replay_config.get("event_limit_per_file")
+        event_limit = int(event_limit_raw) if event_limit_raw not in (None, "", "all") else None
+    else:
+        print_fn("")
+        print_fn("Step 3: choose how detector channels should become output marker values.")
+        strategy_default = str(prompt_defaults.get("spectral_strategy") or "consensus_score_and_cluster")
+        strategy = _choose_strategy(log_input, print_fn, strategy_default)
 
     input_paths = core.resolve_input_paths(input_sources, suffixes=input_suffixes)
     print_fn("resolved input event files:", len(input_paths))
@@ -244,7 +302,8 @@ def run_interactive(
     if len(input_paths) > 8:
         print_fn(" - ... plus", len(input_paths) - 8, "more")
 
-    stem = str(prompt_defaults.get("spectral_stem") or defaults.get("stem") or DEFAULT_STEM).strip() or DEFAULT_STEM
+    if not replay_config:
+        stem_default = str(prompt_defaults.get("spectral_stem") or defaults.get("stem") or DEFAULT_STEM).strip() or DEFAULT_STEM
 
     if callable(progress_reset_fn):
         progress_reset_fn(len(input_paths) + 30, "Spectral import | reading first file")
@@ -257,8 +316,6 @@ def run_interactive(
             raise ValueError("No spectral detector columns were detected in the selected .fcs files.")
 
         print_fn("")
-        print_fn("Step 4: automatically detect channel columns.")
-        print_fn("The importer will use all numeric non-scatter detector channels for unmixing. FSC/SSC-style scatter columns are copied into dfxy.")
         print_fn("Detected detector columns:", str(len(suggested_detectors)))
         print_fn("First detector columns:", ",".join(suggested_detectors[:12]) or "[none]")
         if len(suggested_detectors) > 12:
@@ -267,38 +324,55 @@ def run_interactive(
         detector_columns = suggested_detectors
         scatter_columns = suggested_scatter
 
-        print_fn("")
-        print_fn("Step 5: use output stem.")
-        print_fn("Output stem:", stem)
-        print_fn("Files will be saved as <stem>_df.csv, <stem>_obs.csv, and <stem>_dfxy.csv in the project output folder.")
+        if not replay_config:
+            print_fn("")
+            print_fn("Step 5: choose output stem.")
+            print_fn("Files will be saved as <stem>_df.csv, <stem>_obs.csv, and <stem>_dfxy.csv in the project output folder.")
+            stem = _prompt_with_default(log_input, stem_default, "output stem")
+            stem = stem.strip() or stem_default
+            print_fn("Output stem:", stem)
 
-        print_fn("")
-        print_fn("Step 6: noise subtraction mode.")
-        noise_default = str(prompt_defaults.get("spectral_noise_mode") or "both")
-        noise_mode = _choose_noise_mode(log_input, print_fn, noise_default)
-        print_fn("Noise subtraction mode:", noise_mode)
+            print_fn("")
+            print_fn("Step 6: noise subtraction mode.")
+            noise_default = str(prompt_defaults.get("spectral_noise_mode") or "both")
+            noise_mode = _choose_noise_mode(log_input, print_fn, noise_default)
+            print_fn("Noise subtraction mode:", noise_mode)
 
-        print_fn("")
-        print_fn("Step 7: tune parameters.")
-        saved_overrides = _load_tuning_overrides_from_config(project_config)
-        tuning_overrides = _choose_tuning_overrides(log_input, print_fn, strategy, saved_overrides)
+            print_fn("")
+            print_fn("Step 7: solver mode.")
+            solver_default = str(prompt_defaults.get("spectral_solver_mode") or "nnls")
+            solver_mode = _choose_solver_mode(log_input, print_fn, solver_default)
+            print_fn("Solver mode:", solver_mode)
+
+            print_fn("")
+            print_fn("Step 8: tune parameters.")
+            saved_overrides = _load_tuning_overrides_from_config(project_config)
+            tuning_overrides = _choose_tuning_overrides(log_input, print_fn, strategy, saved_overrides)
+
+            print_fn("")
+            print_fn("Step 9: choose development/cache options.")
+            event_limit = _choose_event_limit(log_input, print_fn, str(prompt_defaults.get("spectral_event_limit_per_file") or "all"))
+            if event_limit is None:
+                print_fn("Event loading: all events from each input file.")
+            else:
+                print_fn("Event loading: random subset, up to", event_limit, "events per input file.")
+        else:
+            stem = stem_default
+            print_fn("Output stem:", stem)
+            event_limit = int(replay_config.get("event_limit_per_file")) if replay_config.get("event_limit_per_file") not in (None, "", "all") else None
+
         tuning_params = {}
         tuning_params.update(NOISE_MODES.get(noise_mode, {}))
+        tuning_params.update(SOLVER_MODES.get(solver_mode, {}))
         tuning_params.update(tuning_overrides)
 
-        print_fn("")
-        print_fn("Step 8: choose development/cache options.")
-        event_limit = _choose_event_limit(log_input, print_fn, str(prompt_defaults.get("spectral_event_limit_per_file") or "all"))
-        if event_limit is None:
-            print_fn("Event loading: all events from each input file.")
-        else:
-            print_fn("Event loading: random subset, up to", event_limit, "events per input file.")
         mixed_cache_path = None
-        save_cache_default = str(prompt_defaults.get("spectral_save_mixed_cache") or "n")
-        if input_mode == "raw_fcs" and _choose_yes_no(log_input, "save mixed detector cache CSV? (y/N): ", default=save_cache_default):
-            cache_default = str(prompt_defaults.get("spectral_mixed_cache_path") or Path(data_folder) / f"{stem}{MIXED_CACHE_SUFFIX}")
-            mixed_cache_path = _choose_output_file_path(log_input, cache_default, "mixed detector cache CSV", print_fn=print_fn)
-            print_fn("Mixed detector cache will be saved:", mixed_cache_path)
+        if not replay_config:
+            save_cache_default = str(prompt_defaults.get("spectral_save_mixed_cache") or "n")
+            if input_mode == "raw_fcs" and _choose_yes_no(log_input, "save mixed detector cache CSV? (y/N): ", default=save_cache_default):
+                cache_default = str(prompt_defaults.get("spectral_mixed_cache_path") or Path(data_folder) / f"{stem}{MIXED_CACHE_SUFFIX}")
+                mixed_cache_path = _choose_output_file_path(log_input, cache_default, "mixed detector cache CSV", print_fn=print_fn)
+                print_fn("Mixed detector cache will be saved:", mixed_cache_path)
 
         print_fn("")
         print_fn("spectral import summary")
@@ -307,6 +381,7 @@ def run_interactive(
         print_fn("input mode:", input_mode)
         print_fn("strategy:", strategy)
         print_fn("noise subtraction:", noise_mode)
+        print_fn("solver:", solver_mode)
         if tuning_overrides:
             print_fn("tuning overrides:", len(tuning_overrides))
             for key, value in tuning_overrides.items():
@@ -346,6 +421,7 @@ def run_interactive(
             "event_limit_per_file": event_limit if event_limit is not None else "",
             "mixed_detector_cache_path": str(mixed_cache_path or ""),
             "noise_mode": noise_mode,
+            "solver_mode": solver_mode,
             "tuning_overrides": tuning_overrides,
             "tuning_params_used": tuning_params,
         }
@@ -362,12 +438,25 @@ def run_interactive(
         "spectral_save_mixed_cache": "y" if mixed_cache_path else "n",
         "spectral_mixed_cache_path": str(mixed_cache_path or prompt_defaults.get("spectral_mixed_cache_path") or ""),
         "spectral_noise_mode": noise_mode,
+        "spectral_solver_mode": solver_mode,
         "spectral_tuning_overrides": _serialize_tuning_overrides(tuning_overrides),
     }
     print_fn("")
     print_fn("Remembering spectral import defaults in project_config.txt.")
     _save_project_config(data_folder, current_config)
     print_fn("updated project config:", Path(data_folder) / PROJECT_CONFIG_FILE)
+
+    lastrun_config = {
+        "strategy": strategy,
+        "noise_mode": noise_mode,
+        "solver_mode": solver_mode,
+        "stem": stem,
+        "event_limit_per_file": event_limit if event_limit is not None else "all",
+        "tuning_overrides": tuning_overrides,
+        "tuning_params_used": tuning_params,
+    }
+    lastrun_path = _save_lastrun(data_folder, lastrun_config)
+    print_fn("saved run config:", lastrun_path)
 
     if save_outputs:
         paths = save_triplet_and_audit(out_df, out_obs, out_dfxy, meta, data_folder, stem)
@@ -697,6 +786,51 @@ def _normalize_input_mode(value: str) -> str:
     return "raw_fcs"
 
 
+def _choose_solver_mode(log_input, print_fn, current_value: str) -> str:
+    current = str(current_value or "nnls").strip().lower()
+    if current not in SOLVER_MODES:
+        current = "nnls"
+    print_fn("")
+    print_fn("Choose solver mode.")
+    print_fn("This controls how marker coefficients are found from the spectral matrix.")
+    print_fn("0 : nnls")
+    print_fn("1 : lasso")
+    print_fn("2 : nnls_normalize")
+    print_fn("3 : lasso_normalize")
+    default_index = {"nnls": "0", "lasso": "1", "nnls_normalize": "2", "lasso_normalize": "3"}.get(current, "0")
+    prompt_meta = {
+        "options": [
+            {
+                "value": "0",
+                "label": "nnls",
+                "description": "Standard non-negative least squares. No sparsity penalty.",
+            },
+            {
+                "value": "1",
+                "label": "lasso",
+                "description": "L1-regularized non-negative solve. Penalizes using extra markers (sparsity).",
+            },
+            {
+                "value": "2",
+                "label": "nnls_normalize",
+                "description": "NNLS with column-normalized spectral matrix. Equalizes marker cost.",
+            },
+            {
+                "value": "3",
+                "label": "lasso_normalize",
+                "description": "Lasso with column-normalized matrix. Sparsity + equalized cost.",
+            },
+        ]
+    }
+    raw = str(_call_input(log_input, "solver mode number: ", default=default_index, prompt_meta=prompt_meta)).strip()
+    mapping = {"0": "nnls", "1": "lasso", "2": "nnls_normalize", "3": "lasso_normalize"}
+    if raw in mapping:
+        return mapping[raw]
+    if raw in SOLVER_MODES:
+        return raw
+    return current
+
+
 def _choose_noise_mode(log_input, print_fn, current_value: str) -> str:
     current = str(current_value or "both").strip().lower()
     if current not in NOISE_MODES:
@@ -840,6 +974,34 @@ def _deserialize_tuning_overrides(text: str) -> dict:
 def _load_tuning_overrides_from_config(project_config: dict) -> dict:
     raw = str(project_config.get("spectral_tuning_overrides", "")).strip()
     return _deserialize_tuning_overrides(raw)
+
+
+def _save_lastrun(data_folder: str | Path, run_config: dict) -> Path:
+    folder = Path(data_folder).expanduser().resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / LASTRUN_FILENAME
+    safe = {}
+    for key, value in run_config.items():
+        if isinstance(value, (str, int, float, bool, type(None))):
+            safe[key] = value
+        elif isinstance(value, dict):
+            safe[key] = {str(k): v for k, v in value.items()}
+        elif isinstance(value, (list, tuple)):
+            safe[key] = [str(x) for x in value]
+        else:
+            safe[key] = str(value)
+    path.write_text(json.dumps(safe, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _load_lastrun(path: str | Path) -> dict:
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def _choose_event_limit(log_input, print_fn, current_value: str) -> int | None:

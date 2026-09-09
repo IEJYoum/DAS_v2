@@ -28,3 +28,4 @@ dependencies:
       - tensorflow-cpu
       - csbdeep
       - stardist
+      - fcsparser  # may downgrade numpy; pip install numpy==2.2.6 after
