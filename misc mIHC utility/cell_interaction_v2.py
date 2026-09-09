@@ -230,6 +230,25 @@ def parse_project(project_path: str) -> list[dict]:
     return images
 
 
+def parse_image_indices(values: list[str] | None) -> list[int]:
+    """Parse repeatable comma-separated --image values, defaulting to image 0."""
+    if not values:
+        return [0]
+    indices = []
+    for value in values:
+        for token in value.split(","):
+            token = token.strip()
+            if not token:
+                raise ValueError("empty image index")
+            try:
+                index = int(token)
+            except ValueError as exc:
+                raise ValueError(f"'{token}' is not an integer") from exc
+            if index not in indices:
+                indices.append(index)
+    return indices
+
+
 def uri_to_path(uri: str) -> str:
     """Convert a file: URI to an OS path."""
     if not uri.startswith("file:"):
@@ -897,9 +916,10 @@ def process_image(image_desc: dict,
               f"Consider increasing WORKING_PIXEL_SIZE_UM.")
 
     # --- Create output directory ---
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%m%d_%H%M%S")
     image_safe_name = re.sub(r"[^\w\-.]", "_", image_desc["image_name"])
-    run_dir = os.path.join(output_dir, f"{image_safe_name}_{timestamp}")
+    version_name = Path(__file__).stem
+    run_dir = os.path.join(output_dir, f"{image_safe_name}_{timestamp}_{version_name}")
     os.makedirs(run_dir, exist_ok=True)
     print(f"\n  Output directory: {run_dir}")
 
@@ -1098,27 +1118,6 @@ def process_image(image_desc: dict,
             f"gate={marker.get('gate', 'none')})",
             cmap="inferno", debug_ds=debug_ds)
 
-    # Score map: this is the final post-gate interaction score, i.e. the
-    # product of blurred positive marker maps divided by negative penalties.
-    # Displaying to the 99.5th nonzero percentile keeps its compressed dynamic
-    # range visible without changing the underlying score used for analysis.
-    score_display_vmax = (float(np.percentile(score_nz, 99.5))
-                          if score_nz.size else 1.0)
-    save_debug_png(
-        score,
-        os.path.join(run_dir, "debug_score_map.png"),
-        f"Final interaction score (product/penalty; display max=p99.5={score_display_vmax:.4g})",
-        cmap="magma", debug_ds=debug_ds, vmin=0, vmax=score_display_vmax)
-
-    # Labels
-    if labels.max() > 0:
-        save_debug_png(
-            labels.astype(np.float32),
-            os.path.join(run_dir, "debug_labels.png"),
-            f"Labels ({labels.max()} components)",
-            cmap="tab10", debug_ds=debug_ds,
-            vmin=0, vmax=max(labels.max(), 1))
-
     # Score map with final outlines/seed markers. This deliberately does not
     # use a raw marker channel as a background, avoiding a misleading
     # marker-dominated composite.
@@ -1215,8 +1214,8 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--project", help="Path to QuPath project.qpproj")
     group.add_argument("--tiff", help="Direct path to an .ome.tiff file")
-    parser.add_argument("--image", type=int, default=0,
-                        help="Image index to process (project mode, default: 0)")
+    parser.add_argument("--image", action="append", metavar="INDEX[,INDEX...]",
+                        help="Project image index; repeat or comma-separate values (default: 0)")
     parser.add_argument("--series", type=int, default=None,
                         help="Series index override (default: from project or 0)")
     parser.add_argument("--output", default=None,
@@ -1251,22 +1250,28 @@ def main():
                 print(f"      {img['file_path']}")
             sys.exit(0)
 
-        if args.image < 0 or args.image >= len(images):
-            print(f"ERROR: image index {args.image} out of range "
+        try:
+            image_indices = parse_image_indices(args.image)
+        except ValueError as exc:
+            print(f"ERROR: invalid --image value: {exc}")
+            sys.exit(1)
+        invalid = [i for i in image_indices if i < 0 or i >= len(images)]
+        if invalid:
+            print(f"ERROR: image index/indices {invalid} out of range "
                   f"(project has {len(images)} images, use --list-images)")
             sys.exit(1)
 
-        image_desc = images[args.image]
-
-        # Resolve file path
-        resolved_path = resolve_file_path(image_desc["file_path"], PATH_REMAP)
-        if resolved_path is None:
-            print(f"ERROR: image file not found: {image_desc['file_path']}")
-            print("  Configure PATH_REMAP in the script if paths have changed.")
-            sys.exit(1)
-
-        if args.series is not None:
-            image_desc["series_index"] = args.series
+        jobs = []
+        for image_index in image_indices:
+            image_desc = dict(images[image_index])
+            resolved_path = resolve_file_path(image_desc["file_path"], PATH_REMAP)
+            if resolved_path is None:
+                print(f"ERROR: image file not found: {image_desc['file_path']}")
+                print("  Configure PATH_REMAP in the script if paths have changed.")
+                sys.exit(1)
+            if args.series is not None:
+                image_desc["series_index"] = args.series
+            jobs.append((image_desc, resolved_path))
 
         output_dir = args.output or os.path.join(
             os.path.dirname(project_path), "cell_interaction_output")
@@ -1291,13 +1296,15 @@ def main():
             "levels": [],
         }
         resolved_path = tiff_path
+        jobs = [(image_desc, resolved_path)]
 
         output_dir = args.output or os.path.join(
             os.path.dirname(tiff_path), "cell_interaction_output")
 
     os.makedirs(output_dir, exist_ok=True)
-    process_image(image_desc, resolved_path, output_dir,
-                  dry_run=args.dry_run, save_npy=args.save_npy)
+    for image_desc, resolved_path in jobs:
+        process_image(image_desc, resolved_path, output_dir,
+                      dry_run=args.dry_run, save_npy=args.save_npy)
 
 
 if __name__ == "__main__":
