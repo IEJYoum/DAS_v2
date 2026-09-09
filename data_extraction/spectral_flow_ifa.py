@@ -14,6 +14,92 @@ MIXED_CACHE_EXTENSION = ".csv"
 MIXED_CACHE_SUFFIX = "_spectral_mixed_cache.csv"
 _CORE = None
 
+NOISE_MODES = {
+    "per_marker_only": {
+        "reference_negative_subtraction_strength": 1.0,
+        "background_component_enabled": 0.0,
+        "shared_negative_subtraction_enabled": 0.0,
+    },
+    "background_only": {
+        "reference_negative_subtraction_strength": 0.0,
+        "background_component_enabled": 1.0,
+        "shared_negative_subtraction_enabled": 0.0,
+    },
+    "both": {
+        "reference_negative_subtraction_strength": 1.0,
+        "background_component_enabled": 1.0,
+        "shared_negative_subtraction_enabled": 0.0,
+    },
+    "mean": {
+        "reference_negative_subtraction_strength": 0.0,
+        "background_component_enabled": 1.0,
+        "shared_negative_subtraction_enabled": 1.0,
+    },
+}
+
+STRATEGY_TUNABLE_PARAMS = {
+    "weighted_score_reference": [
+        "weighted_score_threshold",
+        "weighted_column_quantile",
+    ],
+    "strict_weighted_reference": [
+        "strict_weighted_pos_mad_mult",
+        "strict_weighted_pos_quantile",
+        "strict_weighted_neg_quantile",
+        "strict_weighted_adaptive_enabled",
+        "strict_weighted_margin_enabled",
+    ],
+    "clustering_reference": [
+        "cluster_feature_mode",
+        "cluster_robust_scale_enabled",
+        "cluster_pca_components",
+        "cluster_min_positive_fraction",
+        "cluster_max_positive_fraction",
+    ],
+    "clustering_pca_reference": [
+        "cluster_feature_mode",
+        "cluster_robust_scale_enabled",
+        "cluster_pca_components",
+        "cluster_min_positive_fraction",
+        "cluster_max_positive_fraction",
+    ],
+    "gmm_reference": [
+        "cluster_feature_mode",
+        "cluster_robust_scale_enabled",
+        "cluster_pca_components",
+        "cluster_min_positive_fraction",
+        "cluster_max_positive_fraction",
+    ],
+    "soft_weighted_reference": [
+        "soft_positive_weight_cutoff",
+        "soft_negative_weight_cutoff",
+        "soft_weight_low_quantile",
+        "soft_weight_center_quantile",
+        "soft_weight_min_scale",
+    ],
+    "consensus_score_and_cluster": [
+        "weighted_score_threshold",
+        "weighted_column_quantile",
+        "cluster_feature_mode",
+        "cluster_robust_scale_enabled",
+    ],
+}
+
+SHARED_TUNABLE_PARAMS = [
+    "legacy_outlier_sd",
+    "global_bright_penalty_enabled",
+    "global_bright_penalty_strength",
+    "global_bright_quantile",
+    "global_bright_min_weight",
+    "component_tail_shrink_enabled",
+    "component_tail_shrink_quantile",
+    "component_tail_shrink_factor",
+    "component_tail_floor_fraction",
+    "component_similarity_cleanup_enabled",
+    "component_similarity_threshold",
+    "component_similarity_shrink_factor",
+]
+
 
 def import_module_from_path(path: str | Path, *, module_name: Optional[str] = None):
     path = Path(path).resolve()
@@ -91,6 +177,8 @@ def run_interactive(
         "spectral_event_limit_per_file",
         "spectral_save_mixed_cache",
         "spectral_mixed_cache_path",
+        "spectral_noise_mode",
+        "spectral_tuning_overrides",
     ]:
         if str(project_config.get(key, "")).strip() != "":
             prompt_defaults[key] = project_config[key]
@@ -170,7 +258,21 @@ def run_interactive(
         print_fn("Files will be saved as <stem>_df.csv, <stem>_obs.csv, and <stem>_dfxy.csv in the project output folder.")
 
         print_fn("")
-        print_fn("Step 6: choose development/cache options.")
+        print_fn("Step 6: noise subtraction mode.")
+        noise_default = str(prompt_defaults.get("spectral_noise_mode") or "both")
+        noise_mode = _choose_noise_mode(log_input, print_fn, noise_default)
+        print_fn("Noise subtraction mode:", noise_mode)
+
+        print_fn("")
+        print_fn("Step 7: tune parameters.")
+        saved_overrides = _load_tuning_overrides_from_config(project_config)
+        tuning_overrides = _choose_tuning_overrides(log_input, print_fn, strategy, saved_overrides)
+        tuning_params = {}
+        tuning_params.update(NOISE_MODES.get(noise_mode, {}))
+        tuning_params.update(tuning_overrides)
+
+        print_fn("")
+        print_fn("Step 8: choose development/cache options.")
         event_limit = _choose_event_limit(log_input, print_fn, str(prompt_defaults.get("spectral_event_limit_per_file") or "all"))
         if event_limit is None:
             print_fn("Event loading: all events from each input file.")
@@ -189,6 +291,13 @@ def run_interactive(
         print_fn("stem:", stem)
         print_fn("input mode:", input_mode)
         print_fn("strategy:", strategy)
+        print_fn("noise subtraction:", noise_mode)
+        if tuning_overrides:
+            print_fn("tuning overrides:", len(tuning_overrides))
+            for key, value in tuning_overrides.items():
+                print_fn(f"  {key} = {value}")
+        else:
+            print_fn("tuning overrides: [none, using defaults]")
         print_fn("event limit per file:", event_limit if event_limit is not None else "all")
         print_fn("detectors:", ",".join(detector_columns))
         print_fn("dfxy scatter:", ",".join(scatter_columns) or "[none]")
@@ -202,6 +311,7 @@ def run_interactive(
             event_limit_per_file=event_limit,
             random_seed=0,
             mixed_cache_path=mixed_cache_path,
+            tuning_params=tuning_params,
             progress_fn=lambda phase: _tick_progress(progress_tick_fn, phase),
         )
         _tick_progress(progress_tick_fn, "Spectral import | finished")
@@ -220,6 +330,9 @@ def run_interactive(
             "input_file_types": ",".join(sorted({Path(path).suffix.lower() for path in input_paths})),
             "event_limit_per_file": event_limit if event_limit is not None else "",
             "mixed_detector_cache_path": str(mixed_cache_path or ""),
+            "noise_mode": noise_mode,
+            "tuning_overrides": tuning_overrides,
+            "tuning_params_used": tuning_params,
         }
     )
     for warning in list(meta.get("warnings") or []):
@@ -233,6 +346,8 @@ def run_interactive(
         "spectral_event_limit_per_file": event_limit if event_limit is not None else "all",
         "spectral_save_mixed_cache": "y" if mixed_cache_path else "n",
         "spectral_mixed_cache_path": str(mixed_cache_path or prompt_defaults.get("spectral_mixed_cache_path") or ""),
+        "spectral_noise_mode": noise_mode,
+        "spectral_tuning_overrides": _serialize_tuning_overrides(tuning_overrides),
     }
     print_fn("")
     print_fn("Remembering spectral import defaults in project_config.txt.")
@@ -565,6 +680,151 @@ def _normalize_input_mode(value: str) -> str:
     if lower in ("1", "cache", "mixed_cache", "mixed_detector_cache", "mixed_detector_cache_csv", "csv"):
         return "mixed_cache"
     return "raw_fcs"
+
+
+def _choose_noise_mode(log_input, print_fn, current_value: str) -> str:
+    current = str(current_value or "both").strip().lower()
+    if current not in NOISE_MODES:
+        current = "both"
+    print_fn("")
+    print_fn("Choose noise subtraction mode.")
+    print_fn("This controls how the unmixing engine handles negative/background signal.")
+    print_fn("0 : per_marker_only")
+    print_fn("1 : background_only")
+    print_fn("2 : both")
+    print_fn("3 : mean")
+    default_index = {"per_marker_only": "0", "background_only": "1", "both": "2", "mean": "3"}.get(current, "2")
+    prompt_meta = {
+        "options": [
+            {
+                "value": "0",
+                "label": "per_marker_only",
+                "description": "Subtract each marker's negative mean from its positive mean. No global background NNLS column.",
+            },
+            {
+                "value": "1",
+                "label": "background_only",
+                "description": "No per-marker subtraction. Add pooled negative mean as extra NNLS column.",
+            },
+            {
+                "value": "2",
+                "label": "both",
+                "description": "Both per-marker subtraction and background NNLS column (current default).",
+            },
+            {
+                "value": "3",
+                "label": "mean",
+                "description": "Subtract a single shared negative profile from all markers.",
+            },
+        ]
+    }
+    raw = str(_call_input(log_input, "noise mode number: ", default=default_index, prompt_meta=prompt_meta)).strip()
+    mapping = {"0": "per_marker_only", "1": "background_only", "2": "both", "3": "mean"}
+    if raw in mapping:
+        return mapping[raw]
+    if raw in NOISE_MODES:
+        return raw
+    return current
+
+
+def _choose_tuning_overrides(log_input, print_fn, strategy: str, current_overrides: dict) -> dict:
+    core = load_core()
+    defaults = core.DEFAULT_TUNING_PARAMETERS
+    strategy_params = list(STRATEGY_TUNABLE_PARAMS.get(strategy, []))
+    available_params = strategy_params + SHARED_TUNABLE_PARAMS
+    noise_handled = {"reference_negative_subtraction_strength", "background_component_enabled", "shared_negative_subtraction_enabled"}
+    seen = set()
+    deduped = []
+    for p in available_params:
+        if p not in seen and p not in noise_handled:
+            seen.add(p)
+            deduped.append(p)
+    available_params = deduped
+    overrides = dict(current_overrides or {})
+    for k in list(overrides):
+        if k not in defaults:
+            overrides.pop(k)
+
+    print_fn("")
+    print_fn("Tune parameters (send blank when done).")
+    print_fn("Available parameters for strategy '" + strategy + "':")
+    for idx, param in enumerate(available_params):
+        current_val = overrides.get(param, defaults.get(param, "?"))
+        suffix = " [override]" if param in overrides else ""
+        print_fn(f"  {idx} : {param} = {current_val}{suffix}")
+    print_fn("Enter a parameter number to change its value, or send blank when done.")
+
+    def _build_meta():
+        return {
+            "options": [
+                {"value": str(i), "label": p,
+                 "description": str(overrides.get(p, defaults.get(p, "?")))
+                                + (" [override]" if p in overrides else "")}
+                for i, p in enumerate(available_params)
+            ],
+            "done_cue": True,
+        }
+
+    while True:
+        raw = str(_call_input(
+            log_input, "parameter number (blank when done): ",
+            default="", prompt_meta=_build_meta()
+        )).strip()
+        if raw == "":
+            break
+        param_name = None
+        if raw.isdigit():
+            idx = int(raw)
+            if 0 <= idx < len(available_params):
+                param_name = available_params[idx]
+        else:
+            if raw in defaults:
+                param_name = raw
+        if param_name is None:
+            print_fn("Unknown parameter: " + raw)
+            continue
+        current = overrides.get(param_name, defaults.get(param_name, 0.0))
+        print_fn(f"  {param_name} current value: {current}")
+        value_raw = str(_call_input(
+            log_input, f"  new value for {param_name}: ",
+            default=str(current)
+        )).strip()
+        try:
+            value = float(value_raw)
+        except ValueError:
+            print_fn("  Invalid number, keeping current value.")
+            continue
+        overrides[param_name] = value
+        print_fn(f"  {param_name} = {value}")
+
+    return overrides
+
+
+def _serialize_tuning_overrides(overrides: dict) -> str:
+    if not overrides:
+        return ""
+    return ",".join(f"{key}:{value}" for key, value in sorted(overrides.items()))
+
+
+def _deserialize_tuning_overrides(text: str) -> dict:
+    if not text or not text.strip():
+        return {}
+    overrides = {}
+    for part in text.split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        try:
+            overrides[key.strip()] = float(value.strip())
+        except ValueError:
+            continue
+    return overrides
+
+
+def _load_tuning_overrides_from_config(project_config: dict) -> dict:
+    raw = str(project_config.get("spectral_tuning_overrides", "")).strip()
+    return _deserialize_tuning_overrides(raw)
 
 
 def _choose_event_limit(log_input, print_fn, current_value: str) -> int | None:
