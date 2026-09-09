@@ -129,9 +129,24 @@ def load_core():
     if _CORE is not None:
         return _CORE
     here = Path(__file__).resolve().parent
-    path = here / "spectral_unmixing.py"
-    if not path.is_file():
-        raise FileNotFoundError(f"Could not find spectral_unmixing.py at {path}")
+    # The local spectral_unmixing.py is a shim that redirects to the real
+    # implementation.  On Windows the shim's parents[1]/"Data_extraction"
+    # resolves back to itself (case-insensitive), causing infinite recursion.
+    # Load the real implementation directly.
+    candidates = [
+        here.parent.parent / "IF_Analysis" / "Data_extraction" / "spectral_unmixing.py",
+        here / "spectral_unmixing.py",
+    ]
+    path = None
+    self_resolved = (here / "spectral_unmixing.py").resolve()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and not resolved.samefile(self_resolved):
+            path = resolved
+            break
+    if path is None:
+        # Fallback: if only the shim exists, load it and hope for the best
+        path = self_resolved
     _CORE = import_module_from_path(path, module_name="spectral_unmixing_core")
     return _CORE
 

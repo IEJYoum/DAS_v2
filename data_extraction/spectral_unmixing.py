@@ -12,7 +12,11 @@ import sys
 from pathlib import Path
 
 
-_CORE_PATH = Path(__file__).resolve().parents[1] / "Data_extraction" / "spectral_unmixing.py"
+_SELF = Path(__file__).resolve()
+_CORE_PATH = _SELF.parents[2] / "IF_Analysis" / "Data_extraction" / "spectral_unmixing.py"
+if not _CORE_PATH.is_file() or _CORE_PATH.samefile(_SELF):
+    # Fallback: original relative path (works on case-sensitive filesystems)
+    _CORE_PATH = _SELF.parents[1] / "Data_extraction" / "spectral_unmixing.py"
 _SPEC = importlib.util.spec_from_file_location("_spectral_unmixing_impl", str(_CORE_PATH))
 if _SPEC is None or _SPEC.loader is None:
     raise ImportError(f"Could not load spectral unmixing implementation from {_CORE_PATH}")
