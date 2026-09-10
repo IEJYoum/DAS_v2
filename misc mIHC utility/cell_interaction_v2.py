@@ -59,9 +59,9 @@ def _json_default(obj):
 # floor/ceiling are RAW image values (e.g., 0–255 for UINT8).
 # gate is applied AFTER normalization and smoothing, on the 0–1 map.
 POSITIVE_MARKERS = [
-    {"name": "CD11b", "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.01},
+    {"name": "CD3_FIXED", "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.01},
     #{"name": "CD44",      "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.0008},
-    {"name": "CD56",      "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.001},
+    {"name": "B220",      "floor": 5.0, "ceiling": 80.0, "weight": 1.0, "gate": 0.01},
 ]
 
 # Negative markers continuously penalize the score above their floor.  Add
@@ -73,16 +73,16 @@ NEGATIVE_MARKERS = [
 
 # Working resolution and smoothing
 WORKING_PIXEL_SIZE_UM = 4       # target analysis resolution in microns
-BLUR_SIGMA_UM = 180.0              # Gaussian blur sigma in microns
+BLUR_SIGMA_UM = 90.0              # Gaussian blur sigma in microns
 
 # Final-mask annotation rules
 #
 # Individual marker gates establish which pixels are biologically eligible.
 # FINAL_SCORE_THRESHOLD then defines the score mask. Each connected component
 # of that mask is a candidate annotation; no per-peak region growth is used.
-N_HOTSPOTS = 8                    # retain this many highest-scoring components
-FINAL_SCORE_THRESHOLD = 0.002  # final product/penalty score required per pixel
-MIN_REGION_AREA_UM2 = 1_000_000.0 # discard tiny thresholded fragments (1 mm^2)
+N_HOTSPOTS = 10                    # retain this many highest-scoring components
+FINAL_SCORE_THRESHOLD = 0.0012  # final product/penalty score required per pixel
+MIN_REGION_AREA_UM2 = 500_000.0 # discard tiny thresholded fragments (1 mm^2)
 MAX_REGION_AREA_UM2 = 10_000_000_000.0
 MORPH_CLOSE_RADIUS_UM = 32.0      # fill score-mask holes/gaps; 0 disables
 CONNECTIVITY = 8                  # 4 or 8 when defining connected components
@@ -1092,15 +1092,18 @@ def process_image(image_desc: dict,
         else:
             print(f"    Warning: could not extract contour for hotspot {acc['label']}")
 
-    geojson = {
-        "type": "FeatureCollection",
-        "features": features,
-    }
-
-    geojson_path = os.path.join(run_dir, "annotations.geojson")
-    with open(geojson_path, "w") as f:
-        json.dump(geojson, f, indent=2, default=_json_default)
-    print(f"  Wrote {geojson_path} ({len(features)} features)")
+    geojson_path = None
+    if accepted:
+        geojson = {
+            "type": "FeatureCollection",
+            "features": features,
+        }
+        geojson_path = os.path.join(run_dir, "annotations.geojson")
+        with open(geojson_path, "w") as f:
+            json.dump(geojson, f, indent=2, default=_json_default)
+        print(f"  Wrote {geojson_path} ({len(features)} features)")
+    else:
+        print("  No accepted hotspots; annotations.geojson not written.")
 
     # --- Debug PNGs ---
     print("  Generating debug images...")
@@ -1162,7 +1165,10 @@ def process_image(image_desc: dict,
     print(f"  Wrote {params_path}")
 
     tif.close()
-    print(f"\n  Done. {len(accepted)} hotspots written to {geojson_path}")
+    if geojson_path:
+        print(f"\n  Done. {len(accepted)} hotspots written to {geojson_path}")
+    else:
+        print("\n  Done. 0 hotspots accepted; no GeoJSON written.")
 
 
 def build_run_parameters(image_desc, tiff_path, pixel_size, calibration_source,

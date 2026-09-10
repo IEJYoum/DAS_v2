@@ -1268,15 +1268,18 @@ def process_image(image_desc: dict,
         else:
             print(f"    Warning: could not extract contour for hotspot {acc['label']}")
 
-    geojson = {
-        "type": "FeatureCollection",
-        "features": features,
-    }
-
-    geojson_path = os.path.join(run_dir, "annotations.geojson")
-    with open(geojson_path, "w") as f:
-        json.dump(geojson, f, indent=2, default=_json_default)
-    print(f"  Wrote {geojson_path} ({len(features)} features)")
+    geojson_path = None
+    if accepted:
+        geojson = {
+            "type": "FeatureCollection",
+            "features": features,
+        }
+        geojson_path = os.path.join(run_dir, "annotations.geojson")
+        with open(geojson_path, "w") as f:
+            json.dump(geojson, f, indent=2, default=_json_default)
+        print(f"  Wrote {geojson_path} ({len(features)} features)")
+    else:
+        print("  No accepted hotspots; annotations.geojson not written.")
 
     # --- Debug PNGs ---
     print("  Generating debug images...")
@@ -1344,7 +1347,10 @@ def process_image(image_desc: dict,
     print(f"  Wrote {params_path}")
 
     tif.close()
-    print(f"\n  Done. {len(accepted)} hotspots written to {geojson_path}")
+    if geojson_path:
+        print(f"\n  Done. {len(accepted)} hotspots written to {geojson_path}")
+    else:
+        print("\n  Done. 0 hotspots accepted; no GeoJSON written.")
 
 
 def build_run_parameters(image_desc, tiff_path, pixel_size, calibration_source,
