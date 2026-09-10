@@ -265,11 +265,21 @@ def write_multichannel_ome(path, stack, names, pixel_size_um):
             time.sleep(SAVE_RETRY_WAIT_SECONDS)
 
 
+def multichannel_output_stem(registered_dir):
+    name = Path(registered_dir).name
+    if name.startswith("Registered_"):
+        name = name[len("Registered_"):]
+        parts = name.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            name = parts[0]
+    return name
+
+
 def main(registered_dir=None, pixel_size_um=None):
     if registered_dir is None:
         registered_dir = latest_registered_dir()
     registered_dir = Path(registered_dir)
-    output_path = registered_dir / (registered_dir.parent.name + "_multichannel.ome.tiff")
+    output_path = registered_dir / (multichannel_output_stem(registered_dir) + "_multichannel.ome.tiff")
     if pixel_size_um is None:
         pixel_size_um = DEFAULT_PIXEL_SIZE_UM
 

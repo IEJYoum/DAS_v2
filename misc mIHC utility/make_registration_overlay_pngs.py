@@ -148,7 +148,10 @@ def choose_pyramid_level(series):
 
 def normalize_for_png(image):
     image = image.astype(np.float32)
-    image = np.max(image) - image
+    p50 = np.percentile(image, 50)
+    p99 = np.percentile(image, 99)
+    if p50 > p99 * 0.5:
+        image = np.max(image) - image
     background = np.percentile(image, 30)
     image = image - background
     image[image < 0] = 0

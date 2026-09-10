@@ -27,20 +27,21 @@ OUTPUT_SUBDIR = "RegisteredImages"
 OUTPUT_DIR = None
 SKIP_COMPLETED_SLIDES = True
 CHANNEL = "gray"
-# Affects only final OME writes, not registration. "raw_channel" writes CHANNEL.
-# "red_stain_only" reads RGB SVS pixels, inverts white background to black,
-# removes common gray/K signal, removes cyan/bluish signal, and writes a
-# red-stain display channel. Recommended only for visual QC, not raw output.
-FINAL_OUTPUT_MODE = "red_stain_only"
+# Affects only final OME writes, not registration.
+# "raw_channel" writes CHANNEL from the SVS.
+# "red_stain_only" writes the earlier lightweight red-stain display channel.
+# "ss_deconv" writes an internal SS AEC CMYK-style deconvolved stain channel
+# without creating/reading registered RGB intermediates.
+FINAL_OUTPUT_MODE = "ss_deconv"
 REGISTRATION_CHANNEL = "k"
 K_CHANNEL_MODE = "common_inverted_rgb_min"
 INVERT_REGISTRATION_INTENSITY = False
 FOREGROUND_PERCENTILE = 60
 HIGH_CLIP_PERCENTILE = 80
-CONSIDER_GRADIENT = True
+CONSIDER_GRADIENT = False
 DOWNWEIGHT_GRADIENT = True
 CONSIDER_MSE = True
-CONSIDER_CORRELATION = True
+CONSIDER_CORRELATION = False
 
 FIT_SCALES = [100, 30, 10, 3, 1]
 INITIAL_SEARCH_RADIUS_FULL_PIXELS = 10000
@@ -72,6 +73,12 @@ USE_MIN_OVERLAP_GATE = True
 MIN_SIGNAL_OVERLAP_FRAC = 0.10
 MIN_COARSE_SIGNAL = 16
 OVERLAP_WEIGHT = 0.25
+# "fixed" scores every fixed-image foreground pixel in the valid overlap, so
+# fixed signal landing on moving background is penalized. "joint" is the older
+# behavior, scoring only pixels foreground in both images.
+SCORE_MASK_MODE = "fixed"
+REJECT_BAD_TRANSFORMS = True
+REJECT_LOSS_TOLERANCE = 0.0
 
 MAX_SCORE_PIXELS_PER_SHIFT = 2000000
 # Recommended True. False keeps the older faster scoring shortcut where each tested
@@ -303,16 +310,76 @@ def rgb_to_red_stain_channel(image):
     return red_stain
 
 
+def rgb_to_ss_deconv_channel(image):
+    image = np.asarray(image)
+    if image.ndim == 2:
+        return np.ascontiguousarray(image)
+    if image.ndim != 3 or image.shape[-1] < 3:
+        raise ValueError("expected RGB image for SS deconv output, got " + str(image.shape))
+
+    rgb = image[..., :3]
+    out = np.empty(rgb.shape[:2], dtype=np.uint8)
+    rows_per_chunk = 512
+    for y0 in range(0, rgb.shape[0], rows_per_chunk):
+        y1 = min(rgb.shape[0], y0 + rows_per_chunk)
+        chunk = rgb[y0:y1]
+        max_rgb = np.maximum(chunk[..., 0], chunk[..., 1])
+        max_rgb = np.maximum(max_rgb, chunk[..., 2])
+
+        if np.issubdtype(chunk.dtype, np.integer):
+            safe_max = max_rgb.astype(np.uint32)
+            nonzero = safe_max > 0
+            safe_max[~nonzero] = 1
+
+            stain = np.zeros(max_rgb.shape, dtype=np.uint32)
+            delta = max_rgb.astype(np.uint32)
+            delta -= chunk[..., 1].astype(np.uint32)
+            stain += (delta * 255) // safe_max
+
+            delta = max_rgb.astype(np.uint32)
+            delta -= chunk[..., 2].astype(np.uint32)
+            stain += (delta * 255) // safe_max
+            stain[~nonzero] = 0
+            np.minimum(stain, 255, out=stain)
+            out[y0:y1] = stain.astype(np.uint8)
+        else:
+            safe_max = max_rgb.astype(np.float32)
+            nonzero = safe_max > 0
+            safe_max[~nonzero] = 1.0
+            magenta = (safe_max - chunk[..., 1].astype(np.float32)) / safe_max
+            yellow = (safe_max - chunk[..., 2].astype(np.float32)) / safe_max
+            stain = np.clip(magenta + yellow, 0.0, 1.0)
+            stain[~nonzero] = 0.0
+            out[y0:y1] = (stain * 255.0).round().astype(np.uint8)
+
+    pixel_max = int(np.max(out))
+    if pixel_max > 0:
+        lo = pixel_max * 0.05
+        hi = pixel_max * 0.95
+        span = hi - lo
+        if span > 0:
+            lut = np.arange(256, dtype=np.float32)
+            lut = np.clip((lut - lo) / span, 0.0, 1.0)
+            lut = (lut * 255.0).round().astype(np.uint8)
+            for y0 in range(0, out.shape[0], rows_per_chunk):
+                y1 = min(out.shape[0], y0 + rows_per_chunk)
+                out[y0:y1] = lut[out[y0:y1]]
+
+    return out
+
+
 def output_channel_from_rgb(image):
     if FINAL_OUTPUT_MODE == "raw_channel":
         return np.ascontiguousarray(pick_channel(image, CHANNEL))
     if FINAL_OUTPUT_MODE == "red_stain_only":
         return rgb_to_red_stain_channel(image)
+    if FINAL_OUTPUT_MODE == "ss_deconv":
+        return rgb_to_ss_deconv_channel(image)
     raise ValueError("unknown FINAL_OUTPUT_MODE: " + str(FINAL_OUTPUT_MODE))
 
 
 def output_fill_value(image):
-    if FINAL_OUTPUT_MODE == "red_stain_only":
+    if FINAL_OUTPUT_MODE in ["red_stain_only", "ss_deconv"]:
         return 0.0
     sample = image[::MASK_PNG_DOWNSAMPLE, ::MASK_PNG_DOWNSAMPLE]
     return float(np.percentile(sample, PAD_Q))
@@ -700,6 +767,32 @@ def mse_loss(fixed_values, moving_values):
     return float(np.mean(diff * diff))
 
 
+def score_mask(fixed_mask, moving_mask):
+    if SCORE_MASK_MODE == "fixed":
+        return fixed_mask
+    if SCORE_MASK_MODE == "joint":
+        return fixed_mask & moving_mask
+    raise ValueError("unknown SCORE_MASK_MODE: " + str(SCORE_MASK_MODE))
+
+
+def min_score_overlap(fixed_signal_count, moving_signal_count):
+    if SCORE_MASK_MODE == "fixed":
+        base = fixed_signal_count
+    elif SCORE_MASK_MODE == "joint":
+        base = min(fixed_signal_count, moving_signal_count)
+    else:
+        raise ValueError("unknown SCORE_MASK_MODE: " + str(SCORE_MASK_MODE))
+    return max(1, int(base * MIN_SIGNAL_OVERLAP_FRAC))
+
+
+def score_overlap_denominator(fixed_signal_count, moving_signal_count):
+    if SCORE_MASK_MODE == "fixed":
+        return max(1, fixed_signal_count)
+    if SCORE_MASK_MODE == "joint":
+        return max(1, min(fixed_signal_count, moving_signal_count))
+    raise ValueError("unknown SCORE_MASK_MODE: " + str(SCORE_MASK_MODE))
+
+
 def score_shift(fixed, moving, dy, dx, warning_dir=None, context="", scale=None):
     slices = get_overlap_slices(fixed["shape"], moving["shape"], dy, dx)
     fy0, fy1, fx0, fx1, my0, my1, mx0, mx1 = slices
@@ -718,9 +811,9 @@ def score_shift(fixed, moving, dy, dx, warning_dir=None, context="", scale=None)
     if fixed_score.shape != moving_score.shape:
         raise ValueError("score sample shapes differ: " + str(fixed_score.shape) + " != " + str(moving_score.shape))
 
-    overlap = fixed_mask & moving_mask
+    overlap = score_mask(fixed_mask, moving_mask)
     overlap_n = int(overlap.sum())
-    min_overlap = max(1, int(min(fixed["signal_count"], moving["signal_count"]) * MIN_SIGNAL_OVERLAP_FRAC))
+    min_overlap = min_score_overlap(fixed["signal_count"], moving["signal_count"])
     if USE_MIN_OVERLAP_GATE and overlap_n < min_overlap:
         return np.inf, overlap_n
     if overlap_n == 0:
@@ -775,7 +868,7 @@ def score_shift(fixed, moving, dy, dx, warning_dir=None, context="", scale=None)
                 "fallback\tMSE-only",
             ],
         )
-    overlap_frac = overlap_n / float(max(1, min(fixed["signal_count"], moving["signal_count"])))
+    overlap_frac = overlap_n / float(score_overlap_denominator(fixed["signal_count"], moving["signal_count"]))
     score = float(np.mean(losses) + OVERLAP_WEIGHT * (1.0 - overlap_frac))
     return score, overlap_n
 
@@ -916,6 +1009,20 @@ def fit_translation_scaled(fixed_image, moving_image, image_scale, warning_dir=N
                     best_dx = dx
                 if tested == 1 or tested == total or tested % progress_step == 0:
                     progress_line(tested, total, scale_start)
+
+        if best_score is None or not np.isfinite(best_score):
+            print("    skipped: no finite score at this scale")
+            append_warning_txt(
+                warning_dir,
+                "translation scale failed",
+                [
+                    "context\t" + str(context),
+                    "scale\t" + str(scale),
+                    "best_score\t" + str(best_score),
+                    "fallback\tskipped this pyramid scale",
+                ],
+            )
+            continue
 
         best_full_dy = int(best_dy * scale)
         best_full_dx = int(best_dx * scale)
@@ -1079,9 +1186,9 @@ def score_transform_sparse(
     fixed_score, fixed_mask = normalize_values(fixed_raw, fixed_stage["floor"], fixed_stage["high"])
     moving_score, moving_mask = normalize_values(moving_raw, moving_stage["floor"], moving_stage["high"])
 
-    overlap = fixed_mask & moving_mask
+    overlap = score_mask(fixed_mask, moving_mask)
     overlap_n = int(overlap.sum())
-    min_overlap = max(1, int(min(fixed_stage["signal_count"], moving_stage["signal_count"]) * MIN_SIGNAL_OVERLAP_FRAC))
+    min_overlap = min_score_overlap(fixed_stage["signal_count"], moving_stage["signal_count"])
     if USE_MIN_OVERLAP_GATE and overlap_n < min_overlap:
         return np.inf, overlap_n
     if overlap_n == 0:
@@ -1136,7 +1243,7 @@ def score_transform_sparse(
                 "fallback\tMSE-only",
             ],
         )
-    overlap_frac = overlap_n / float(max(1, min(fixed_stage["signal_count"], moving_stage["signal_count"])))
+    overlap_frac = overlap_n / float(score_overlap_denominator(fixed_stage["signal_count"], moving_stage["signal_count"]))
     score = float(np.mean(losses) + OVERLAP_WEIGHT * (1.0 - overlap_frac))
     return score, overlap_n
 
@@ -1293,8 +1400,8 @@ def loss_for_shift(
 
 
 def format_loss(value):
-    if np.isinf(value):
-        return "inf"
+    if not np.isfinite(value):
+        return str(value)
     return "{:.6f}".format(value)
 
 
@@ -1302,6 +1409,16 @@ def format_shift(value):
     if is_integer_shift(value):
         return str(int(round(float(value))))
     return "{:.3f}".format(float(value))
+
+
+def transform_rejection_reason(initial_loss, final_loss):
+    if not REJECT_BAD_TRANSFORMS:
+        return ""
+    if not np.isfinite(final_loss):
+        return "final_loss is not finite"
+    if np.isfinite(initial_loss) and final_loss > initial_loss + REJECT_LOSS_TOLERANCE:
+        return "final_loss is worse than initial_loss"
+    return ""
 
 
 def shift_image(image, dy, dx, fill_value, out_shape):
@@ -2149,6 +2266,9 @@ def save_config_txt(input_dir, output_dir, paths, fixed_path, pixel_size_um, run
     lines.append("min_signal_overlap_frac\t" + str(MIN_SIGNAL_OVERLAP_FRAC))
     lines.append("min_coarse_signal\t" + str(MIN_COARSE_SIGNAL))
     lines.append("overlap_weight\t" + str(OVERLAP_WEIGHT))
+    lines.append("score_mask_mode\t" + SCORE_MASK_MODE)
+    lines.append("reject_bad_transforms\t" + str(REJECT_BAD_TRANSFORMS))
+    lines.append("reject_loss_tolerance\t" + str(REJECT_LOSS_TOLERANCE))
     lines.append("max_score_pixels_per_shift\t" + str(MAX_SCORE_PIXELS_PER_SHIFT))
     lines.append("use_stable_score_grid\t" + str(USE_STABLE_SCORE_GRID))
     lines.append("downsample_mode\t" + DOWNSAMPLE_MODE)
@@ -2485,9 +2605,30 @@ def run_one_slide(input_dir, output_dir):
             "overlap:",
             final_overlap,
         )
+        rejection_reason = transform_rejection_reason(initial_loss, final_loss)
+        debug_role = "moving"
+        if rejection_reason != "":
+            debug_role = "rejected"
+            print("  rejected:", rejection_reason)
+            append_warning_txt(
+                output_dir,
+                "registration rejected",
+                [
+                    "context\t" + moving_path.name,
+                    "dy\t" + format_shift(full_dy),
+                    "dx\t" + format_shift(full_dx),
+                    "initial_loss\t" + format_loss(initial_loss),
+                    "translation_loss\t" + format_loss(translation_loss),
+                    "affine_loss\t" + format_loss(affine_loss),
+                    "post_affine_translation_loss\t" + format_loss(post_affine_translation_loss),
+                    "final_loss\t" + format_loss(final_loss),
+                    "reason\t" + rejection_reason,
+                    "fallback\tchannel was not saved and was omitted from output canvas",
+                ],
+            )
 
         debug_rows.append({
-            "role": "moving",
+            "role": debug_role,
             "file": moving_path.name,
             "image_scale": "{:.6f}".format(image_scale),
             "dy": format_shift(full_dy),
@@ -2507,6 +2648,12 @@ def run_one_slide(input_dir, output_dir):
         step_start = time.time()
         save_debug_txt(output_dir, debug_rows)
         add_timing(timings, output_dir, run_started, start_seconds, "running", "save_shift_debug_txt", moving_path.name, step_start)
+
+        if rejection_reason != "":
+            del moving_registration_image
+            gc.collect()
+            print("finished:", moving_path.name, "elapsed:", "{:.1f}s".format(time.time() - start))
+            continue
 
         output_records.append({
             "path": moving_path,
