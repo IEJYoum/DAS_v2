@@ -19,8 +19,7 @@ _CORE = None
 SOLVER_MODES = {
     "nnls": {"solver_mode": 0.0},
     "lasso": {"solver_mode": 1.0},
-    "nnls_normalize": {"solver_mode": 2.0},
-    "lasso_normalize": {"solver_mode": 3.0},
+    "orthogonalize": {"solver_mode": 5.0},
 }
 
 NOISE_MODES = {
@@ -95,6 +94,8 @@ STRATEGY_TUNABLE_PARAMS = {
 }
 
 SHARED_TUNABLE_PARAMS = [
+    "floor_quantile",
+    "background_quantile",
     "legacy_outlier_sd",
     "global_bright_penalty_enabled",
     "global_bright_penalty_strength",
@@ -204,6 +205,7 @@ def run_interactive(
         "spectral_mixed_cache_path",
         "spectral_noise_mode",
         "spectral_solver_mode",
+        "spectral_normalize_columns",
         "spectral_tuning_overrides",
     ]:
         if str(project_config.get(key, "")).strip() != "":
@@ -254,7 +256,7 @@ def run_interactive(
             replay_config = _load_lastrun(lastrun_default)
             if replay_config:
                 print_fn("Loaded run config. Replaying settings:")
-                for key in ("strategy", "noise_mode", "solver_mode", "stem", "event_limit_per_file"):
+                for key in ("strategy", "noise_mode", "solver_mode", "normalize_columns", "stem", "event_limit_per_file"):
                     if key in replay_config:
                         print_fn(f"  {key}: {replay_config[key]}")
                 if replay_config.get("tuning_overrides"):
@@ -272,7 +274,7 @@ def run_interactive(
             replay_config = _load_lastrun(replay_path_raw)
             if replay_config:
                 print_fn("Loaded run config from:", replay_path_raw)
-                for key in ("strategy", "noise_mode", "solver_mode", "stem", "event_limit_per_file"):
+                for key in ("strategy", "noise_mode", "solver_mode", "normalize_columns", "stem", "event_limit_per_file"):
                     if key in replay_config:
                         print_fn(f"  {key}: {replay_config[key]}")
             else:
@@ -283,6 +285,7 @@ def run_interactive(
         strategy = str(replay_config.get("strategy", "consensus_score_and_cluster"))
         noise_mode = str(replay_config.get("noise_mode", "both"))
         solver_mode = str(replay_config.get("solver_mode", "nnls"))
+        normalize_columns = bool(replay_config.get("normalize_columns", False))
         stem_default = str(replay_config.get("stem", DEFAULT_STEM))
         tuning_overrides = {}
         if isinstance(replay_config.get("tuning_overrides"), dict):
@@ -338,16 +341,38 @@ def run_interactive(
             noise_mode = _choose_noise_mode(log_input, print_fn, noise_default)
             print_fn("Noise subtraction mode:", noise_mode)
 
+            saved_overrides = _load_tuning_overrides_from_config(project_config)
+
             print_fn("")
             print_fn("Step 7: solver mode.")
             solver_default = str(prompt_defaults.get("spectral_solver_mode") or "nnls")
             solver_mode = _choose_solver_mode(log_input, print_fn, solver_default)
             print_fn("Solver mode:", solver_mode)
 
+            if solver_mode == "lasso":
+                core_defaults = load_core().DEFAULT_TUNING_PARAMETERS
+                alpha_default = saved_overrides.get("lasso_alpha", core_defaults.get("lasso_alpha", 0.01))
+                print_fn("")
+                print_fn("Lasso alpha controls sparsity strength. Higher values push more")
+                print_fn("marker coefficients to zero. Default 0.01 is mild; try 1-10 for")
+                print_fn("aggressive sparsity. Very high values (>20) may zero out all signal.")
+                alpha_raw = str(_call_input(log_input, f"lasso alpha [{alpha_default}]: ", default=str(alpha_default))).strip()
+                try:
+                    lasso_alpha = float(alpha_raw) if alpha_raw else alpha_default
+                except ValueError:
+                    lasso_alpha = alpha_default
+                saved_overrides["lasso_alpha"] = lasso_alpha
+                print_fn("Lasso alpha:", lasso_alpha)
+
+            print_fn("")
+            print_fn("Step 7b: normalize spectral columns.")
+            normalize_default = str(prompt_defaults.get("spectral_normalize_columns") or "n").lower() in ("y", "yes", "true", "1")
+            normalize_columns = _choose_normalize(log_input, print_fn, normalize_default)
+            print_fn("Normalize columns:", "yes" if normalize_columns else "no")
+
             print_fn("")
             print_fn("Step 8: tune parameters.")
-            saved_overrides = _load_tuning_overrides_from_config(project_config)
-            tuning_overrides = _choose_tuning_overrides(log_input, print_fn, strategy, saved_overrides)
+            tuning_overrides = _choose_tuning_overrides(log_input, print_fn, strategy, saved_overrides, solver_mode=solver_mode)
 
             print_fn("")
             print_fn("Step 9: choose development/cache options.")
@@ -364,6 +389,7 @@ def run_interactive(
         tuning_params = {}
         tuning_params.update(NOISE_MODES.get(noise_mode, {}))
         tuning_params.update(SOLVER_MODES.get(solver_mode, {}))
+        tuning_params["normalize_columns"] = 1.0 if normalize_columns else 0.0
         tuning_params.update(tuning_overrides)
 
         mixed_cache_path = None
@@ -382,6 +408,7 @@ def run_interactive(
         print_fn("strategy:", strategy)
         print_fn("noise subtraction:", noise_mode)
         print_fn("solver:", solver_mode)
+        print_fn("normalize columns:", "yes" if normalize_columns else "no")
         if tuning_overrides:
             print_fn("tuning overrides:", len(tuning_overrides))
             for key, value in tuning_overrides.items():
@@ -422,6 +449,7 @@ def run_interactive(
             "mixed_detector_cache_path": str(mixed_cache_path or ""),
             "noise_mode": noise_mode,
             "solver_mode": solver_mode,
+            "normalize_columns": normalize_columns,
             "tuning_overrides": tuning_overrides,
             "tuning_params_used": tuning_params,
         }
@@ -439,6 +467,7 @@ def run_interactive(
         "spectral_mixed_cache_path": str(mixed_cache_path or prompt_defaults.get("spectral_mixed_cache_path") or ""),
         "spectral_noise_mode": noise_mode,
         "spectral_solver_mode": solver_mode,
+        "spectral_normalize_columns": "y" if normalize_columns else "n",
         "spectral_tuning_overrides": _serialize_tuning_overrides(tuning_overrides),
     }
     print_fn("")
@@ -450,6 +479,7 @@ def run_interactive(
         "strategy": strategy,
         "noise_mode": noise_mode,
         "solver_mode": solver_mode,
+        "normalize_columns": normalize_columns,
         "stem": stem,
         "event_limit_per_file": event_limit if event_limit is not None else "all",
         "tuning_overrides": tuning_overrides,
@@ -793,42 +823,71 @@ def _choose_solver_mode(log_input, print_fn, current_value: str) -> str:
     print_fn("")
     print_fn("Choose solver mode.")
     print_fn("This controls how marker coefficients are found from the spectral matrix.")
+    print_fn("Each cell's detector pattern is decomposed into a sum of marker spectral")
+    print_fn("profiles. The solver finds the non-negative marker amounts that best")
+    print_fn("reconstruct the observed detector values.")
     print_fn("0 : nnls")
     print_fn("1 : lasso")
-    print_fn("2 : nnls_normalize")
-    print_fn("3 : lasso_normalize")
-    default_index = {"nnls": "0", "lasso": "1", "nnls_normalize": "2", "lasso_normalize": "3"}.get(current, "0")
+    print_fn("2 : orthogonalize")
+    default_index = {"nnls": "0", "lasso": "1", "orthogonalize": "2"}.get(current, "0")
     prompt_meta = {
         "options": [
             {
                 "value": "0",
                 "label": "nnls",
-                "description": "Standard non-negative least squares. No sparsity penalty.",
+                "description": (
+                    "Non-negative least squares (scipy.optimize.nnls). Finds the combination "
+                    "of marker profiles that best matches each cell's detector pattern, with "
+                    "all marker amounts constrained >= 0. No sparsity penalty — the solver "
+                    "will use as many markers as needed to minimize the residual, which can "
+                    "cause cross-talk between spectrally similar markers."
+                ),
             },
             {
                 "value": "1",
                 "label": "lasso",
-                "description": "L1-regularized non-negative solve. Penalizes using extra markers (sparsity).",
+                "description": (
+                    "L1-regularized non-negative solve (sklearn Lasso, positive=True). Same "
+                    "as NNLS but adds a penalty proportional to the sum of all marker "
+                    "amounts (controlled by lasso_alpha in tuning params). Higher alpha "
+                    "pushes weak/spurious marker coefficients toward zero, encouraging "
+                    "sparser solutions. Note: also suppresses legitimate signal in multi-"
+                    "positive experiment cells, so alpha must be tuned carefully."
+                ),
             },
             {
                 "value": "2",
-                "label": "nnls_normalize",
-                "description": "NNLS with column-normalized spectral matrix. Equalizes marker cost.",
-            },
-            {
-                "value": "3",
-                "label": "lasso_normalize",
-                "description": "Lasso with column-normalized matrix. Sparsity + equalized cost.",
+                "label": "orthogonalize",
+                "description": (
+                    "QR-orthogonalize the spectral matrix before solving. Decomposes the "
+                    "marker profiles into an orthogonal basis, solves NNLS in that basis, "
+                    "then maps coefficients back to original markers. Reduces cross-talk "
+                    "between correlated profiles but back-mapped coefficients may lose "
+                    "strict physical meaning. Experimental — results may differ "
+                    "significantly from standard NNLS."
+                ),
             },
         ]
     }
     raw = str(_call_input(log_input, "solver mode number: ", default=default_index, prompt_meta=prompt_meta)).strip()
-    mapping = {"0": "nnls", "1": "lasso", "2": "nnls_normalize", "3": "lasso_normalize"}
+    mapping = {"0": "nnls", "1": "lasso", "2": "orthogonalize"}
     if raw in mapping:
         return mapping[raw]
     if raw in SOLVER_MODES:
         return raw
     return current
+
+
+def _choose_normalize(log_input, print_fn, current_value: bool) -> bool:
+    print_fn("")
+    print_fn("Normalize spectral columns?")
+    print_fn("If enabled, each marker's spectral profile is scaled to unit length (L2")
+    print_fn("norm) before solving, then coefficients are rescaled afterward. This")
+    print_fn("equalizes the 'cost' of each marker in the solver — without it, brighter")
+    print_fn("markers with larger spectral profiles naturally dominate the solution.")
+    print_fn("This setting is independent of solver choice (applies to all modes).")
+    default = "y" if current_value else "n"
+    return _choose_yes_no(log_input, "normalize columns? (y/N): ", default=default)
 
 
 def _choose_noise_mode(log_input, print_fn, current_value: str) -> str:
@@ -848,22 +907,40 @@ def _choose_noise_mode(log_input, print_fn, current_value: str) -> str:
             {
                 "value": "0",
                 "label": "per_marker_only",
-                "description": "Subtract each marker's negative mean from its positive mean. No global background NNLS column.",
+                "description": (
+                    "For each marker, subtract its own negative-cell mean from its positive-cell "
+                    "mean before building the spectral profile. No global background column is "
+                    "added to the NNLS matrix. Each marker's noise floor is handled independently."
+                ),
             },
             {
                 "value": "1",
                 "label": "background_only",
-                "description": "No per-marker subtraction. Add pooled negative mean as extra NNLS column.",
+                "description": (
+                    "No per-marker negative subtraction. Instead, pool all negative cells across "
+                    "all reference files into a single 'background' profile added as an extra "
+                    "column in the NNLS matrix. The solver attributes autofluorescence/noise to "
+                    "this background column rather than to marker columns."
+                ),
             },
             {
                 "value": "2",
                 "label": "both",
-                "description": "Both per-marker subtraction and background NNLS column (current default).",
+                "description": (
+                    "Both per-marker subtraction AND a pooled background NNLS column (current "
+                    "default). Noise is modeled twice — once subtracted from each marker's "
+                    "profile, once as a solver column. May over-correct."
+                ),
             },
             {
                 "value": "3",
                 "label": "mean",
-                "description": "Subtract a single shared negative profile from all markers.",
+                "description": (
+                    "Compute a single shared negative profile (mean of all negative cells across "
+                    "all reference files), then subtract it from every marker's profile. No "
+                    "background column is added to the NNLS matrix. All markers share the same "
+                    "noise correction."
+                ),
             },
         ]
     }
@@ -876,16 +953,20 @@ def _choose_noise_mode(log_input, print_fn, current_value: str) -> str:
     return current
 
 
-def _choose_tuning_overrides(log_input, print_fn, strategy: str, current_overrides: dict) -> dict:
+def _choose_tuning_overrides(log_input, print_fn, strategy: str, current_overrides: dict, *, solver_mode: str = "nnls") -> dict:
     core = load_core()
     defaults = core.DEFAULT_TUNING_PARAMETERS
     strategy_params = list(STRATEGY_TUNABLE_PARAMS.get(strategy, []))
     available_params = strategy_params + SHARED_TUNABLE_PARAMS
-    noise_handled = {"reference_negative_subtraction_strength", "background_component_enabled", "shared_negative_subtraction_enabled"}
+    # Hide params handled by dedicated menus or irrelevant to current solver
+    hidden = {"reference_negative_subtraction_strength", "background_component_enabled",
+              "shared_negative_subtraction_enabled", "solver_mode", "normalize_columns"}
+    if solver_mode not in ("lasso", "lasso_normalize"):
+        hidden.add("lasso_alpha")
     seen = set()
     deduped = []
     for p in available_params:
-        if p not in seen and p not in noise_handled:
+        if p not in seen and p not in hidden:
             seen.add(p)
             deduped.append(p)
     available_params = deduped
