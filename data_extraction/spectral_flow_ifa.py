@@ -290,6 +290,12 @@ def run_interactive(
         tuning_overrides = {}
         if isinstance(replay_config.get("tuning_overrides"), dict):
             tuning_overrides = {k: float(v) for k, v in replay_config["tuning_overrides"].items()}
+        # When replaying an autotune run, the winning params are already in
+        # tuning_overrides.  Use consensus strategy directly so we don't
+        # re-run the sweep — the saved params reproduce the same result.
+        if strategy == "autotune" and "floor_quantile" in tuning_overrides:
+            strategy = "consensus_score_and_cluster"
+            print_fn("Replaying autotune results with consensus strategy and saved winning params.")
         event_limit_raw = replay_config.get("event_limit_per_file")
         event_limit = int(event_limit_raw) if event_limit_raw not in (None, "", "all") else None
     else:
@@ -335,44 +341,55 @@ def run_interactive(
             stem = stem.strip() or stem_default
             print_fn("Output stem:", stem)
 
-            print_fn("")
-            print_fn("Step 6: noise subtraction mode.")
-            noise_default = str(prompt_defaults.get("spectral_noise_mode") or "both")
-            noise_mode = _choose_noise_mode(log_input, print_fn, noise_default)
-            print_fn("Noise subtraction mode:", noise_mode)
-
-            saved_overrides = _load_tuning_overrides_from_config(project_config)
-
-            print_fn("")
-            print_fn("Step 7: solver mode.")
-            solver_default = str(prompt_defaults.get("spectral_solver_mode") or "nnls")
-            solver_mode = _choose_solver_mode(log_input, print_fn, solver_default)
-            print_fn("Solver mode:", solver_mode)
-
-            if solver_mode == "lasso":
-                core_defaults = load_core().DEFAULT_TUNING_PARAMETERS
-                alpha_default = saved_overrides.get("lasso_alpha", core_defaults.get("lasso_alpha", 0.01))
+            if strategy == "autotune":
+                # Autotune sets noise/solver/normalize/tuning automatically
                 print_fn("")
-                print_fn("Lasso alpha controls sparsity strength. Higher values push more")
-                print_fn("marker coefficients to zero. Default 0.01 is mild; try 1-10 for")
-                print_fn("aggressive sparsity. Very high values (>20) may zero out all signal.")
-                alpha_raw = str(_call_input(log_input, f"lasso alpha [{alpha_default}]: ", default=str(alpha_default))).strip()
-                try:
-                    lasso_alpha = float(alpha_raw) if alpha_raw else alpha_default
-                except ValueError:
-                    lasso_alpha = alpha_default
-                saved_overrides["lasso_alpha"] = lasso_alpha
-                print_fn("Lasso alpha:", lasso_alpha)
+                print_fn("Autotune selected — noise mode, solver, normalize, and tuning")
+                print_fn("parameters will be determined by a 3-level sweep that minimises")
+                print_fn("off-target signal in reference cells.")
+                noise_mode = "both"
+                solver_mode = "nnls"
+                normalize_columns = False
+                tuning_overrides = {}
+            else:
+                print_fn("")
+                print_fn("Step 6: noise subtraction mode.")
+                noise_default = str(prompt_defaults.get("spectral_noise_mode") or "both")
+                noise_mode = _choose_noise_mode(log_input, print_fn, noise_default)
+                print_fn("Noise subtraction mode:", noise_mode)
 
-            print_fn("")
-            print_fn("Step 7b: normalize spectral columns.")
-            normalize_default = str(prompt_defaults.get("spectral_normalize_columns") or "n").lower() in ("y", "yes", "true", "1")
-            normalize_columns = _choose_normalize(log_input, print_fn, normalize_default)
-            print_fn("Normalize columns:", "yes" if normalize_columns else "no")
+                saved_overrides = _load_tuning_overrides_from_config(project_config)
 
-            print_fn("")
-            print_fn("Step 8: tune parameters.")
-            tuning_overrides = _choose_tuning_overrides(log_input, print_fn, strategy, saved_overrides, solver_mode=solver_mode)
+                print_fn("")
+                print_fn("Step 7: solver mode.")
+                solver_default = str(prompt_defaults.get("spectral_solver_mode") or "nnls")
+                solver_mode = _choose_solver_mode(log_input, print_fn, solver_default)
+                print_fn("Solver mode:", solver_mode)
+
+                if solver_mode == "lasso":
+                    core_defaults = load_core().DEFAULT_TUNING_PARAMETERS
+                    alpha_default = saved_overrides.get("lasso_alpha", core_defaults.get("lasso_alpha", 0.01))
+                    print_fn("")
+                    print_fn("Lasso alpha controls sparsity strength. Higher values push more")
+                    print_fn("marker coefficients to zero. Default 0.01 is mild; try 1-10 for")
+                    print_fn("aggressive sparsity. Very high values (>20) may zero out all signal.")
+                    alpha_raw = str(_call_input(log_input, f"lasso alpha [{alpha_default}]: ", default=str(alpha_default))).strip()
+                    try:
+                        lasso_alpha = float(alpha_raw) if alpha_raw else alpha_default
+                    except ValueError:
+                        lasso_alpha = alpha_default
+                    saved_overrides["lasso_alpha"] = lasso_alpha
+                    print_fn("Lasso alpha:", lasso_alpha)
+
+                print_fn("")
+                print_fn("Step 7b: normalize spectral columns.")
+                normalize_default = str(prompt_defaults.get("spectral_normalize_columns") or "n").lower() in ("y", "yes", "true", "1")
+                normalize_columns = _choose_normalize(log_input, print_fn, normalize_default)
+                print_fn("Normalize columns:", "yes" if normalize_columns else "no")
+
+                print_fn("")
+                print_fn("Step 8: tune parameters.")
+                tuning_overrides = _choose_tuning_overrides(log_input, print_fn, strategy, saved_overrides, solver_mode=solver_mode)
 
             print_fn("")
             print_fn("Step 9: choose development/cache options.")
@@ -435,6 +452,26 @@ def run_interactive(
     finally:
         if callable(progress_clear_fn):
             progress_clear_fn()
+    # When autotune was used, extract the winning params from the core's
+    # settings so they are saved for replay.  The core merges autotune
+    # overrides into its own tuning_params copy, which lands in
+    # meta["spectral_settings"]["tuning_parameters"].
+    if strategy == "autotune":
+        core_tp = (meta.get("spectral_settings") or {}).get("tuning_parameters") or {}
+        autotune_keys = {"floor_quantile", "background_quantile",
+                         "reference_negative_subtraction_strength",
+                         "shared_negative_subtraction_enabled",
+                         "background_component_enabled"}
+        for k in autotune_keys:
+            if k in core_tp:
+                tuning_overrides[k] = core_tp[k]
+                tuning_params[k] = core_tp[k]
+        print_fn("")
+        print_fn("Autotune winning parameters:")
+        for k in sorted(autotune_keys):
+            if k in tuning_overrides:
+                print_fn(f"  {k} = {tuning_overrides[k]}")
+
     meta.update(
         {
             "data_folder": data_folder,
@@ -701,6 +738,7 @@ def _choose_strategy(log_input, print_fn, current_value: str) -> str:
     print_fn("2 : clustering_reference")
     print_fn("3 : soft_weighted_reference")
     print_fn("4 : strict_weighted_reference")
+    print_fn("5 : autotune")
     prompt_meta = {
         "options": [
             {
@@ -728,6 +766,17 @@ def _choose_strategy(log_input, print_fn, current_value: str) -> str:
                 "label": "strict_weighted_reference",
                 "description": "Use adaptive per-reference score thresholds, clear negatives, and tunable component cleanup.",
             },
+            {
+                "value": "5",
+                "label": "autotune",
+                "description": (
+                    "Automatic 3-level parameter sweep. Builds components with consensus "
+                    "strategy, then sweeps floor_quantile, background_quantile, and "
+                    "negative subtraction strength to minimise off-target signal in "
+                    "reference cells. All noise/solver/tuning choices are set automatically. "
+                    "Winning parameters are saved for replay."
+                ),
+            },
         ]
     }
     default_value = {
@@ -738,6 +787,7 @@ def _choose_strategy(log_input, print_fn, current_value: str) -> str:
         "strict_weighted_reference": "4",
         "clustering_pca_reference": "2",
         "gmm_reference": "2",
+        "autotune": "5",
     }.get(current, "0")
     raw = str(_call_input(log_input, "unmixing strategy number: ", default=default_value, prompt_meta=prompt_meta)).strip()
     if raw == "":
@@ -752,6 +802,8 @@ def _choose_strategy(log_input, print_fn, current_value: str) -> str:
         return "soft_weighted_reference"
     if raw == "4":
         return "strict_weighted_reference"
+    if raw == "5":
+        return "autotune"
     return _normalize_strategy(raw)
 
 
@@ -806,6 +858,8 @@ def _normalize_strategy(value: str) -> str:
         return "clustering_pca_reference"
     if lower in ("gmm", "gmm_reference", "gmm_clustering_reference", "6"):
         return "gmm_reference"
+    if lower in ("autotune", "autotune_consensus", "auto"):
+        return "autotune"
     return "consensus_score_and_cluster"
 
 
