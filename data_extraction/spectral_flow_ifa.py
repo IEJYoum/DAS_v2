@@ -409,6 +409,12 @@ def run_interactive(
         tuning_params["normalize_columns"] = 1.0 if normalize_columns else 0.0
         tuning_params.update(tuning_overrides)
 
+        # Autotune is a UI-level concept: the sweep runs before import,
+        # then the actual import uses consensus strategy with winning params.
+        core_strategy = strategy
+        if strategy == "autotune":
+            core_strategy = "consensus_score_and_cluster"
+
         mixed_cache_path = None
         if not replay_config:
             save_cache_default = str(prompt_defaults.get("spectral_save_mixed_cache") or "n")
@@ -435,11 +441,32 @@ def run_interactive(
         print_fn("event limit per file:", event_limit if event_limit is not None else "all")
         print_fn("detectors:", ",".join(detector_columns))
         print_fn("dfxy scatter:", ",".join(scatter_columns) or "[none]")
+        # --- Autotune: run parameter sweep BEFORE the main import ---
+        if strategy == "autotune":
+            print_fn("")
+            print_fn("Running autotune parameter sweep...")
+            autotune_result = _run_autotune_sweep(
+                core, input_paths, detector_columns, scatter_columns,
+                event_limit,
+                progress_fn=lambda phase: _tick_progress(progress_tick_fn, phase),
+                print_fn=print_fn,
+            )
+            if autotune_result:
+                tuning_overrides.update(autotune_result)
+                tuning_params.update(autotune_result)
+                print_fn("")
+                print_fn("Autotune winning parameters applied:")
+                for k in sorted(autotune_result):
+                    print_fn(f"  {k} = {autotune_result[k]}")
+            else:
+                print_fn("Autotune returned no results, using defaults.")
+            print_fn("")
+
         print_fn("Running spectral import now.")
 
         out_df, out_obs, out_dfxy, meta = core.run_import(
             input_paths=input_paths,
-            strategy=strategy,
+            strategy=core_strategy,
             detector_columns=detector_columns,
             scatter_columns=scatter_columns,
             event_limit_per_file=event_limit,
@@ -452,26 +479,6 @@ def run_interactive(
     finally:
         if callable(progress_clear_fn):
             progress_clear_fn()
-    # When autotune was used, extract the winning params from the core's
-    # settings so they are saved for replay.  The core merges autotune
-    # overrides into its own tuning_params copy, which lands in
-    # meta["spectral_settings"]["tuning_parameters"].
-    if strategy == "autotune":
-        core_tp = (meta.get("spectral_settings") or {}).get("tuning_parameters") or {}
-        autotune_keys = {"floor_quantile", "background_quantile",
-                         "reference_negative_subtraction_strength",
-                         "shared_negative_subtraction_enabled",
-                         "background_component_enabled"}
-        for k in autotune_keys:
-            if k in core_tp:
-                tuning_overrides[k] = core_tp[k]
-                tuning_params[k] = core_tp[k]
-        print_fn("")
-        print_fn("Autotune winning parameters:")
-        for k in sorted(autotune_keys):
-            if k in tuning_overrides:
-                print_fn(f"  {k} = {tuning_overrides[k]}")
-
     meta.update(
         {
             "data_folder": data_folder,
@@ -676,6 +683,268 @@ def _choose_path(log_input, current_value: str, label: str, *, mkdir: bool = Fal
             current_value = value
             continue
         return os.path.normpath(str(resolved))
+
+
+# ---------------------------------------------------------------------------
+# Autotune: 3-level parameter sweep for matrix construction params
+# ---------------------------------------------------------------------------
+
+_AUTOTUNE_COARSE_GRID = {
+    "floor_quantile": [0.0, 0.05, 0.10, 0.20, 0.35],
+    "background_quantile": [0.50, 0.75, 0.90, 0.99],
+    # The core clamps shared-neg strength to max(..., 1.0), so sweep >= 1.
+    # neg_strength=0 is tested via shared_negative_subtraction_enabled=0.
+    "reference_negative_subtraction_strength": [1.0, 1.5, 2.0, 3.0],
+}
+_AUTOTUNE_MAX_CELLS_PER_MARKER = 200
+_AUTOTUNE_ON_TARGET_FLOOR = 0.01
+_EPS = 1.0e-9
+
+
+def _autotune_refine_grid(original_values: list[float], best: float, n_points: int = 3) -> list[float]:
+    """Create a refined grid around *best* using the nearest neighbours."""
+    import numpy as _np
+    vals = sorted(set(original_values))
+    idx = min(range(len(vals)), key=lambda i: abs(vals[i] - best))
+    lo = vals[max(0, idx - 1)]
+    hi = vals[min(len(vals) - 1, idx + 1)]
+    return [round(v, 6) for v in _np.linspace(lo, hi, n_points).tolist()]
+
+
+def _autotune_score_combo(
+    mean_profiles: dict,
+    bg_all,
+    ref_groups: dict,
+    detector_columns: list[str],
+    floor_q: float,
+    bg_q: float,
+    neg_strength: float,
+    use_shared_neg: bool,
+) -> float:
+    """Score one (floor_q, bg_q, neg_strength) combo.  Lower is better."""
+    import numpy as _np
+    import pandas as _pd
+    from scipy.optimize import nnls as _nnls
+
+    cols = {m: p.copy() for m, p in mean_profiles.items()}
+
+    # --- shared negative subtraction ---
+    if use_shared_neg and neg_strength > 0 and bg_all is not None:
+        shared_neg = bg_all.quantile(bg_q, axis=0).clip(lower=0)
+        for marker in cols:
+            cols[marker] = (cols[marker] - neg_strength * shared_neg).clip(lower=0)
+
+    # --- shared floor removal ---
+    if len(cols) >= 2:
+        pm = _pd.DataFrame(cols)
+        floor = pm.quantile(floor_q, axis=1).clip(lower=0)
+        for marker in cols:
+            cols[marker] = (cols[marker] - floor).clip(lower=0)
+
+    matrix_df = _pd.DataFrame(cols)
+    for dc in detector_columns:
+        if dc not in matrix_df.index:
+            matrix_df.loc[dc] = 0.0
+    matrix_df = matrix_df.loc[detector_columns]
+    s = matrix_df.values.astype(float)
+
+    if s.sum() < _EPS:
+        return float("inf")
+
+    markers = list(matrix_df.columns)
+    total_off = 0.0
+    total_on = 0.0
+    n_cells = 0
+
+    for expected_marker, ref_df in ref_groups.items():
+        if expected_marker not in markers:
+            continue
+        on_idx = markers.index(expected_marker)
+        y = ref_df[detector_columns].values.astype(float)
+        for i in range(y.shape[0]):
+            try:
+                coef, _ = _nnls(s, y[i, :])
+            except Exception:
+                continue
+            total_on += coef[on_idx]
+            total_off += coef.sum() - coef[on_idx]
+            n_cells += 1
+
+    if n_cells == 0:
+        return float("inf")
+
+    off_per_cell = total_off / n_cells
+    on_per_cell = total_on / n_cells
+    penalty = 1e6 if on_per_cell < _AUTOTUNE_ON_TARGET_FLOOR else 0.0
+    return off_per_cell + penalty
+
+
+def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
+                        event_limit, progress_fn, print_fn):
+    """Build components via core functions, then sweep matrix params.
+
+    Returns a dict of winning tuning-param overrides, or empty dict on failure.
+    """
+    import numpy as _np
+    import pandas as _pd
+    from itertools import product as _product
+
+    tp = core.resolve_tuning_parameters(None)
+
+    print_fn("Autotune | building raw detector data and reference components...")
+    raw_df, obs, dfxy, audit_rows, warnings = core.build_raw_detector_triplet(
+        input_paths=input_paths,
+        detector_columns=detector_columns,
+        scatter_columns=scatter_columns,
+        import_mode="consensus_score_and_cluster",
+        event_limit_per_file=event_limit,
+        random_seed=0,
+        tuning_params=tp,
+        progress_fn=progress_fn,
+    )
+    work_df = core.legacy_log_transform(raw_df, tuning_params=tp)
+
+    reference_map = core._reference_marker_by_obs(obs)
+    if len(reference_map) == 0:
+        reference_map = core._reference_marker_by_path(input_paths)
+    if len(reference_map) == 0:
+        print_fn("Autotune | no reference files found, skipping autotune.")
+        return {}
+
+    obs["spectral_file_role"] = "sample"
+    obs["reference_marker"] = ""
+    for source_path, marker in reference_map.items():
+        key = obs["source_path"].astype(str) == source_path
+        obs.loc[key, "spectral_file_role"] = "reference"
+        obs.loc[key, "reference_marker"] = marker
+
+    # Build components using consensus (score AND cluster agree)
+    components: dict[str, list] = {}
+    background_frames: list = []
+    for source_path, marker in reference_map.items():
+        idx = obs.index[obs["source_path"].astype(str) == source_path]
+        if len(idx) == 0:
+            continue
+        ref_df = work_df.loc[idx, :]
+        score_labels, score_values, weights = core.weighted_score_labels(ref_df, tuning_params=tp)
+        cluster_labels = core.cluster_positive_labels(ref_df, tuning_params=tp)
+        pos_key = (score_labels == 1) & (cluster_labels == 1)
+        neg_key = (score_labels == 0) & (cluster_labels == 0)
+
+        if int(neg_key.sum()) > 0:
+            background_frames.append(ref_df.loc[neg_key, :])
+        if int(pos_key.sum()) == 0:
+            continue
+        component = core.hard_key_component(ref_df, pos_key, neg_key, tuning_params=tp)
+        if component is not None and _np.isfinite(component.values).all():
+            components.setdefault(marker, []).append(component)
+
+    if len(components) == 0:
+        print_fn("Autotune | no usable components, skipping autotune.")
+        return {}
+
+    # Build mean profiles
+    mean_profiles = {
+        m: _pd.concat(series_list, axis=1).mean(axis=1)
+        for m, series_list in components.items()
+    }
+    detector_cols = list(work_df.columns)
+
+    # Subsample reference cells per marker
+    ref_groups: dict[str, _pd.DataFrame] = {}
+    for marker in mean_profiles:
+        mask = (obs["spectral_file_role"] == "reference") & (obs["reference_marker"] == marker)
+        idx = obs.index[mask]
+        if len(idx) == 0:
+            continue
+        rdf = work_df.loc[idx]
+        if len(rdf) > _AUTOTUNE_MAX_CELLS_PER_MARKER:
+            rdf = rdf.sample(n=_AUTOTUNE_MAX_CELLS_PER_MARKER, random_state=0)
+        ref_groups[marker] = rdf
+
+    if len(ref_groups) == 0:
+        print_fn("Autotune | no reference cells found, skipping autotune.")
+        return {}
+
+    total_ref = sum(len(df) for df in ref_groups.values())
+    print_fn(f"Autotune | {total_ref} reference cells across {len(ref_groups)} markers")
+
+    bg_all = _pd.concat(background_frames, axis=0) if len(background_frames) > 0 else None
+
+    # --- Coarse sweep: shared_neg ON combos + shared_neg OFF combos ---
+    grid = _AUTOTUNE_COARSE_GRID
+    fq_vals = grid["floor_quantile"]
+    bq_vals = grid["background_quantile"]
+    ns_vals = grid["reference_negative_subtraction_strength"]
+
+    # Shared-neg-ON combos
+    combos_on = [(fq, bq, ns, True) for fq, bq, ns in _product(fq_vals, bq_vals, ns_vals)]
+    # Shared-neg-OFF combos (neg_strength irrelevant, bg_q irrelevant)
+    combos_off = [(fq, 0.50, 0.0, False) for fq in fq_vals]
+    combos = combos_on + combos_off
+
+    print_fn(f"Autotune | coarse sweep: {len(combos)} combos")
+    best_score = float("inf")
+    best_combo = (0.0, 0.50, 1.0, True)
+    for step, (fq, bq, ns, use_sn) in enumerate(combos, 1):
+        score = _autotune_score_combo(mean_profiles, bg_all, ref_groups, detector_cols, fq, bq, ns, use_sn)
+        if score < best_score:
+            best_score = score
+            best_combo = (fq, bq, ns, use_sn)
+        if step % 20 == 0 or step == len(combos):
+            if progress_fn:
+                progress_fn(f"Spectral autotune | coarse {step}/{len(combos)} | best={best_score:.4f}")
+
+    best_use_sn = best_combo[3]
+    print_fn(f"Autotune | coarse best: floor_q={best_combo[0]} bg_q={best_combo[1]} neg_str={best_combo[2]} shared_neg={best_use_sn} score={best_score:.4f}")
+
+    # --- Fine sweep around best ---
+    if best_use_sn:
+        fq2 = _autotune_refine_grid(fq_vals, best_combo[0])
+        bq2 = _autotune_refine_grid(bq_vals, best_combo[1])
+        ns2 = _autotune_refine_grid(ns_vals, best_combo[2])
+        combos2 = [(fq, bq, ns, True) for fq, bq, ns in _product(fq2, bq2, ns2)]
+    else:
+        fq2 = _autotune_refine_grid(fq_vals, best_combo[0])
+        bq2 = [0.50]
+        ns2 = [0.0]
+        combos2 = [(fq, 0.50, 0.0, False) for fq in fq2]
+
+    print_fn(f"Autotune | fine sweep: {len(combos2)} combos")
+    for fq, bq, ns, use_sn in combos2:
+        score = _autotune_score_combo(mean_profiles, bg_all, ref_groups, detector_cols, fq, bq, ns, use_sn)
+        if score < best_score:
+            best_score = score
+            best_combo = (fq, bq, ns, use_sn)
+
+    # --- Finest sweep ---
+    if best_use_sn:
+        fq3 = _autotune_refine_grid(fq2, best_combo[0])
+        bq3 = _autotune_refine_grid(bq2, best_combo[1])
+        ns3 = _autotune_refine_grid(ns2, best_combo[2])
+        combos3 = [(fq, bq, ns, True) for fq, bq, ns in _product(fq3, bq3, ns3)]
+    else:
+        fq3 = _autotune_refine_grid(fq2, best_combo[0])
+        combos3 = [(fq, 0.50, 0.0, False) for fq in fq3]
+
+    print_fn(f"Autotune | finest sweep: {len(combos3)} combos")
+    for fq, bq, ns, use_sn in combos3:
+        score = _autotune_score_combo(mean_profiles, bg_all, ref_groups, detector_cols, fq, bq, ns, use_sn)
+        if score < best_score:
+            best_score = score
+            best_combo = (fq, bq, ns, use_sn)
+
+    best_fq, best_bq, best_ns, best_use_sn = best_combo
+    print_fn(f"Autotune | WINNER: floor_q={best_fq:.4f} bg_q={best_bq:.4f} neg_str={best_ns:.4f} shared_neg={best_use_sn} off_target={best_score:.4f}")
+
+    result = {
+        "floor_quantile": best_fq,
+        "background_quantile": best_bq,
+        "reference_negative_subtraction_strength": best_ns,
+        "shared_negative_subtraction_enabled": 1.0 if best_use_sn else 0.0,
+        "background_component_enabled": 0.0,
+    }
+    return result
 
 
 def _prompt_with_default(log_input, current_value: str, label: str) -> str:
