@@ -30,9 +30,14 @@ import stardist_seg_v0 as sd
 
 
 DEFAULT_TIFF = r"\\accsmb.ohsu.edu\cedar-scmeth\ChinData\CycIF_FB3_whole-section\OHSU03-L7_wholesection.ome.tif"
+DEFAULT_AF_TIFF = r"\\accsmb.ohsu.edu\cedar-scmeth\ChinData\CycIF_FB3_whole-section\OHSU03-L7_wholesection_AFrounds.ome.tif"
 DEFAULT_OUTPUT_EXT = "/IY_corrected"
 DEFAULT_DAPI_NAME = "DAPI1"
 DEFAULT_CORRECTIONS = "t,b"
+DEFAULT_Q_AF_ROUND = "all"
+DEFAULT_Q_CHANNELS = "2,3,4"
+DEFAULT_SURVIVAL_DAPI_NAME = "DAPI8Q"
+DEFAULT_SURVIVAL_LABEL_FILENAME = "survival_stardist_labels.tiff"
 DEFAULT_STARDIST_TARGET_TILES = 800
 DEFAULT_STARDIST_MAX_BLOCK_SIZE = 4096
 DEFAULT_DEBUG_PREVIEW_MAX_EDGE = 2048
@@ -60,7 +65,8 @@ DEFAULT_TILE_STAT_CHUNK_COLS = 512
 DEFAULT_BG_SAMPLE_MAX_PIXELS = 5_000_000
 
 
-def edge_gain_config():
+def edge_gain_config(tissue_dilate_full_px=None):
+    tissue_dilate = EDGE_FOLDER_TISSUE_DILATE_FULL_PX if tissue_dilate_full_px is None else tissue_dilate_full_px
     return tissue_edge_correction.EdgeGainConfig(
         gain_quantiles=tuple(float(x) for x in EDGE_FOLDER_GAIN_QUANTILES),
         gain_anchor_quantile_index=int(EDGE_FOLDER_GAIN_ANCHOR_QUANTILE_INDEX),
@@ -71,7 +77,7 @@ def edge_gain_config():
         ref_candidate_squares=int(EDGE_FOLDER_REF_CANDIDATE_SQUARES),
         ref_min_tissue_fraction=float(EDGE_FOLDER_REF_MIN_TISSUE_FRACTION),
         ref_reject_sd=float(EDGE_FOLDER_REF_REJECT_SD),
-        tissue_dilate_full_px=float(EDGE_FOLDER_TISSUE_DILATE_FULL_PX),
+        tissue_dilate_full_px=float(tissue_dilate),
         gain_rolling_window_bins=int(EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS),
         gain_tanh_fit_maxfev=int(EDGE_FOLDER_GAIN_TANH_FIT_MAXFEV),
         gain_min=float(EDGE_FOLDER_GAIN_MIN),
@@ -105,16 +111,16 @@ def parse_corrections(value):
     else:
         corrections = [ch for ch in text if ch.strip()]
 
-    allowed = {"t", "b", "e"}
+    allowed = {"q", "t", "b", "e"}
     bad = [step for step in corrections if step not in allowed]
     if bad:
         raise ValueError(
             "Unsupported correction step(s) for this wrapper: "
             + ",".join(bad)
-            + ". Supported wrapper steps are t, b, and e."
+            + ". Supported wrapper steps are q, t, b, and e."
         )
     if not corrections:
-        raise ValueError("--corrections must include at least one of t, b, e")
+        raise ValueError("--corrections must include at least one of q, t, b, e")
     return corrections
 
 
@@ -138,6 +144,127 @@ def read_tiff_info(input_path):
     return info
 
 
+def parse_int_set(value, label):
+    text = str(value or "").strip().lower()
+    if text in ("", "none"):
+        return set()
+    if text == "all":
+        return {2, 3, 4, 5}
+    out = set()
+    for item in re.split(r"[,+;\s]+", text):
+        if not item:
+            continue
+        if item.startswith("c"):
+            item = item[1:]
+        try:
+            parsed = int(item)
+        except ValueError as e:
+            raise ValueError(f"{label} must be comma-separated integers, got {value!r}") from e
+        out.add(parsed)
+    return out
+
+
+def parse_marker_filter(value):
+    text = str(value or "").strip()
+    if text == "":
+        return None
+    return {item.strip().lower() for item in re.split(r"[,+;\n]+", text) if item.strip()}
+
+
+def marker_is_selected(marker, marker_filter):
+    if marker_filter is None:
+        return True
+    return str(marker).strip().lower() in marker_filter
+
+
+def optical_channel_for_marker_index(marker_idx):
+    marker_idx = int(marker_idx)
+    if marker_idx == 0:
+        return 1
+    return 2 + ((marker_idx - 1) % 4)
+
+
+def af_channel_name_for_optical(optical_channel, af_round):
+    optical_channel = int(optical_channel)
+    round_key = str(af_round or DEFAULT_Q_AF_ROUND).strip().upper()
+    if optical_channel == 1:
+        return "DAPI8Q" if round_key == "R8Q" else "DAPI0"
+    if round_key == "R8Q":
+        return f"R8Qc{optical_channel}"
+    if round_key == "R0":
+        return f"R0c{optical_channel}"
+    raise ValueError(f"Unsupported AF round {af_round!r}; expected R8Q or R0")
+
+
+def af_channel_names_for_optical(optical_channel, af_round, available_names):
+    optical_channel = int(optical_channel)
+    round_key = str(af_round or DEFAULT_Q_AF_ROUND).strip().upper()
+    if round_key in ("ALL", "MAX"):
+        if optical_channel == 1:
+            pattern = re.compile(r"^DAPI\d*Q?$", re.IGNORECASE)
+        else:
+            pattern = re.compile(rf"^R\d+Q?c{optical_channel}$", re.IGNORECASE)
+        matches = [str(name) for name in available_names if pattern.match(str(name).strip())]
+
+        def sort_key(name):
+            low = str(name).lower()
+            if low.startswith("r0c"):
+                return (0, low)
+            if "q" in low:
+                return (1, low)
+            return (2, low)
+
+        return sorted(matches, key=sort_key)
+    return [af_channel_name_for_optical(optical_channel, round_key)]
+
+
+def normalize_crop_tuple(crop):
+    if crop is None:
+        return None
+    x0, y0, width, height = [int(v) for v in crop]
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Crop width/height must be positive, got {crop}")
+    return (x0, y0, width, height)
+
+
+def crop_shape_yx(crop):
+    x0, y0, width, height = normalize_crop_tuple(crop)
+    return int(height), int(width)
+
+
+def clip_crop_to_shape(crop, shape_yx):
+    x0, y0, width, height = normalize_crop_tuple(crop)
+    h, w = [int(v) for v in shape_yx]
+    x0 = max(0, min(x0, w))
+    y0 = max(0, min(y0, h))
+    x1 = max(x0, min(x0 + width, w))
+    y1 = max(y0, min(y0 + height, h))
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"Crop {crop} is outside image shape {shape_yx}")
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def resolve_crop_window(args, shape_yx):
+    explicit = getattr(args, "crop", None)
+    preset = str(getattr(args, "crop_preset", "") or "").strip().lower()
+    if explicit:
+        return clip_crop_to_shape(explicit, shape_yx)
+    if preset in ("", "none"):
+        return None
+    h, w = [int(v) for v in shape_yx]
+    if preset == "top-right-sixth":
+        size = max(1, int(min(h, w) // 6))
+        return clip_crop_to_shape((w - size, 0, size, size), shape_yx)
+    raise ValueError(f"Unsupported crop preset: {preset}")
+
+
+def crop_array_to_window(image, crop):
+    if crop is None:
+        return image
+    x0, y0, width, height = normalize_crop_tuple(crop)
+    return np.asarray(image)[y0 : y0 + height, x0 : x0 + width]
+
+
 def cast_channel_array(arr, dtype):
     arr = np.asarray(arr)
     if dtype is None:
@@ -145,11 +272,63 @@ def cast_channel_array(arr, dtype):
     return arr.astype(dtype, copy=False)
 
 
-def read_channel_from_tiff(input_path, idx, dtype=None, attempts=2, retry_sleep=2.0):
+def read_channel_crop_from_source(source, crop, dtype=None, attempts=2, retry_sleep=2.0):
+    crop = normalize_crop_tuple(crop)
+    x0, y0, width, height = crop
+    yx_selection = (slice(y0, y0 + height), slice(x0, x0 + width))
+    src = image_sources.coerce_channel_source(source)
+    errors = []
+
+    if src.channel_index is not None and src.channel_axis in (0, None):
+        selection = (int(src.channel_index),) + yx_selection
+    elif src.channel_index is None:
+        selection = yx_selection
+    else:
+        selection = None
+
+    if selection is not None:
+        for attempt in range(max(1, int(attempts))):
+            try:
+                arr = tiff.imread(
+                    src.path,
+                    series=int(src.series_index),
+                    level=0,
+                    selection=selection,
+                    maxworkers=1,
+                )
+                arr = np.asarray(arr)
+                if arr.ndim == 3 and arr.shape[0] == 1:
+                    arr = arr[0]
+                return cast_channel_array(arr, dtype)
+            except Exception as exc:
+                errors.append(f"crop attempt {attempt + 1}: {type(exc).__name__}: {exc}")
+                if attempt + 1 < int(attempts) and retry_sleep > 0:
+                    time.sleep(float(retry_sleep))
+
+    if selection is not None:
+        raise OSError(
+            f"Failed to read crop {crop} from {src.path}. "
+            "Crop reads require zarr-backed tifffile selection; refusing to read the full image plane as a fallback. "
+            + " | ".join(errors)
+        )
+
+    arr = image_sources.read_channel(src, dtype=dtype, attempts=attempts, retry_sleep=retry_sleep)
+    return crop_array_to_window(arr, crop)
+
+
+def read_channel_from_tiff(input_path, idx, dtype=None, attempts=2, retry_sleep=2.0, crop=None):
     sources = image_sources.iter_channel_sources(input_path)
     if int(idx) < 0 or int(idx) >= len(sources):
         raise IndexError(f"Channel index {idx} out of range for {input_path} (n={len(sources)})")
     try:
+        if crop is not None:
+            return read_channel_crop_from_source(
+                sources[int(idx)],
+                crop,
+                dtype=dtype,
+                attempts=attempts,
+                retry_sleep=retry_sleep,
+            )
         return image_sources.read_channel(
             sources[int(idx)],
             dtype=dtype,
@@ -233,6 +412,23 @@ def two_site_qc_mosaic(image, crop_size=DEFAULT_QC_CROP_SIZE):
     return np.concatenate([center, bottom_right], axis=1)
 
 
+def center_qc_crop(image, crop_size=DEFAULT_QC_CROP_SIZE):
+    image = np.asarray(image)
+    if image.ndim != 2:
+        raise ValueError(f"QC crop expects a 2D image, got shape {image.shape}")
+    crop_size = int(crop_size)
+    h, w = image.shape
+    y0 = max(0, (h - crop_size) // 2)
+    x0 = max(0, (w - crop_size) // 2)
+    return crop_with_padding(image, y0, x0, crop_size)
+
+
+def paired_center_qc_mosaic(before, after, crop_size=DEFAULT_QC_CROP_SIZE):
+    before_crop = center_qc_crop(before, crop_size=crop_size)
+    after_crop = center_qc_crop(after, crop_size=crop_size)
+    return np.concatenate([before_crop, after_crop], axis=1)
+
+
 def save_qc_crop_image(image, out_root, title, crop_size=DEFAULT_QC_CROP_SIZE, cmap="magma", colorbar=True):
     qc_dir = os.path.join(out_root, "qc_pngs")
     os.makedirs(qc_dir, exist_ok=True)
@@ -251,6 +447,11 @@ def save_qc_mosaic_image(mosaic, out_root, title, cmap="magma", colorbar=True):
     qc_dir = os.path.join(out_root, "qc_pngs")
     os.makedirs(qc_dir, exist_ok=True)
     sc.save_image(mosaic, output_path=qc_dir, title=title, cmap=cmap, COLORBAR=colorbar)
+
+
+def save_qc_image_to_dir(image, output_dir, title, cmap="magma", colorbar=True):
+    os.makedirs(output_dir, exist_ok=True)
+    sc.save_image(image, output_path=output_dir, title=title, cmap=cmap, COLORBAR=colorbar)
 
 
 def full_downsample_image(image, max_edge=DEFAULT_TILE_SUB_FULL_MAX_EDGE):
@@ -405,7 +606,7 @@ def configure_stardist_tiling(params):
     sd.seg.STARDIST_CONTEXT = int(params["context"])
 
 
-def save_wholesection_marker_outputs(marker, stim_entry, out_root, qc_crop_size=None):
+def save_wholesection_marker_outputs(marker, stim_entry, out_root, qc_crop_size=None, full_qc_max_edge=DEFAULT_TILE_SUB_FULL_MAX_EDGE):
     chan = stim_entry[0]
     raw = stim_entry[1]
     tile = stim_entry[4] if type(stim_entry[4]) != type(0) else None
@@ -431,14 +632,15 @@ def save_wholesection_marker_outputs(marker, stim_entry, out_root, qc_crop_size=
             save_qc_crop_image(tile, out_root, f"tile_sub_{safe_marker}_c{chan}_qc", crop_size=qc_crop_size, cmap="magma", colorbar=True)
             save_qc_full_downsample_image(tile, out_root, f"tile_sub_full_{safe_marker}_c{chan}_qc", max_edge=DEFAULT_TILE_SUB_FULL_MAX_EDGE, cmap="magma", colorbar=True)
         save_qc_crop_image(final, out_root, f"final_{safe_marker}_c{chan}_qc", crop_size=qc_crop_size, cmap="magma", colorbar=True)
+        save_qc_full_downsample_image(final, out_root, f"final_full_{safe_marker}_c{chan}_qc", max_edge=full_qc_max_edge, cmap="magma", colorbar=True)
     return outp
 
 
-def save_wholesection_array_outputs(marker, chan, final, out_root, raw_qc=None, tile_qc=None, tile_full_qc=None, final_qc=None):
+def save_wholesection_array_outputs(marker, chan, final, out_root, raw_qc=None, tile_qc=None, tile_full_qc=None, final_qc=None, final_full_qc=None):
     tiff_dir = os.path.join(out_root, "tiffs")
     os.makedirs(tiff_dir, exist_ok=True)
     safe_marker = safe_filename(marker)
-    outp = os.path.join(tiff_dir, f"{safe_marker}_c{chan}.tiff")
+    outp = wholesection_output_tiff_path(out_root, marker, chan)
     tmp_outp = outp + ".tmp.tiff"
     if os.path.exists(tmp_outp):
         os.remove(tmp_outp)
@@ -456,7 +658,26 @@ def save_wholesection_array_outputs(marker, chan, final, out_root, raw_qc=None, 
         save_qc_mosaic_image(tile_full_qc, out_root, f"tile_sub_full_{safe_marker}_c{chan}_qc", cmap="magma", colorbar=True)
     if final_qc is not None:
         save_qc_mosaic_image(final_qc, out_root, f"final_{safe_marker}_c{chan}_qc", cmap="magma", colorbar=True)
+    if final_full_qc is not None:
+        save_qc_mosaic_image(final_full_qc, out_root, f"final_full_{safe_marker}_c{chan}_qc", cmap="magma", colorbar=True)
     return outp
+
+
+def wholesection_output_tiff_path(out_root, marker, chan):
+    return os.path.join(out_root, "tiffs", f"{safe_filename(marker)}_c{chan}.tiff")
+
+
+def save_scaled_af_debug_images(q_image, ratio, out_root, marker, chan, af_label, args):
+    if q_image is None or not args.debug_pngs:
+        return
+    safe_marker = safe_filename(marker)
+    safe_af = safe_filename(af_label)
+    roi = center_qc_crop(q_image, crop_size=args.qc_crop_size).astype(np.float32, copy=False)
+    roi = roi * np.float32(ratio)
+    full = full_downsample_image(q_image, max_edge=args.tile_sub_full_max_edge).astype(np.float32, copy=False)
+    full = full * np.float32(ratio)
+    save_qc_mosaic_image(roi, out_root, f"q_af_scaled_roi_{safe_marker}_c{chan}_{safe_af}_qc", cmap="magma", colorbar=True)
+    save_qc_mosaic_image(full, out_root, f"q_af_scaled_full_{safe_marker}_c{chan}_{safe_af}_qc", cmap="magma", colorbar=True)
 
 
 def valid_tiff_output(path, expected_shape=None):
@@ -673,8 +894,12 @@ def compute_background_sub_sampled(base_im, tissue_mask, max_pixels=DEFAULT_BG_S
 
 
 def compute_tile_corrected_wholesection(raw_im, border_mask, qc_crop_size, tile_sub_full_max_edge=DEFAULT_TILE_SUB_FULL_MAX_EDGE, qcim_for_mask=None, min_n=10, chunk_cols=DEFAULT_TILE_STAT_CHUNK_COLS, progress_label=None, save_debug=True):
-    raw_qc = two_site_qc_mosaic(raw_im, crop_size=qc_crop_size).astype(np.float32, copy=False)
-    raw_full_qc = full_downsample_image(raw_im, max_edge=tile_sub_full_max_edge).astype(np.float32, copy=False) if save_debug else None
+    raw_qc = np.array(center_qc_crop(raw_im, crop_size=qc_crop_size), dtype=np.float32, copy=True)
+    raw_full_qc = (
+        np.array(full_downsample_image(raw_im, max_edge=tile_sub_full_max_edge), dtype=np.float32, copy=True)
+        if save_debug
+        else None
+    )
     stim = np.asarray(raw_im).astype(np.float32, copy=False)
 
     m = np.array(border_mask, dtype=bool, copy=True)
@@ -708,7 +933,7 @@ def compute_tile_corrected_wholesection(raw_im, border_mask, qc_crop_size, tile_
         m = m.T
         corr = corr.T
 
-    tile_corrected_qc = two_site_qc_mosaic(stim, crop_size=qc_crop_size).astype(np.float32, copy=False)
+    tile_corrected_qc = np.array(center_qc_crop(stim, crop_size=qc_crop_size), dtype=np.float32, copy=True)
     tile_qc = raw_qc - tile_corrected_qc
     tile_full_qc = None
     if raw_full_qc is not None:
@@ -767,15 +992,35 @@ def apply_marker_corrections(
     marker_label=None,
     edge_tissue_small=None,
     edge_tissue_info=None,
+    q_image=None,
+    q_optical_channel=None,
+    q_report=None,
 ):
     current_base = stim_entry[1]
     executed_steps = []
     bg_scalar = np.float32(0.0)
+    q_report = {} if q_report is None else q_report
 
     for i, step in enumerate(corrections):
         if marker_label:
             print(f"  {marker_label}: correction {i + 1}/{len(corrections)} ({step}) start", flush=True)
-        if step == "e":
+        if step == "q":
+            if q_image is None:
+                q_report["q_status"] = q_report.get("q_status") or "skipped_no_q_image"
+            else:
+                afsub, stats = apply_qc_sub_like_core(
+                    current_base,
+                    q_image,
+                    qc_mask,
+                    chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS,
+                )
+                stim_entry[2] = afsub
+                q_report.update(stats)
+                q_report["q_status"] = "applied"
+                if q_optical_channel is not None:
+                    q_report["q_optical_channel"] = int(q_optical_channel)
+
+        elif step == "e":
             edge_sub = sc.compute_edge_sub(
                 current_base,
                 edge_mask=mask1,
@@ -793,7 +1038,7 @@ def apply_marker_corrections(
             tile_sub = compute_tile_sub_wholesection(
                 current_base,
                 border_mask=mask3,
-                qcim_for_mask=None,
+                qcim_for_mask=q_image,
                 progress_label=marker_label,
             )
             if type(stim_entry[4]) == type(0):
@@ -864,6 +1109,204 @@ def process_marker_tb_lowmem(raw, marker, chan, out_root, mask3, qc_mask, args):
     return bg_scalar
 
 
+def process_marker_ordered_lowmem(
+    raw,
+    marker,
+    chan,
+    out_root,
+    mask3,
+    qc_mask,
+    edge_tissue_mask,
+    edge_tissue_small,
+    edge_tissue_info,
+    q_image,
+    q_optical,
+    q_af_channel,
+    q_status,
+    survival_tissue_small,
+    survival_scale,
+    do_edge,
+    corrections,
+    args,
+):
+    marker_label = f"{marker} c{chan}"
+    raw_qc = np.array(center_qc_crop(raw, crop_size=args.qc_crop_size), dtype=np.float32, copy=True) if args.debug_pngs else None
+    stim = np.asarray(raw).astype(np.float32, copy=False)
+    if stim is raw:
+        stim = np.array(stim, dtype=np.float32, copy=True)
+
+    q_report = {
+        "q_status": q_status if "q" in corrections else "not_requested",
+        "q_optical_channel": q_optical,
+        "q_af_channel": q_af_channel,
+        "edge_status": "not_requested" if "e" not in corrections else "",
+        "edge_gain_applied_pixels": "",
+    }
+    bg_scalar = np.float32(0.0)
+    tile_qc = None
+    tile_full_qc = None
+    total_steps = len(corrections)
+
+    for step_idx, step in enumerate(corrections, start=1):
+        print(f"  {marker_label}: correction {step_idx}/{total_steps} ({step}) start", flush=True)
+
+        if step == "q":
+            if q_image is None:
+                q_report["q_status"] = q_report.get("q_status") or "skipped_no_q_image"
+                print(f"  {marker_label}: correction {step_idx}/{total_steps} (q) skipped {q_report['q_status']}", flush=True)
+            else:
+                q_stats = apply_qc_sub_like_core_in_place(
+                    stim,
+                    q_image,
+                    qc_mask,
+                    chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS,
+                )
+                q_report.update(q_stats)
+                q_report["q_status"] = "applied"
+                save_scaled_af_debug_images(q_image, q_stats["q_ratio"], out_root, marker, chan, q_af_channel, args)
+                print(f"  {marker_label}: correction {step_idx}/{total_steps} (q) done", flush=True)
+
+        elif step == "e":
+            if do_edge:
+                edge_input_preview = None
+                if args.debug_pngs:
+                    edge_input_preview = np.array(
+                        full_downsample_image(stim, max_edge=DEFAULT_EDGE_FULL_MAX_EDGE),
+                        dtype=np.float32,
+                        copy=True,
+                    )
+                profile_tissue_mask = None if edge_tissue_small is not None else edge_tissue_mask
+                if profile_tissue_mask is None and edge_tissue_small is None:
+                    raise ValueError("Ordered low-memory edge correction requires edge tissue geometry")
+                edge_result = tissue_edge_correction.compute_edge_gain_profile(
+                    stim,
+                    tissue_mask=profile_tissue_mask,
+                    tissue_small=edge_tissue_small,
+                    tissue_info=edge_tissue_info,
+                    config=edge_gain_config(),
+                )
+                sc.LAST_EDGE_GAIN_REPORT = dict(edge_result.report)
+                changed = tissue_edge_correction.apply_edge_gain_in_place(
+                    stim,
+                    profile_tissue_mask,
+                    edge_result.dist_idx,
+                    edge_result.gain_curve,
+                    edge_result.scale,
+                    config=edge_gain_config(),
+                    use_distance_mask=edge_tissue_small is not None,
+                )
+                edge_result.report["gain_applied_pixels"] = int(changed)
+                if "gain_applied_pixels" not in edge_result.report["summary_order"]:
+                    edge_result.report["summary_order"].append("gain_applied_pixels")
+                edge_status = str(edge_result.report.get("status"))
+                if args.debug_pngs:
+                    edge_output_preview = np.array(
+                        full_downsample_image(stim, max_edge=DEFAULT_EDGE_FULL_MAX_EDGE),
+                        dtype=np.float32,
+                        copy=True,
+                    )
+                    edge_result.report["edge_delta_preview_stats"] = small_array_stats(edge_input_preview - edge_output_preview)
+                    edge_debug_dir = os.path.join(out_root, "edge_debug_pngs")
+                    stem = f"{safe_filename(marker)}_c{chan}"
+                    save_edge_debug_images(edge_debug_dir, stem, edge_input_preview, edge_result.gain_preview, edge_output_preview)
+                    write_edge_report(
+                        edge_report_path(edge_debug_dir, stem),
+                        stem,
+                        "ordered working image after " + ",".join(corrections[:step_idx - 1] or ["raw"]),
+                        wholesection_output_tiff_path(out_root, marker, chan),
+                        edge_result.report,
+                    )
+                    del edge_input_preview, edge_output_preview
+                q_report["edge_status"] = edge_status
+                q_report["edge_gain_applied_pixels"] = int(changed)
+                del edge_result
+                sc.release_runtime_memory()
+                print(
+                    f"  {marker_label}: correction {step_idx}/{total_steps} (e) done "
+                    f"status={edge_status} changed={changed}",
+                    flush=True,
+                )
+            else:
+                q_report["edge_status"] = "skipped_not_in_edge_markers"
+                q_report["edge_gain_applied_pixels"] = ""
+                print(f"  {marker_label}: correction {step_idx}/{total_steps} (e) skipped_not_in_edge_markers", flush=True)
+
+        elif step == "t":
+            stim, _tile_base_qc, step_tile_qc, step_tile_full_qc = compute_tile_corrected_wholesection(
+                stim,
+                border_mask=mask3,
+                qc_crop_size=args.qc_crop_size,
+                tile_sub_full_max_edge=args.tile_sub_full_max_edge,
+                qcim_for_mask=q_image,
+                chunk_cols=args.tile_stat_chunk_cols,
+                progress_label=marker_label,
+                save_debug=args.debug_pngs,
+            )
+            if args.debug_pngs:
+                if tile_qc is None:
+                    tile_qc = step_tile_qc
+                elif step_tile_qc is not None:
+                    tile_qc = tile_qc + step_tile_qc
+                if tile_full_qc is None:
+                    tile_full_qc = step_tile_full_qc
+                elif step_tile_full_qc is not None:
+                    tile_full_qc = tile_full_qc + step_tile_full_qc
+            sc.release_runtime_memory()
+            print(f"  {marker_label}: correction {step_idx}/{total_steps} (t) done", flush=True)
+
+        elif step == "b":
+            bg_scalar = compute_background_sub_sampled(
+                stim,
+                qc_mask,
+                max_pixels=args.bg_sample_max_pixels,
+            )
+            if float(bg_scalar) != 0.0:
+                np.subtract(stim, float(bg_scalar), out=stim)
+            np.maximum(stim, 0, out=stim)
+            print(f"  {marker_label}: correction {step_idx}/{total_steps} (b) done bg={float(bg_scalar):.6f}", flush=True)
+
+        else:
+            raise ValueError(f"Unsupported correction step in ordered low-memory runner: {step}")
+
+    survival_zeroed = ""
+    survival_fill_value = ""
+    if survival_tissue_small is not None:
+        print("  applying survived-tissue output mask", flush=True)
+        survival_fill_value = quantile_inside_output_mask(
+            stim,
+            qc_mask=qc_mask,
+            tissue_small=survival_tissue_small,
+            scale=survival_scale,
+            q=0.20,
+            max_pixels=args.bg_sample_max_pixels,
+        )
+        survival_zeroed = apply_output_mask_in_place(
+            stim,
+            qc_mask=qc_mask,
+            tissue_small=survival_tissue_small,
+            scale=survival_scale,
+            chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS,
+            fill_value=survival_fill_value,
+        )
+
+    if survival_fill_value != "":
+        q_report["survival_fill_value"] = float(survival_fill_value)
+    final_qc = paired_center_qc_mosaic(raw, stim, crop_size=args.qc_crop_size).astype(np.float32, copy=False) if args.debug_pngs else None
+    final_full_qc = full_downsample_image(stim, max_edge=args.tile_sub_full_max_edge).astype(np.float32, copy=False) if args.debug_pngs else None
+    save_wholesection_array_outputs(
+        marker,
+        chan,
+        stim,
+        out_root,
+        raw_qc=raw_qc,
+        tile_qc=tile_qc if args.debug_pngs else None,
+        tile_full_qc=tile_full_qc if args.debug_pngs else None,
+        final_qc=final_qc,
+        final_full_qc=final_full_qc,
+    )
+    return bg_scalar, q_report, survival_zeroed
+
+
 def write_lines(path, lines):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -921,6 +1364,7 @@ def run_segment_stage(input_path, info, out_root, label_path, args, ap, keep_lab
         dtype=None,
         attempts=args.read_attempts,
         retry_sleep=args.read_retry_sleep,
+        crop=args.crop_window,
     )
     stardist_model, stardist_normalize = sd.load_stardist_model()
     labels = sd.predict_stardist(stardist_model, stardist_normalize, dapi)
@@ -944,6 +1388,7 @@ def run_segment_stage(input_path, info, out_root, label_path, args, ap, keep_lab
             f"input_tiff: {input_path}",
             f"dapi_channel: {args.dapi_name}",
             f"dapi_channel_index: {dapi_idx}",
+            f"crop_window_xywh: {args.crop_window or 'none'}",
             f"stardist_labels: {n_labels}",
             f"label_path: {label_path if save_labels else 'not_saved'}",
             f"stardist_block_size: {stardist_tiling['block_size']}",
@@ -979,6 +1424,374 @@ def load_labels_for_correction(labels_source):
         return np.asarray(tiff.imread(labels_source))
 
 
+def ensure_working_labels(labels, working_shape_yx, crop_window=None, full_shape_yx=None):
+    labels_shape = tuple(int(v) for v in np.asarray(labels).shape[:2])
+    working_shape = tuple(int(v) for v in working_shape_yx)
+    if labels_shape == working_shape:
+        return labels
+    if crop_window is not None and full_shape_yx is not None and labels_shape == tuple(int(v) for v in full_shape_yx):
+        cropped = crop_array_to_window(labels, crop_window)
+        if tuple(int(v) for v in cropped.shape[:2]) == working_shape:
+            return cropped
+    raise ValueError(f"StarDist labels shape {labels_shape} does not match working image shape {working_shape}")
+
+
+def default_survival_label_path(out_root):
+    return os.path.join(out_root, DEFAULT_SURVIVAL_LABEL_FILENAME)
+
+
+def resolve_survival_label_path(out_root, survival_labels_path):
+    if survival_labels_path:
+        return os.path.normpath(str(survival_labels_path))
+    return default_survival_label_path(out_root)
+
+
+def q_ratio_like_core(raw, qim, qc_mask):
+    raw = np.asarray(raw, dtype=np.float32)
+    qim = np.asarray(qim)
+    qc_mask = np.asarray(qc_mask, dtype=bool)
+    raw_in = raw[qc_mask]
+    qim_in = qim[qc_mask]
+    if raw_in.size == 0 or qim_in.size == 0:
+        raw_in = raw.ravel()
+        qim_in = qim.ravel()
+
+    eps = 1e-6
+    qr = float(np.quantile(raw_in, 0.997))
+    qq = float(np.quantile(qim_in, 0.997))
+    ratio1 = qr / (qq + eps)
+
+    cap = 2.0
+    tau = 0.5
+    if ratio1 <= 1.0:
+        ratio = ratio1
+    else:
+        x = ratio1 - 1.0
+        ratio = 1.0 + (cap - 1.0) * (1.0 - np.exp(-x / tau))
+
+    return float(ratio), float(ratio1), qr, qq
+
+
+def apply_qc_sub_like_core(raw, qim, qc_mask, chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS):
+    ratio, ratio1, raw_q997, qc_q997 = q_ratio_like_core(raw, qim, qc_mask)
+    raw = np.asarray(raw, dtype=np.float32)
+    qim = np.asarray(qim)
+    qc_mask = np.asarray(qc_mask, dtype=bool)
+    afsub = raw.astype(np.float32, copy=True)
+    chunk_rows = max(1, int(chunk_rows))
+
+    for y0 in range(0, afsub.shape[0], chunk_rows):
+        y1 = min(afsub.shape[0], y0 + chunk_rows)
+        mask_chunk = qc_mask[y0:y1, :]
+        if not np.any(mask_chunk):
+            continue
+        corrected = afsub[y0:y1, :].astype(np.float32, copy=False) - qim[y0:y1, :].astype(np.float32, copy=False) * float(ratio)
+        corrected = np.clip(corrected, 0, None).astype(np.float32, copy=False)
+        view = afsub[y0:y1, :]
+        view[mask_chunk] = corrected[mask_chunk]
+        del corrected, mask_chunk, view
+
+    return afsub, {
+        "q_ratio": ratio,
+        "q_ratio_uncapped": ratio1,
+        "q_raw_q997": raw_q997,
+        "q_af_q997": qc_q997,
+    }
+
+
+def apply_qc_sub_like_core_in_place(stim, qim, qc_mask, chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS):
+    ratio, ratio1, raw_q997, qc_q997 = q_ratio_like_core(stim, qim, qc_mask)
+    stim = np.asarray(stim, dtype=np.float32)
+    qim = np.asarray(qim)
+    qc_mask = np.asarray(qc_mask, dtype=bool)
+    chunk_rows = max(1, int(chunk_rows))
+
+    for y0 in range(0, stim.shape[0], chunk_rows):
+        y1 = min(stim.shape[0], y0 + chunk_rows)
+        mask_chunk = qc_mask[y0:y1, :]
+        if not np.any(mask_chunk):
+            continue
+        view = stim[y0:y1, :]
+        corrected = view.astype(np.float32, copy=False) - qim[y0:y1, :].astype(np.float32, copy=False) * float(ratio)
+        np.maximum(corrected, 0, out=corrected)
+        view[mask_chunk] = corrected[mask_chunk]
+        del corrected, mask_chunk, view
+
+    return {
+        "q_ratio": ratio,
+        "q_ratio_uncapped": ratio1,
+        "q_raw_q997": raw_q997,
+        "q_af_q997": qc_q997,
+    }
+
+
+def prepare_q_context(corrections, args, marker_info):
+    if "q" not in corrections:
+        return None
+    af_path = os.path.normpath(str(args.af_path or DEFAULT_AF_TIFF))
+    if not os.path.isfile(af_path):
+        raise FileNotFoundError(f"Q correction requested but AF OME was not found: {af_path}")
+    af_info = read_tiff_info(af_path)
+    if tuple(int(v) for v in af_info["shape_yx"]) != tuple(int(v) for v in marker_info["full_shape_yx"]):
+        raise ValueError(
+            "AF OME shape does not match marker OME shape: "
+            f"{af_info['shape_yx']} vs {marker_info['full_shape_yx']}"
+        )
+    q_channels = set(getattr(args, "q_channels_set", None) or parse_int_set(args.q_channels, "--q-channels"))
+    bad_channels = sorted(q_channels - {2, 3, 4, 5})
+    if bad_channels:
+        raise ValueError(f"--q-channels supports optical channels 2,3,4,5; got {bad_channels}")
+    q_round = str(args.q_round or DEFAULT_Q_AF_ROUND).strip().upper()
+    if q_round not in {"R0", "R8Q", "ALL", "MAX"}:
+        raise ValueError(f"--q-round must be R0, R8Q, all, or max, got {args.q_round!r}")
+    print("Q AF path:", af_path)
+    print("Q AF round:", q_round)
+    print("Q optical channels:", ",".join(f"c{x}" for x in sorted(q_channels)) or "none")
+    return {
+        "path": af_path,
+        "info": af_info,
+        "round": q_round,
+        "channels": q_channels,
+    }
+
+
+def read_q_image_for_marker(q_context, marker_idx, args):
+    optical = optical_channel_for_marker_index(marker_idx)
+    if q_context is None:
+        return None, optical, "", "not_requested"
+    if optical not in q_context["channels"]:
+        return None, optical, "", "skipped_by_q_channel_policy"
+    af_names = af_channel_names_for_optical(
+        optical,
+        q_context["round"],
+        q_context["info"]["channel_names"],
+    )
+    if not af_names:
+        return None, optical, "", "skipped_no_matching_q_image"
+
+    qmax = None
+    loaded = []
+    for af_name in af_names:
+        try:
+            af_idx = find_channel_index(q_context["info"]["channel_names"], af_name)
+        except ValueError:
+            continue
+        print(f"  reading Q AF image {af_name} for optical c{optical}", flush=True)
+        qim = read_channel_from_tiff(
+            q_context["path"],
+            af_idx,
+            dtype=None,
+            attempts=args.read_attempts,
+            retry_sleep=args.read_retry_sleep,
+            crop=args.crop_window,
+        )
+        if qmax is None:
+            qmax = np.array(qim, copy=True)
+        else:
+            np.maximum(qmax, qim, out=qmax)
+        loaded.append(af_name)
+        del qim
+
+    if qmax is None:
+        return None, optical, "", "skipped_no_matching_q_image"
+    if len(loaded) == 1:
+        af_label = loaded[0]
+    else:
+        af_label = "max(" + ",".join(loaded) + ")"
+    return qmax, optical, af_label, "loaded"
+
+
+def quantile_inside_small_tissue_mask(image, tissue_small, scale, q=0.20, max_pixels=DEFAULT_BG_SAMPLE_MAX_PIXELS):
+    image = np.asarray(image)
+    tissue_small = np.asarray(tissue_small, dtype=bool)
+    h, w = image.shape[:2]
+    hs, ws = tissue_small.shape
+    step = max(1, int(np.ceil(np.sqrt(image.size / float(max(1, int(max_pixels)))))))
+    y_full = np.arange(0, h, step, dtype=np.float32)
+    x_full = np.arange(0, w, step, dtype=np.float32)
+    y_small = np.clip(np.floor(y_full * float(scale)).astype(np.intp), 0, hs - 1)
+    x_small = np.clip(np.floor(x_full * float(scale)).astype(np.intp), 0, ws - 1)
+    keep = tissue_small[np.ix_(y_small, x_small)]
+    vals = image[::step, ::step][keep]
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return np.float32(0.0)
+    return np.float32(np.quantile(vals, float(q)))
+
+
+def quantile_inside_output_mask(image, qc_mask=None, tissue_small=None, scale=None, q=0.20, max_pixels=DEFAULT_BG_SAMPLE_MAX_PIXELS):
+    image = np.asarray(image)
+    h, w = image.shape[:2]
+    step = max(1, int(np.ceil(np.sqrt(image.size / float(max(1, int(max_pixels)))))))
+    keep = np.ones(image[::step, ::step].shape[:2], dtype=bool)
+    if qc_mask is not None:
+        keep &= np.asarray(qc_mask, dtype=bool)[::step, ::step]
+    if tissue_small is not None:
+        if scale is None:
+            raise ValueError("scale is required with tissue_small")
+        tissue_small = np.asarray(tissue_small, dtype=bool)
+        hs, ws = tissue_small.shape
+        y_full = np.arange(0, h, step, dtype=np.float32)
+        x_full = np.arange(0, w, step, dtype=np.float32)
+        y_small = np.clip(np.floor(y_full * float(scale)).astype(np.intp), 0, hs - 1)
+        x_small = np.clip(np.floor(x_full * float(scale)).astype(np.intp), 0, ws - 1)
+        keep &= tissue_small[np.ix_(y_small, x_small)]
+    vals = image[::step, ::step][keep]
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return np.float32(0.0)
+    return np.float32(np.quantile(vals, float(q)))
+
+
+def apply_output_mask_in_place(image, qc_mask=None, tissue_small=None, scale=None, chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS, fill_value=0):
+    image = np.asarray(image)
+    if qc_mask is None and tissue_small is None:
+        return 0
+    h, w = image.shape[:2]
+    if qc_mask is not None:
+        qc_mask = np.asarray(qc_mask, dtype=bool)
+    if tissue_small is not None:
+        if scale is None:
+            raise ValueError("scale is required with tissue_small")
+        tissue_small = np.asarray(tissue_small, dtype=bool)
+        hs, ws = tissue_small.shape
+        x_small = scaled_indices(w, scale, ws)
+    else:
+        hs = ws = None
+        x_small = None
+    changed = 0
+    chunk_rows = max(1, int(chunk_rows))
+    for y0 in range(0, h, chunk_rows):
+        y1 = min(h, y0 + chunk_rows)
+        keep = np.ones((y1 - y0, w), dtype=bool)
+        if qc_mask is not None:
+            keep &= qc_mask[y0:y1, :]
+        if tissue_small is not None:
+            y_small = scaled_indices(y1 - y0, scale, hs, start=y0)
+            keep &= tissue_small[np.ix_(y_small, x_small)]
+        drop = ~keep
+        if np.any(drop):
+            view = image[y0:y1, :]
+            changed += int(np.count_nonzero(drop))
+            view[drop] = fill_value
+            del view
+        del keep, drop
+    return changed
+
+
+def apply_small_tissue_mask_in_place(image, tissue_small, scale, chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS, fill_value=0):
+    if tissue_small is None:
+        return 0
+    image = np.asarray(image)
+    tissue_small = np.asarray(tissue_small, dtype=bool)
+    h, w = image.shape[:2]
+    hs, ws = tissue_small.shape
+    x_small = scaled_indices(w, scale, ws)
+    changed = 0
+    chunk_rows = max(1, int(chunk_rows))
+    for y0 in range(0, h, chunk_rows):
+        y1 = min(h, y0 + chunk_rows)
+        y_small = scaled_indices(y1 - y0, scale, hs, start=y0)
+        keep = tissue_small[np.ix_(y_small, x_small)]
+        view = image[y0:y1, :]
+        drop = ~keep
+        if np.any(drop):
+            changed += int(np.count_nonzero(drop))
+            view[drop] = fill_value
+        del keep, drop, view
+    return changed
+
+
+def build_survival_mask_small(af_path, af_info, out_root, args):
+    if not args.survival_mask:
+        return None, None, None
+
+    dapi_idx = find_channel_index(af_info["channel_names"], args.survival_dapi_name)
+    survival_label_path = resolve_survival_label_path(out_root, args.survival_labels_path)
+    print("Survival DAPI channel:", args.survival_dapi_name, "index", dapi_idx)
+    print("Survival label path:", survival_label_path)
+
+    labels = None
+    if os.path.isfile(survival_label_path) and not args.force_survival_stardist:
+        labels = load_labels_for_correction(survival_label_path)
+        labels = ensure_working_labels(
+            labels,
+            args.working_shape_yx,
+            crop_window=args.crop_window,
+            full_shape_yx=args.full_shape_yx,
+        )
+        print("Using existing survival StarDist labels:", survival_label_path)
+    else:
+        stardist_tiling = choose_stardist_tiling(
+            args.working_shape_yx,
+            args.stardist_block_size,
+            args.stardist_min_overlap,
+            args.stardist_context,
+            args.stardist_target_tiles,
+            args.stardist_max_block_size,
+        )
+
+        configure_stardist_tiling(stardist_tiling)
+        print_stardist_tiling(stardist_tiling)
+        print("Loading survival DAPI for StarDist:", args.survival_dapi_name, flush=True)
+        dapi = read_channel_from_tiff(
+            af_path,
+            dapi_idx,
+            dtype=None,
+            attempts=args.read_attempts,
+            retry_sleep=args.read_retry_sleep,
+            crop=args.crop_window,
+        )
+        stardist_model, stardist_normalize = sd.load_stardist_model()
+        labels = sd.predict_stardist(stardist_model, stardist_normalize, dapi)
+        n_labels = int(labels.max())
+        print("Survival StarDist labels:", n_labels)
+        os.makedirs(os.path.dirname(survival_label_path), exist_ok=True)
+        tiff.imwrite(survival_label_path, labels_as_uint32_for_tiff(labels), bigtiff=True)
+        save_qc_binary_crop_image(labels, out_root, "survival_stardist_binary_mask_qc", crop_size=args.qc_crop_size)
+        save_qc_crop_image(dapi.astype(np.float32, copy=False), out_root, "survival_stardist_input_dapi_qc", crop_size=args.qc_crop_size, cmap="magma", colorbar=True)
+        write_lines(
+            os.path.join(out_root, "survival_stardist_report.txt"),
+            [
+                f"af_tiff: {af_path}",
+                f"survival_dapi_channel: {args.survival_dapi_name}",
+                f"survival_dapi_channel_index: {dapi_idx}",
+                f"crop_window_xywh: {args.crop_window or 'none'}",
+                f"survival_stardist_labels: {n_labels}",
+                f"survival_label_path: {survival_label_path}",
+                f"survival_mask_dilate_px: {args.survival_mask_dilate_px}",
+                f"stardist_block_size: {stardist_tiling['block_size']}",
+                f"stardist_min_overlap: {stardist_tiling['min_overlap']}",
+                f"stardist_context: {stardist_tiling['context']}",
+                f"stardist_tile_count: {stardist_tiling['tile_count']}",
+                f"stardist_axis_counts: {stardist_tiling['axis_counts']}",
+            ],
+        )
+        del dapi
+
+    scale = tissue_edge_correction.get_scale(*labels.shape)
+    config = edge_gain_config(tissue_dilate_full_px=args.survival_mask_dilate_px)
+    print("Building survived tissue mask from survival labels", flush=True)
+    tissue_small, info = tissue_edge_correction.build_tissue_body_small_from_labels(
+        labels,
+        scale=float(scale),
+        config=config,
+        progress_fn=lambda msg: print("  " + str(msg), flush=True),
+    )
+    info["survival_label_path"] = survival_label_path
+    info["survival_dapi_channel"] = args.survival_dapi_name
+    info["survival_dapi_channel_index"] = int(dapi_idx)
+    info["survival_crop_window_xywh"] = str(args.crop_window or "none")
+    if args.debug_pngs:
+        save_binary_full_downsample_image(
+            tissue_small,
+            os.path.join(out_root, "qc_pngs"),
+            "survival_tissue_body_small_qc",
+            max_edge=DEFAULT_EDGE_FULL_MAX_EDGE,
+        )
+    return np.asarray(tissue_small, dtype=bool), float(scale), info
+
+
 def strip_inline_comment(line):
     return str(line).split("#", 1)[0].strip()
 
@@ -1002,6 +1815,40 @@ def read_edge_marker_selection(edge_folder):
     if not selected:
         raise ValueError(f"No markers selected in {selection_path}")
     return set(selected), selection_path
+
+
+def read_ome_edge_marker_selection(input_folder, out_root):
+    del out_root
+    candidates = [os.path.join(input_folder, "edge_markers.txt")]
+    for selection_path in candidates:
+        if os.path.isfile(selection_path):
+            selected = []
+            with open(selection_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    item = strip_inline_comment(line)
+                    if item:
+                        selected.append(item.lower())
+            if not selected:
+                raise ValueError(f"No markers selected in {selection_path}")
+            return set(selected), selection_path
+    raise FileNotFoundError(
+        "OME edge correction requires edge_markers.txt beside the input OME. "
+        "Put one marker or corrected-TIFF stem per line, for example: Ki67 or Ki67_c4. "
+        f"Checked: {', '.join(candidates)}"
+    )
+
+
+def marker_matches_edge_selection(marker, chan, selected):
+    if selected is None:
+        return True
+    safe_marker = safe_filename(marker)
+    candidates = {
+        str(marker).strip().lower(),
+        safe_marker.lower(),
+        f"{marker}_c{chan}".lower(),
+        f"{safe_marker}_c{chan}".lower(),
+    }
+    return bool(candidates & selected)
 
 
 def marker_name_from_corrected_stem(stem):
@@ -1815,7 +2662,19 @@ def run_edge_folder_mode(edge_folder, labels_path, args):
 
 def run_correct_stage(input_path, info, out_root, label_path, labels_source, corrections, args):
     channel_names = info["channel_names"]
+    edge_selection = None
+    edge_selection_path = ""
+    if "e" in corrections:
+        edge_selection, edge_selection_path = read_ome_edge_marker_selection(os.path.dirname(input_path), out_root)
+        print("edge_marker_selection:", edge_selection_path)
+        print("edge_markers:", ",".join(sorted(edge_selection)))
     labels = load_labels_for_correction(labels_source)
+    labels = ensure_working_labels(
+        labels,
+        info["shape_yx"],
+        crop_window=args.crop_window,
+        full_shape_yx=args.full_shape_yx,
+    )
     print("Loaded labels:", labels.shape, labels.dtype, "max_label=", int(np.max(labels) if labels.size else 0))
 
     mask1, mask3, qc_mask, edge_tissue_mask = sc.getMasks(labels)
@@ -1845,22 +2704,59 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
         edge_tissue_info = None
     sc.release_runtime_memory()
 
+    q_context = prepare_q_context(corrections, args, info)
+    survival_tissue_small = None
+    survival_scale = None
+    survival_info = None
+    if args.survival_mask:
+        if q_context is None:
+            raise ValueError("--survival-mask requires --af-path or the default AF OME to be available")
+        survival_tissue_small, survival_scale, survival_info = build_survival_mask_small(
+            q_context["path"],
+            q_context["info"],
+            out_root,
+            args,
+        )
+
+    lowmem_ordered = True
+    if lowmem_ordered and edge_tissue_small is not None:
+        if mask1 is not None:
+            del mask1
+            mask1 = None
+        if edge_tissue_mask is not None:
+            del edge_tissue_mask
+            edge_tissue_mask = None
+        sc.release_runtime_memory()
+
     bg_lines = [
         f"input_tiff: {input_path}",
+        f"af_tiff: {q_context['path'] if q_context else 'none'}",
         f"label_path: {label_path}",
         f"COM: {','.join(sc.COM)}",
+        f"crop_window_xywh: {args.crop_window or 'none'}",
+        f"working_shape_yx: {info['shape_yx']}",
+        f"q_round: {q_context['round'] if q_context else 'none'}",
+        f"q_channels: {','.join('c' + str(x) for x in sorted(q_context['channels'])) if q_context else 'none'}",
+        f"survival_mask: {bool(survival_tissue_small is not None)}",
+        f"survival_scale: {survival_scale if survival_scale is not None else 'none'}",
+        f"survival_info: {survival_info if survival_info is not None else 'none'}",
         "",
-        "channel_index\tchannel_name\tbg_subtracted",
+        f"edge_marker_selection: {edge_selection_path or 'none'}",
+        "",
+        "channel_index\tchannel_name\toptical_channel\tq_status\tq_af_channel\tq_ratio\tq_ratio_uncapped\tq_raw_q997\tq_af_q997\tedge_status\tedge_gain_applied_pixels\tbg_subtracted\tsurvival_masked_pixels\tsurvival_fill_value",
     ]
 
     for chan_idx, marker in enumerate(channel_names):
+        if not marker_is_selected(marker, args.marker_filter):
+            continue
         chan_num = chan_idx + 1
         print(f"Processing channel {chan_num}/{len(channel_names)}: {marker}")
         existing = existing_marker_output(out_root, marker, chan_num, expected_shape=info["shape_yx"]) if args.skip_existing else None
         if existing:
             print("Skipping existing:", existing)
-            bg_lines.append(f"{chan_num}\t{marker}\tskipped_existing")
+            bg_lines.append(f"{chan_num}\t{marker}\t{optical_channel_for_marker_index(chan_idx)}\tskipped_existing\t\t\t\t\t\tskipped_existing\t\t\t\t")
             continue
+        do_edge = "e" in corrections and marker_matches_edge_selection(marker, chan_num, edge_selection)
 
         print("  reading channel image", flush=True)
         raw = read_channel_from_tiff(
@@ -1869,42 +2765,52 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
             dtype=None,
             attempts=args.read_attempts,
             retry_sleep=args.read_retry_sleep,
+            crop=args.crop_window,
         )
-        if corrections == ["t", "b"]:
-            bg_scalar = process_marker_tb_lowmem(
-                raw,
-                marker,
-                chan_num,
-                out_root,
-                mask3=mask3,
-                qc_mask=qc_mask,
-                args=args,
+        q_image, q_optical, q_af_channel, q_status = read_q_image_for_marker(q_context, chan_idx, args)
+        bg_scalar, q_report, survival_zeroed = process_marker_ordered_lowmem(
+            raw,
+            marker,
+            chan_num,
+            out_root,
+            mask3,
+            qc_mask,
+            edge_tissue_mask,
+            edge_tissue_small,
+            edge_tissue_info,
+            q_image,
+            q_optical,
+            q_af_channel,
+            q_status,
+            survival_tissue_small,
+            survival_scale,
+            do_edge,
+            corrections,
+            args,
+        )
+        del raw
+        if q_image is not None:
+            del q_image
+        bg_lines.append(
+            "\t".join(
+                [
+                    str(chan_num),
+                    str(marker),
+                    str(q_report.get("q_optical_channel", optical_channel_for_marker_index(chan_idx))),
+                    str(q_report.get("q_status", "")),
+                    str(q_report.get("q_af_channel", "")),
+                    "" if q_report.get("q_ratio") is None else f"{float(q_report['q_ratio']):.6f}",
+                    "" if q_report.get("q_ratio_uncapped") is None else f"{float(q_report['q_ratio_uncapped']):.6f}",
+                    "" if q_report.get("q_raw_q997") is None else f"{float(q_report['q_raw_q997']):.6f}",
+                    "" if q_report.get("q_af_q997") is None else f"{float(q_report['q_af_q997']):.6f}",
+                    str(q_report.get("edge_status", "not_requested" if "e" not in corrections else "")),
+                    str(q_report.get("edge_gain_applied_pixels", "")),
+                    f"{float(bg_scalar):.6f}",
+                    str(survival_zeroed),
+                    "" if q_report.get("survival_fill_value") is None else str(q_report.get("survival_fill_value", "")),
+                ]
             )
-            del raw
-        else:
-            stim_entry = make_marker_entry_no_extra_copy(chan_num, raw)
-            del raw
-
-            stim_entry, bg_scalar = apply_marker_corrections(
-                stim_entry,
-                corrections,
-                mask1=mask1,
-                mask3=mask3,
-                qc_mask=qc_mask,
-                edge_tissue_mask=edge_tissue_mask,
-                marker_label=f"{marker} c{chan_num}",
-                edge_tissue_small=edge_tissue_small,
-                edge_tissue_info=edge_tissue_info,
-            )
-            save_wholesection_marker_outputs(
-                marker,
-                stim_entry,
-                out_root,
-                qc_crop_size=args.qc_crop_size if args.debug_pngs else None,
-            )
-            del stim_entry
-
-        bg_lines.append(f"{chan_num}\t{marker}\t{float(bg_scalar):.6f}")
+        )
 
         sc.release_runtime_memory()
 
@@ -1916,6 +2822,8 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
         del edge_tissue_mask
     if edge_tissue_small is not None:
         del edge_tissue_small
+    if survival_tissue_small is not None:
+        del survival_tissue_small
     sc.release_runtime_memory()
 
 
@@ -1926,7 +2834,18 @@ def main():
     ap.add_argument("--saveext", default=DEFAULT_OUTPUT_EXT)
     ap.add_argument("--labels-path", default=None, help="StarDist label checkpoint path. Defaults to output_root/stardist_labels.tiff.")
     ap.add_argument("--dapi-name", default=DEFAULT_DAPI_NAME)
-    ap.add_argument("--corrections", default=DEFAULT_CORRECTIONS, help="Ordered correction steps. Wrapper supports t,b,e.")
+    ap.add_argument("--corrections", default=DEFAULT_CORRECTIONS, help="Ordered correction steps. Wrapper supports q,t,b,e.")
+    ap.add_argument("--af-path", default=DEFAULT_AF_TIFF, help="AF-round OME TIFF for q correction.")
+    ap.add_argument("--q-round", choices=["R0", "R8Q", "all", "max", "r0", "r8q", "ALL", "MAX"], default=DEFAULT_Q_AF_ROUND, help="AF round to use for q correction; 'all' max-combines matching AF rounds.")
+    ap.add_argument("--q-channels", default=DEFAULT_Q_CHANNELS, help="Optical channels to AF-subtract, e.g. 2,3,4 or 2,3,4,5.")
+    ap.add_argument("--markers", default="", help="Optional comma-separated marker names to process.")
+    ap.add_argument("--crop", nargs=4, type=int, metavar=("X", "Y", "W", "H"), help="Process a full-resolution crop window.")
+    ap.add_argument("--crop-preset", choices=["none", "top-right-sixth"], default="none", help="Convenience crop for quick diagnostic runs.")
+    ap.add_argument("--survival-mask", action="store_true", help="Mask final outputs to tissue surviving in the AF DAPI round.")
+    ap.add_argument("--survival-dapi-name", default=DEFAULT_SURVIVAL_DAPI_NAME)
+    ap.add_argument("--survival-labels-path", default=None, help="StarDist label checkpoint for survival DAPI. Defaults to output_root/survival_stardist_labels.tiff.")
+    ap.add_argument("--force-survival-stardist", action="store_true", help="Rerun StarDist for survival DAPI even if the survival label checkpoint exists.")
+    ap.add_argument("--survival-mask-dilate-px", type=float, default=100.0, help="Full-resolution dilation radius for survived-tissue output mask.")
     ap.add_argument("--stardist-block-size", default="auto", help="Integer pixels or 'auto'.")
     ap.add_argument("--stardist-min-overlap", default="auto", help="Integer pixels or 'auto'.")
     ap.add_argument("--stardist-context", default="auto", help="Integer pixels or 'auto'.")
@@ -1964,6 +2883,8 @@ def main():
     try:
         save_ext = normalize_save_ext(args.saveext)
         corrections = parse_corrections(args.corrections)
+        args.q_channels_set = parse_int_set(args.q_channels, "--q-channels")
+        args.marker_filter = parse_marker_filter(args.markers)
     except ValueError as e:
         ap.error(str(e))
     configure_sc_module(input_folder=input_folder, save_ext=save_ext, corrections=corrections)
@@ -1981,13 +2902,32 @@ def main():
     print("tiff_dtype:", info["dtype"])
     print("channel_count:", len(info["channel_names"]))
 
+    try:
+        crop_window = resolve_crop_window(args, info["shape_yx"])
+    except ValueError as e:
+        ap.error(str(e))
+    args.crop_window = crop_window
+    args.full_shape_yx = tuple(int(v) for v in info["shape_yx"])
+    args.working_shape_yx = crop_shape_yx(crop_window) if crop_window is not None else args.full_shape_yx
+    working_info = dict(info)
+    working_info["full_shape_yx"] = args.full_shape_yx
+    working_info["shape_yx"] = args.working_shape_yx
+    if crop_window is not None:
+        shape = tuple(int(v) for v in info["shape"])
+        if len(shape) >= 2:
+            working_info["shape"] = shape[:-2] + tuple(int(v) for v in args.working_shape_yx)
+        print("crop_window_xywh:", crop_window)
+        print("working_shape_yx:", args.working_shape_yx)
+    if args.marker_filter:
+        print("marker_filter:", ",".join(sorted(args.marker_filter)))
+
     if args.dry_run:
         if args.stage in ("all", "segment"):
-            dapi_idx = find_channel_index(info["channel_names"], args.dapi_name)
+            dapi_idx = find_channel_index(working_info["channel_names"], args.dapi_name)
             print("dapi_channel_index:", dapi_idx)
             try:
                 stardist_tiling = choose_stardist_tiling(
-                    info["shape_yx"],
+                    working_info["shape_yx"],
                     args.stardist_block_size,
                     args.stardist_min_overlap,
                     args.stardist_context,
@@ -1999,6 +2939,15 @@ def main():
             print_stardist_tiling(stardist_tiling)
         if args.stage in ("all", "correct"):
             print("correct_label_exists:", os.path.isfile(label_path))
+            if "e" in corrections:
+                edge_selection, edge_selection_path = read_ome_edge_marker_selection(input_folder, out_root)
+                print("edge_marker_selection:", edge_selection_path)
+                print("edge_markers:", ",".join(sorted(edge_selection)))
+            if "q" in corrections:
+                q_context = prepare_q_context(corrections, args, working_info)
+                print("af_channel_count:", q_context["info"]["channel_count"])
+            if args.survival_mask:
+                print("survival_label_path:", resolve_survival_label_path(out_root, args.survival_labels_path))
         print("Dry run complete.")
         return
 
@@ -2007,7 +2956,7 @@ def main():
         keep_labels = args.stage == "all" and args.no_save_stardist_labels
         labels_source, _ = run_segment_stage(
             input_path,
-            info,
+            working_info,
             out_root,
             label_path,
             args,
@@ -2025,7 +2974,7 @@ def main():
 
     run_correct_stage(
         input_path,
-        info,
+        working_info,
         out_root,
         label_path,
         labels_source,
