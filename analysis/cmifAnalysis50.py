@@ -3916,10 +3916,44 @@ def statTest(df,obs,dfxy):
             t_stat, p_val = ttest_ind(pop1,pop2)
             mstat,pval = mannwhitneyu(pop1,pop2)
             out[bm] = [p_val, pval, pop1.mean(), pop2.mean(), pop1.shape[0], pop2.shape[0]]
-        print(out)
         out = pd.DataFrame.from_dict(out,orient='index',columns = ['t-test p-val','Mann-Whitney p-val',
                                                                    uch[0]+' mean',uch[1]+' mean',uch[0]+' N datapoints',
                                                                    uch[1]+' N datapoints'])
+        # --- linear mixed effects model (optional) ---
+        for i,col in enumerate(obs.columns):
+            print(i,':',col)
+        lme_raw = input('annotation column to group by for linear mixed effects? (blank to skip) ').strip()
+        lme_col = None
+        if lme_raw != '':
+            try:
+                lme_col = obs.columns[int(lme_raw)]
+            except (ValueError, IndexError):
+                if lme_raw in obs.columns:
+                    lme_col = lme_raw
+        if lme_col and lme_col in obs.columns:
+            try:
+                import statsmodels.formula.api as smf
+            except ImportError:
+                print('statsmodels not installed, skipping LME')
+                lme_col = None
+            if lme_col:
+                fixed_col = obs.columns[ch]
+                lme_pvals = {}
+                for bm in df.columns:
+                    try:
+                        tmp = pd.DataFrame({'y': df[bm], 'group': obs[fixed_col], 'rand': obs[lme_col]}).dropna()
+                        if tmp['rand'].nunique() < 2 or tmp['group'].nunique() < 2:
+                            lme_pvals[bm] = float('nan')
+                            continue
+                        md = smf.mixedlm('y ~ group', tmp, groups=tmp['rand'])
+                        mdf = md.fit(disp=False)
+                        lme_pvals[bm] = mdf.pvalues.iloc[1]
+                    except Exception as e:
+                        print(f'LME failed for {bm}: {e}')
+                        lme_pvals[bm] = float('nan')
+                out.insert(2, 'LME p-val (group: '+lme_col+')', pd.Series(lme_pvals))
+        elif lme_col:
+            print(f'column "{lme_col}" not found in obs, skipping LME')
         print(out)
         out.to_csv(input('filename: ')+'.csv')
         print(os.getcwd(), 'saving here')
