@@ -141,10 +141,10 @@ def centered_rolling_average(values, window: int) -> np.ndarray:
     return np.convolve(padded, kernel, mode="valid").astype(np.float32, copy=False)
 
 
-def tanh_unit_gain_model(x, low, midpoint, width):
+def tanh_unit_gain_model(x, low, midpoint, width, high=1.0):
     width = np.maximum(np.asarray(width, dtype=np.float32), 1e-6)
     x = np.asarray(x, dtype=np.float32)
-    return low + (1.0 - low) * 0.5 * (1.0 + np.tanh((x - midpoint) / width))
+    return low + (float(high) - low) * 0.5 * (1.0 + np.tanh((x - midpoint) / width))
 
 
 def fit_tanh_gain_curve(gain_values, good_bins, max_bin: int, config: EdgeGainConfig) -> tuple[np.ndarray, dict]:
@@ -162,7 +162,7 @@ def fit_tanh_gain_curve(gain_values, good_bins, max_bin: int, config: EdgeGainCo
         "edge_gain_tanh_midpoint_bin": None,
         "edge_gain_tanh_width_bins": None,
         "edge_gain_tanh_rmse": None,
-        "edge_gain_tanh_upper_asymptote": 1.0,
+        "edge_gain_tanh_upper_asymptote": float(config.gain_max),
         "edge_gain_tanh_fallback_method": None,
     }
 
@@ -175,11 +175,18 @@ def fit_tanh_gain_curve(gain_values, good_bins, max_bin: int, config: EdgeGainCo
         from scipy.optimize import curve_fit
 
         low0 = float(np.clip(np.quantile(y, 0.05), config.gain_min, 0.99))
-        half_level = low0 + (1.0 - low0) * 0.5
+        half_level = low0 + (float(config.gain_max) - low0) * 0.5
         midpoint0 = float(x[np.argmin(np.abs(y - half_level))])
         width0 = float(np.clip(max(float(max_bin) * 0.15, 5.0), 1.0, max(float(max_bin) * 2.0, 1.0)))
+        fit_model = lambda x, low, midpoint, width: tanh_unit_gain_model(
+            x,
+            low,
+            midpoint,
+            width,
+            high=float(config.gain_max),
+        )
         params, _ = curve_fit(
-            tanh_unit_gain_model,
+            fit_model,
             x,
             y,
             p0=(low0, midpoint0, width0),
@@ -191,9 +198,9 @@ def fit_tanh_gain_curve(gain_values, good_bins, max_bin: int, config: EdgeGainCo
         )
         low, midpoint, width = [float(v) for v in params]
         x_all = np.arange(max_bin + 1, dtype=np.float32)
-        gain_curve = tanh_unit_gain_model(x_all, low, midpoint, width).astype(np.float32, copy=False)
+        gain_curve = tanh_unit_gain_model(x_all, low, midpoint, width, high=float(config.gain_max)).astype(np.float32, copy=False)
         gain_curve = np.clip(gain_curve, config.gain_min, config.gain_max).astype(np.float32, copy=False)
-        fit_y = tanh_unit_gain_model(x, low, midpoint, width)
+        fit_y = tanh_unit_gain_model(x, low, midpoint, width, high=float(config.gain_max))
         rmse = float(np.sqrt(np.mean((fit_y - y) ** 2)))
         stats.update(
             {

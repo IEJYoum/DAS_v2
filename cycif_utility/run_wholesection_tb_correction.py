@@ -56,12 +56,13 @@ EDGE_FOLDER_REF_REJECT_SD = 3.0
 EDGE_FOLDER_TISSUE_DILATE_FULL_PX = 100
 EDGE_FOLDER_GAIN_ROLLING_WINDOW_BINS = 27
 EDGE_FOLDER_GAIN_TANH_FIT_MAXFEV = 20000
-EDGE_FOLDER_GAIN_MIN = 0.05
-EDGE_FOLDER_GAIN_MAX = 1.0
+EDGE_FOLDER_GAIN_MIN = 0.5
+EDGE_FOLDER_GAIN_MAX = 1.5
 EDGE_FOLDER_GAIN_HIST_BINS = 8192
 EDGE_FOLDER_GAIN_HIST_MAX = 65535.0
 EDGE_FOLDER_GAIN_CHUNK_ROWS = 256
 DEFAULT_TILE_STAT_CHUNK_COLS = 512
+DEFAULT_TILE_COMPONENT_GAIN = 1.15
 DEFAULT_BG_SAMPLE_MAX_PIXELS = 5_000_000
 
 
@@ -636,7 +637,7 @@ def save_wholesection_marker_outputs(marker, stim_entry, out_root, qc_crop_size=
     return outp
 
 
-def save_wholesection_array_outputs(marker, chan, final, out_root, raw_qc=None, tile_qc=None, tile_full_qc=None, final_qc=None, final_full_qc=None):
+def save_wholesection_array_outputs(marker, chan, final, out_root, raw_qc=None, raw_full_qc=None, tile_qc=None, tile_full_qc=None, final_qc=None, final_full_qc=None):
     tiff_dir = os.path.join(out_root, "tiffs")
     os.makedirs(tiff_dir, exist_ok=True)
     safe_marker = safe_filename(marker)
@@ -652,6 +653,8 @@ def save_wholesection_array_outputs(marker, chan, final, out_root, raw_qc=None, 
         print("  writing QC crop PNGs", flush=True)
     if raw_qc is not None:
         save_qc_mosaic_image(raw_qc, out_root, f"raw_{safe_marker}_c{chan}_qc", cmap="magma", colorbar=True)
+    if raw_full_qc is not None:
+        save_qc_mosaic_image(raw_full_qc, out_root, f"raw_full_{safe_marker}_c{chan}_qc", cmap="magma", colorbar=True)
     if tile_qc is not None:
         save_qc_mosaic_image(tile_qc, out_root, f"tile_sub_{safe_marker}_c{chan}_qc", cmap="magma", colorbar=True)
     if tile_full_qc is not None:
@@ -678,6 +681,15 @@ def save_scaled_af_debug_images(q_image, ratio, out_root, marker, chan, af_label
     full = full * np.float32(ratio)
     save_qc_mosaic_image(roi, out_root, f"q_af_scaled_roi_{safe_marker}_c{chan}_{safe_af}_qc", cmap="magma", colorbar=True)
     save_qc_mosaic_image(full, out_root, f"q_af_scaled_full_{safe_marker}_c{chan}_{safe_af}_qc", cmap="magma", colorbar=True)
+
+
+def save_after_step_debug_image(image, out_root, marker, chan, step_name, args):
+    if image is None or not args.debug_pngs:
+        return
+    safe_marker = safe_filename(marker)
+    safe_step = safe_filename(step_name)
+    full = np.array(full_downsample_image(image, max_edge=args.tile_sub_full_max_edge), dtype=np.float32, copy=True)
+    save_qc_mosaic_image(full, out_root, f"after_{safe_step}_{safe_marker}_c{chan}_qc", cmap="magma", colorbar=True)
 
 
 def valid_tiff_output(path, expected_shape=None):
@@ -891,6 +903,114 @@ def compute_background_sub_sampled(base_im, tissue_mask, max_pixels=DEFAULT_BG_S
     if vals.size == 0:
         return np.float32(0.0)
     return np.float32(np.quantile(vals, 0.20))
+
+
+def sampled_positive_quantile(image, mask=None, q=0.99, max_pixels=DEFAULT_BG_SAMPLE_MAX_PIXELS):
+    image = np.asarray(image)
+    max_pixels = max(1, int(max_pixels))
+    step = max(1, int(np.ceil(np.sqrt(image.size / float(max_pixels)))))
+    vals = image[::step, ::step]
+    if mask is not None:
+        vals = vals[np.asarray(mask, dtype=bool)[::step, ::step]]
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        return np.float32(0.0)
+    return np.float32(np.quantile(vals, float(q)))
+
+
+def component_weight_from_q99(current_image, raw_q99, qc_mask, args, q_report, step, q=0.99):
+    current_q99 = sampled_positive_quantile(
+        current_image,
+        mask=qc_mask,
+        q=q,
+        max_pixels=args.bg_sample_max_pixels,
+    )
+    if float(raw_q99) <= 0.0:
+        weight = 1.0
+    else:
+        weight = float(current_q99) / float(raw_q99)
+    weight = float(np.clip(weight, 0.0, 1.0))
+    prefix = f"{step}_component"
+    q_report[f"{prefix}_weight"] = weight
+    q_report[f"{prefix}_current_q99"] = float(current_q99)
+    return weight, current_q99
+
+
+def subtract_tile_component_from_raw_in_place(current_image, raw_image, tile_corrected_raw, weight, component_gain=1.0, chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS):
+    current_image = np.asarray(current_image, dtype=np.float32)
+    raw_image = np.asarray(raw_image)
+    tile_corrected_raw = np.asarray(tile_corrected_raw, dtype=np.float32)
+    chunk_rows = max(1, int(chunk_rows))
+    for y0 in range(0, current_image.shape[0], chunk_rows):
+        y1 = min(current_image.shape[0], y0 + chunk_rows)
+        view = current_image[y0:y1, :]
+        component = raw_image[y0:y1, :].astype(np.float32, copy=False) - tile_corrected_raw[y0:y1, :].astype(np.float32, copy=False)
+        np.subtract(view, component * float(weight) * float(component_gain), out=view)
+        np.maximum(view, 0, out=view)
+        del component, view
+
+
+def subtract_q_component_from_raw_in_place(current_image, q_image, q_ratio, qc_mask, weight, chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS):
+    current_image = np.asarray(current_image, dtype=np.float32)
+    q_image = np.asarray(q_image)
+    qc_mask = np.asarray(qc_mask, dtype=bool)
+    chunk_rows = max(1, int(chunk_rows))
+    scale = float(q_ratio) * float(weight)
+    for y0 in range(0, current_image.shape[0], chunk_rows):
+        y1 = min(current_image.shape[0], y0 + chunk_rows)
+        mask_chunk = qc_mask[y0:y1, :]
+        if not np.any(mask_chunk):
+            continue
+        view = current_image[y0:y1, :]
+        component = q_image[y0:y1, :].astype(np.float32, copy=False) * scale
+        corrected = view - component
+        np.maximum(corrected, 0, out=corrected)
+        view[mask_chunk] = corrected[mask_chunk]
+        del mask_chunk, view, component, corrected
+
+
+def subtract_edge_gain_component_from_raw_in_place(
+    current_image,
+    raw_image,
+    tissue_mask,
+    dist_idx_small,
+    gain_curve,
+    scale,
+    weight,
+    *,
+    config=None,
+    use_distance_mask=False,
+):
+    cfg = tissue_edge_correction.EdgeGainConfig() if config is None else config
+    current_image = np.asarray(current_image, dtype=np.float32)
+    raw_image = np.asarray(raw_image)
+    h, w = current_image.shape
+    hs, ws = dist_idx_small.shape
+    x_small = tissue_edge_correction.scaled_indices(w, scale, ws)
+    chunk_rows = max(1, int(cfg.chunk_rows))
+    changed = 0
+    for y0 in range(0, h, chunk_rows):
+        y1 = min(h, y0 + chunk_rows)
+        y_small = tissue_edge_correction.scaled_indices(y1 - y0, scale, hs, start=y0)
+        dist_chunk = dist_idx_small[np.ix_(y_small, x_small)]
+        gain_chunk = gain_curve[np.clip(dist_chunk, 0, len(gain_curve) - 1)]
+        view = current_image[y0:y1, :]
+        raw_chunk = raw_image[y0:y1, :].astype(np.float32, copy=False)
+        distance_mask = dist_chunk > 0
+        if tissue_mask is None:
+            valid = np.isfinite(view)
+        else:
+            valid = np.asarray(tissue_mask[y0:y1, :], dtype=bool) & np.isfinite(view)
+        if use_distance_mask:
+            valid = valid & distance_mask
+        if not np.any(valid):
+            continue
+        changed += int(np.count_nonzero(valid & (raw_chunk != 0) & (gain_chunk < 0.999999)))
+        component = raw_chunk * (1.0 - gain_chunk) * float(weight)
+        np.subtract(view, component, out=view, where=valid)
+        np.maximum(view, 0, out=view)
+        del dist_chunk, gain_chunk, view, raw_chunk, valid, component
+    return changed
 
 
 def compute_tile_corrected_wholesection(raw_im, border_mask, qc_crop_size, tile_sub_full_max_edge=DEFAULT_TILE_SUB_FULL_MAX_EDGE, qcim_for_mask=None, min_n=10, chunk_cols=DEFAULT_TILE_STAT_CHUNK_COLS, progress_label=None, save_debug=True):
@@ -1131,9 +1251,15 @@ def process_marker_ordered_lowmem(
 ):
     marker_label = f"{marker} c{chan}"
     raw_qc = np.array(center_qc_crop(raw, crop_size=args.qc_crop_size), dtype=np.float32, copy=True) if args.debug_pngs else None
+    raw_full_qc = (
+        np.array(full_downsample_image(raw, max_edge=args.tile_sub_full_max_edge), dtype=np.float32, copy=True)
+        if args.debug_pngs
+        else None
+    )
     stim = np.asarray(raw).astype(np.float32, copy=False)
     if stim is raw:
         stim = np.array(stim, dtype=np.float32, copy=True)
+    raw_q99 = sampled_positive_quantile(raw, mask=qc_mask, q=0.99, max_pixels=args.bg_sample_max_pixels)
 
     q_report = {
         "q_status": q_status if "q" in corrections else "not_requested",
@@ -1141,11 +1267,13 @@ def process_marker_ordered_lowmem(
         "q_af_channel": q_af_channel,
         "edge_status": "not_requested" if "e" not in corrections else "",
         "edge_gain_applied_pixels": "",
+        "raw_q99": float(raw_q99),
     }
     bg_scalar = np.float32(0.0)
     tile_qc = None
     tile_full_qc = None
     total_steps = len(corrections)
+    component_weight_parts = []
 
     for step_idx, step in enumerate(corrections, start=1):
         print(f"  {marker_label}: correction {step_idx}/{total_steps} ({step}) start", flush=True)
@@ -1155,16 +1283,43 @@ def process_marker_ordered_lowmem(
                 q_report["q_status"] = q_report.get("q_status") or "skipped_no_q_image"
                 print(f"  {marker_label}: correction {step_idx}/{total_steps} (q) skipped {q_report['q_status']}", flush=True)
             else:
-                q_stats = apply_qc_sub_like_core_in_place(
-                    stim,
+                q_ratio, q_ratio_uncapped, q_raw_q997, q_af_q997 = q_ratio_like_core(
+                    raw,
                     q_image,
                     qc_mask,
+                )
+                weight, current_q99 = component_weight_from_q99(
+                    stim,
+                    raw_q99,
+                    qc_mask,
+                    args,
+                    q_report,
+                    "q",
+                )
+                subtract_q_component_from_raw_in_place(
+                    stim,
+                    q_image,
+                    q_ratio,
+                    qc_mask,
+                    weight,
                     chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS,
                 )
-                q_report.update(q_stats)
+                q_report.update(
+                    {
+                        "q_ratio": q_ratio,
+                        "q_ratio_uncapped": q_ratio_uncapped,
+                        "q_raw_q997": q_raw_q997,
+                        "q_af_q997": q_af_q997,
+                    }
+                )
                 q_report["q_status"] = "applied"
-                save_scaled_af_debug_images(q_image, q_stats["q_ratio"], out_root, marker, chan, q_af_channel, args)
-                print(f"  {marker_label}: correction {step_idx}/{total_steps} (q) done", flush=True)
+                component_weight_parts.append(f"q:{weight:.4f}")
+                save_scaled_af_debug_images(q_image, q_ratio * weight, out_root, marker, chan, q_af_channel, args)
+                print(
+                    f"  {marker_label}: correction {step_idx}/{total_steps} (q) done "
+                    f"weight={weight:.4f} current_q99={float(current_q99):.3f}",
+                    flush=True,
+                )
 
         elif step == "e":
             if do_edge:
@@ -1178,26 +1333,42 @@ def process_marker_ordered_lowmem(
                 profile_tissue_mask = None if edge_tissue_small is not None else edge_tissue_mask
                 if profile_tissue_mask is None and edge_tissue_small is None:
                     raise ValueError("Ordered low-memory edge correction requires edge tissue geometry")
-                edge_result = tissue_edge_correction.compute_edge_gain_profile(
+                weight, current_q99 = component_weight_from_q99(
                     stim,
+                    raw_q99,
+                    qc_mask,
+                    args,
+                    q_report,
+                    "e",
+                )
+                edge_result = tissue_edge_correction.compute_edge_gain_profile(
+                    raw,
                     tissue_mask=profile_tissue_mask,
                     tissue_small=edge_tissue_small,
                     tissue_info=edge_tissue_info,
                     config=edge_gain_config(),
                 )
                 sc.LAST_EDGE_GAIN_REPORT = dict(edge_result.report)
-                changed = tissue_edge_correction.apply_edge_gain_in_place(
+                changed = subtract_edge_gain_component_from_raw_in_place(
                     stim,
+                    raw,
                     profile_tissue_mask,
                     edge_result.dist_idx,
                     edge_result.gain_curve,
                     edge_result.scale,
+                    weight,
                     config=edge_gain_config(),
                     use_distance_mask=edge_tissue_small is not None,
                 )
                 edge_result.report["gain_applied_pixels"] = int(changed)
+                edge_result.report["component_weight"] = float(weight)
+                edge_result.report["component_current_q99"] = float(current_q99)
+                edge_result.report["component_raw_q99"] = float(raw_q99)
                 if "gain_applied_pixels" not in edge_result.report["summary_order"]:
                     edge_result.report["summary_order"].append("gain_applied_pixels")
+                for key in ("component_weight", "component_current_q99", "component_raw_q99"):
+                    if key not in edge_result.report["summary_order"]:
+                        edge_result.report["summary_order"].append(key)
                 edge_status = str(edge_result.report.get("status"))
                 if args.debug_pngs:
                     edge_output_preview = np.array(
@@ -1212,18 +1383,19 @@ def process_marker_ordered_lowmem(
                     write_edge_report(
                         edge_report_path(edge_debug_dir, stem),
                         stem,
-                        "ordered working image after " + ",".join(corrections[:step_idx - 1] or ["raw"]),
+                        "raw-derived edge component applied after " + ",".join(corrections[:step_idx - 1] or ["raw"]),
                         wholesection_output_tiff_path(out_root, marker, chan),
                         edge_result.report,
                     )
                     del edge_input_preview, edge_output_preview
                 q_report["edge_status"] = edge_status
                 q_report["edge_gain_applied_pixels"] = int(changed)
+                component_weight_parts.append(f"e:{weight:.4f}")
                 del edge_result
                 sc.release_runtime_memory()
                 print(
                     f"  {marker_label}: correction {step_idx}/{total_steps} (e) done "
-                    f"status={edge_status} changed={changed}",
+                    f"status={edge_status} changed={changed} weight={weight:.4f} current_q99={float(current_q99):.3f}",
                     flush=True,
                 )
             else:
@@ -1232,8 +1404,8 @@ def process_marker_ordered_lowmem(
                 print(f"  {marker_label}: correction {step_idx}/{total_steps} (e) skipped_not_in_edge_markers", flush=True)
 
         elif step == "t":
-            stim, _tile_base_qc, step_tile_qc, step_tile_full_qc = compute_tile_corrected_wholesection(
-                stim,
+            tile_corrected_raw, _tile_base_qc, step_tile_qc, step_tile_full_qc = compute_tile_corrected_wholesection(
+                raw,
                 border_mask=mask3,
                 qc_crop_size=args.qc_crop_size,
                 tile_sub_full_max_edge=args.tile_sub_full_max_edge,
@@ -1242,6 +1414,27 @@ def process_marker_ordered_lowmem(
                 progress_label=marker_label,
                 save_debug=args.debug_pngs,
             )
+            weight, current_q99 = component_weight_from_q99(
+                stim,
+                raw_q99,
+                qc_mask,
+                args,
+                q_report,
+                "t",
+            )
+            subtract_tile_component_from_raw_in_place(
+                stim,
+                raw,
+                tile_corrected_raw,
+                weight,
+                component_gain=args.tile_component_gain,
+                chunk_rows=EDGE_FOLDER_GAIN_CHUNK_ROWS,
+            )
+            effective_tile_weight = float(weight) * float(args.tile_component_gain)
+            q_report["t_component_gain"] = float(args.tile_component_gain)
+            q_report["t_component_effective_weight"] = effective_tile_weight
+            component_weight_parts.append(f"t:{weight:.4f}x{float(args.tile_component_gain):.3f}={effective_tile_weight:.4f}")
+            del tile_corrected_raw
             if args.debug_pngs:
                 if tile_qc is None:
                     tile_qc = step_tile_qc
@@ -1252,7 +1445,11 @@ def process_marker_ordered_lowmem(
                 elif step_tile_full_qc is not None:
                     tile_full_qc = tile_full_qc + step_tile_full_qc
             sc.release_runtime_memory()
-            print(f"  {marker_label}: correction {step_idx}/{total_steps} (t) done", flush=True)
+            print(
+                f"  {marker_label}: correction {step_idx}/{total_steps} (t) done "
+                f"weight={weight:.4f} current_q99={float(current_q99):.3f}",
+                flush=True,
+            )
 
         elif step == "b":
             bg_scalar = compute_background_sub_sampled(
@@ -1267,6 +1464,16 @@ def process_marker_ordered_lowmem(
 
         else:
             raise ValueError(f"Unsupported correction step in ordered low-memory runner: {step}")
+
+        if step_idx < total_steps:
+            save_after_step_debug_image(
+                stim,
+                out_root,
+                marker,
+                chan,
+                f"{step_idx:02d}_{step}",
+                args,
+            )
 
     survival_zeroed = ""
     survival_fill_value = ""
@@ -1291,14 +1498,16 @@ def process_marker_ordered_lowmem(
 
     if survival_fill_value != "":
         q_report["survival_fill_value"] = float(survival_fill_value)
+    q_report["component_weights"] = ",".join(component_weight_parts)
     final_qc = paired_center_qc_mosaic(raw, stim, crop_size=args.qc_crop_size).astype(np.float32, copy=False) if args.debug_pngs else None
-    final_full_qc = full_downsample_image(stim, max_edge=args.tile_sub_full_max_edge).astype(np.float32, copy=False) if args.debug_pngs else None
+    final_full_qc = np.array(full_downsample_image(stim, max_edge=args.tile_sub_full_max_edge), dtype=np.float32, copy=True) if args.debug_pngs else None
     save_wholesection_array_outputs(
         marker,
         chan,
         stim,
         out_root,
         raw_qc=raw_qc,
+        raw_full_qc=raw_full_qc,
         tile_qc=tile_qc if args.debug_pngs else None,
         tile_full_qc=tile_full_qc if args.debug_pngs else None,
         final_qc=final_qc,
@@ -2010,10 +2219,10 @@ def centered_rolling_average(values, window):
     return np.convolve(padded, kernel, mode="valid").astype(np.float32, copy=False)
 
 
-def tanh_unit_gain_model(x, low, midpoint, width):
+def tanh_unit_gain_model(x, low, midpoint, width, high=1.0):
     width = np.maximum(np.asarray(width, dtype=np.float32), 1e-6)
     x = np.asarray(x, dtype=np.float32)
-    return low + (1.0 - low) * 0.5 * (1.0 + np.tanh((x - midpoint) / width))
+    return low + (float(high) - low) * 0.5 * (1.0 + np.tanh((x - midpoint) / width))
 
 
 def fit_tanh_gain_curve(gain_values, good_bins, max_bin):
@@ -2031,7 +2240,7 @@ def fit_tanh_gain_curve(gain_values, good_bins, max_bin):
         "edge_gain_tanh_midpoint_bin": None,
         "edge_gain_tanh_width_bins": None,
         "edge_gain_tanh_rmse": None,
-        "edge_gain_tanh_upper_asymptote": 1.0,
+        "edge_gain_tanh_upper_asymptote": float(EDGE_FOLDER_GAIN_MAX),
         "edge_gain_tanh_fallback_method": None,
     }
 
@@ -2044,11 +2253,18 @@ def fit_tanh_gain_curve(gain_values, good_bins, max_bin):
         from scipy.optimize import curve_fit
 
         low0 = float(np.clip(np.quantile(y, 0.05), EDGE_FOLDER_GAIN_MIN, 0.99))
-        half_level = low0 + (1.0 - low0) * 0.5
+        half_level = low0 + (float(EDGE_FOLDER_GAIN_MAX) - low0) * 0.5
         midpoint0 = float(x[np.argmin(np.abs(y - half_level))])
         width0 = float(np.clip(max(float(max_bin) * 0.15, 5.0), 1.0, max(float(max_bin) * 2.0, 1.0)))
+        fit_model = lambda x, low, midpoint, width: tanh_unit_gain_model(
+            x,
+            low,
+            midpoint,
+            width,
+            high=float(EDGE_FOLDER_GAIN_MAX),
+        )
         params, _ = curve_fit(
-            tanh_unit_gain_model,
+            fit_model,
             x,
             y,
             p0=(low0, midpoint0, width0),
@@ -2060,9 +2276,9 @@ def fit_tanh_gain_curve(gain_values, good_bins, max_bin):
         )
         low, midpoint, width = [float(v) for v in params]
         x_all = np.arange(max_bin + 1, dtype=np.float32)
-        gain_curve = tanh_unit_gain_model(x_all, low, midpoint, width).astype(np.float32, copy=False)
+        gain_curve = tanh_unit_gain_model(x_all, low, midpoint, width, high=float(EDGE_FOLDER_GAIN_MAX)).astype(np.float32, copy=False)
         gain_curve = np.clip(gain_curve, EDGE_FOLDER_GAIN_MIN, EDGE_FOLDER_GAIN_MAX).astype(np.float32, copy=False)
-        fit_y = tanh_unit_gain_model(x, low, midpoint, width)
+        fit_y = tanh_unit_gain_model(x, low, midpoint, width, high=float(EDGE_FOLDER_GAIN_MAX))
         rmse = float(np.sqrt(np.mean((fit_y - y) ** 2)))
         stats.update(
             {
@@ -2743,7 +2959,7 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
         "",
         f"edge_marker_selection: {edge_selection_path or 'none'}",
         "",
-        "channel_index\tchannel_name\toptical_channel\tq_status\tq_af_channel\tq_ratio\tq_ratio_uncapped\tq_raw_q997\tq_af_q997\tedge_status\tedge_gain_applied_pixels\tbg_subtracted\tsurvival_masked_pixels\tsurvival_fill_value",
+        "channel_index\tchannel_name\toptical_channel\traw_q99\tcomponent_weights\tq_status\tq_af_channel\tq_ratio\tq_ratio_uncapped\tq_raw_q997\tq_af_q997\tedge_status\tedge_gain_applied_pixels\tbg_subtracted\tsurvival_masked_pixels\tsurvival_fill_value",
     ]
 
     for chan_idx, marker in enumerate(channel_names):
@@ -2754,7 +2970,28 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
         existing = existing_marker_output(out_root, marker, chan_num, expected_shape=info["shape_yx"]) if args.skip_existing else None
         if existing:
             print("Skipping existing:", existing)
-            bg_lines.append(f"{chan_num}\t{marker}\t{optical_channel_for_marker_index(chan_idx)}\tskipped_existing\t\t\t\t\t\tskipped_existing\t\t\t\t")
+            bg_lines.append(
+                "\t".join(
+                    [
+                        str(chan_num),
+                        str(marker),
+                        str(optical_channel_for_marker_index(chan_idx)),
+                        "",
+                        "",
+                        "skipped_existing",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "skipped_existing",
+                        "",
+                        "",
+                        "",
+                        "",
+                    ]
+                )
+            )
             continue
         do_edge = "e" in corrections and marker_matches_edge_selection(marker, chan_num, edge_selection)
 
@@ -2797,6 +3034,8 @@ def run_correct_stage(input_path, info, out_root, label_path, labels_source, cor
                     str(chan_num),
                     str(marker),
                     str(q_report.get("q_optical_channel", optical_channel_for_marker_index(chan_idx))),
+                    "" if q_report.get("raw_q99") is None else f"{float(q_report['raw_q99']):.6f}",
+                    str(q_report.get("component_weights", "")),
                     str(q_report.get("q_status", "")),
                     str(q_report.get("q_af_channel", "")),
                     "" if q_report.get("q_ratio") is None else f"{float(q_report['q_ratio']):.6f}",
@@ -2863,6 +3102,7 @@ def main():
     ap.add_argument("--skip-existing", dest="skip_existing", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-skip-existing", dest="skip_existing", action="store_false", help="Reprocess channels even when corrected TIFFs already exist.")
     ap.add_argument("--tile-stat-chunk-cols", type=int, default=DEFAULT_TILE_STAT_CHUNK_COLS, help="Column chunk width for memory-bounded tile quantiles.")
+    ap.add_argument("--tile-component-gain", type=float, default=DEFAULT_TILE_COMPONENT_GAIN, help="Multiplier applied to the raw-derived tile correction component.")
     ap.add_argument("--bg-sample-max-pixels", type=int, default=DEFAULT_BG_SAMPLE_MAX_PIXELS, help="Maximum sampled pixels for background scalar quantile.")
     ap.add_argument("--read-attempts", type=int, default=2, help="Short-lived TIFF read attempts before fallback readers.")
     ap.add_argument("--read-retry-sleep", type=float, default=2.0, help="Seconds between retrying direct page reads.")

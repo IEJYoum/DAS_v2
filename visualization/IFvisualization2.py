@@ -985,7 +985,9 @@ def autoClean(DFs,com=['n'],cat=''): #duplicated in IFA4, IFV2 except it takes d
         return([],[])
     cho = 1 #drop 0:cells   1:columns(bioms)
     ch = 90 #"max missing % threshold integer (0 to drop all cells with missing values, 100 to keep all
-    while ch > 0:
+    # Sweep one percentage point at a time through the zero-missingness pass.
+    # Columns and cells are filtered on alternating passes as the threshold tightens.
+    while ch >= 0:
         if cho == 0:
             counts = df.isnull().sum(axis=1)
             #print(counts,counts.shape,df.shape)
@@ -997,7 +999,7 @@ def autoClean(DFs,com=['n'],cat=''): #duplicated in IFA4, IFV2 except it takes d
             obs = obs.loc[key,:]
             dfxy = dfxy.loc[key,:]
             cho = 1
-            ch -= 10
+            ch -= 1
         else:
             counts = df.isnull().sum(axis=0)
             #print(counts,counts.shape,df.shape)
@@ -1007,7 +1009,7 @@ def autoClean(DFs,com=['n'],cat=''): #duplicated in IFA4, IFV2 except it takes d
             key = pts >= 100-ch
             df = df.loc[:,key]
             cho = 0
-            ch -= 10
+            ch -= 1
     #for co in df.columns:
     #    print(co,df[co].isna().sum()/df.shape[0]*100)
     #print(counts,counts.shape,df.shape)
@@ -4610,7 +4612,11 @@ def correlationMatrix(dfs,com=[],cat=''):
             #print(sdf.head())
             #sdf = sdf.astype(float)
             #logInput()
-            sdf = pd.DataFrame(scipy.stats.zscore(sdf))
+            # scipy returns an unlabeled ndarray; restore labels so corMat and
+            # the heatmap axes retain biomarker names rather than 0..N.
+            sdf = pd.DataFrame(
+                scipy.stats.zscore(sdf), index=sdf.index, columns=sdf.columns
+            )
             for col in sdf.columns:
                 if col in nacols:
                     sdf.loc[:,col].apply(lambda x: random.random()-.5)
