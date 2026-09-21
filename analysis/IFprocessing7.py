@@ -1335,6 +1335,13 @@ def clag(df,obs,dfxy,ch=None,uch=None,z=True):
     return(dfs[0],dfs[1],dfs[2])
 
 def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
+    global MAXEY_MATRIX_DIR
+    project_matrix_dir = Path.cwd() / "resources" / "maxey matrices"
+    if project_matrix_dir.is_dir() and any(project_matrix_dir.glob("*.csv")):
+        MAXEY_MATRIX_DIR = project_matrix_dir
+        print("using project maxey matrices from:",MAXEY_MATRIX_DIR)
+    else:
+        MAXEY_MATRIX_DIR = _IF_ANALYSIS_DIR / "maxey matrices"
     #send chan thresh to 0 after zscore (and rank? do tied cells all get the lowest score or if all but 1 are tied they all get 2..) and before calculating type scores
     if len(com) == 0:
         chanT = input('compare to chanel threshold? (y)')
@@ -1363,50 +1370,50 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
     #Haven't been able to figure out why, key.sum() stays the same (whether there's a glitch or not, whether the glitch is from running on multiple cats or from the label already existingin the data- both conditions must be met for glitch)
     for tn in ['Primary Celltype: Matrix','Tumor Subtype: Matrix','Immune Subtype: Matrix','Tumor Functional: Matrix','Immune Functional: Matrix']: #this should fix it- helper function only cleans subset
         dfs[1][tn] = 'nan'
+
+    if not (MAXEY_MATRIX_DIR / 'primary_celltype.csv').exists():
+        print('WARNING: primary_celltype.csv not found in',MAXEY_MATRIX_DIR)
+        print('WARNING: primary celltyping is required; maxeyType cannot run without it.')
     typed_dfs = maxeyTypeH(dfs, below_thresh_key = btkey, bias = BIAS, threshold = PRIMARY_MT_THRESH, method = PRIMARY_MT_METHOD,log=log)
     if typed_dfs is None:
         print('celltyping failed')
         return(dfs,[])
     dfs = typed_dfs
 
-    mankey = dfs[1].loc[:,'Primary Celltype: Matrix'] == '3: epithelial'
+    #each of the 4 pieces below is independent: subsets fresh from dfs, and only recombines
+    #if its own matrix file was found, so a missing tumor/immune matrix just leaves that
+    #piece's obs column at its 'nan' default instead of aborting the other pieces too
     idfs,key = subset(dfs,typeName,['3: epithelial'])
-    #print(mankey.sum(),key.sum,'mankey comparison')
     print(idfs[0].shape[0],'idf shape')
     idfs = maxeyTypeH(idfs, typeName = 'Tumor Subtype: Matrix', default = ' ', fileName = 'tumor_celltype.csv', singleType = True, below_thresh_key = btkey.loc[key,:],log=log)
-    if idfs is None:
-        print('celltyping failed')
-        return(dfs,[])
+    if idfs is not None:
+        dfs = recombine(dfs,idfs,key)
+    else:
+        print('skipping Tumor Subtype: Matrix (no matrix file found)')
 
     #tumor functional annots added to/vs all celltypes
-    dfs = recombine(dfs,idfs,key) #requires another recombine be added
-
     idfs,key = subset(dfs,typeName,list(dfs[1].loc[:,typeName].unique())) #
     idfs = maxeyTypeH(idfs, typeName = 'Tumor Functional: Matrix', default = ' ', fileName = 'tumor_functional.csv',
                       singleType = False, below_thresh_key = btkey.loc[key,:], threshold = .5,log=log)
-    if idfs is None:
-        print('celltyping failed')
-        return(dfs,[])
-    print(key.sum())
-    dfs = recombine(dfs,idfs,key)
-    print(key.sum())
-    #input()
-
+    if idfs is not None:
+        dfs = recombine(dfs,idfs,key)
+    else:
+        print('skipping Tumor Functional: Matrix (no matrix file found)')
 
     idfs,key = subset(dfs,typeName,['2: immune'])
     idfs = maxeyTypeH(idfs, typeName = 'Immune Subtype: Matrix', default = ' ', fileName = 'immune_celltype.csv',method='rank',
                       threshold = .2, below_thresh_key = btkey.loc[key,:],log=log, singleType = True) #SINGLETYPE should be True for general use and default = 'unclassified'
-    if idfs is None:
-        print('celltyping failed')
-        return(dfs,[])
-    idfs = maxeyTypeH(idfs,typeName = 'Immune Functional: Matrix', default = ' ', fileName = 'immune_functional.csv', singleType = False, below_thresh_key = btkey.loc[key,:],log=log)
-    if idfs is None:
-        print('celltyping failed')
-        return(dfs,[])
-    print(idfs[1],'idfs1')
-    print(idfs[1].columns)
+    if idfs is not None:
+        dfs = recombine(dfs,idfs,key)
+    else:
+        print('skipping Immune Subtype: Matrix (no matrix file found)')
 
-    dfs = recombine(dfs,idfs,key)
+    idfs,key = subset(dfs,typeName,['2: immune'])
+    idfs = maxeyTypeH(idfs,typeName = 'Immune Functional: Matrix', default = ' ', fileName = 'immune_functional.csv', singleType = False, below_thresh_key = btkey.loc[key,:],log=log)
+    if idfs is not None:
+        dfs = recombine(dfs,idfs,key)
+    else:
+        print('skipping Immune Functional: Matrix (no matrix file found)')
 
 
     return(dfs,[])
