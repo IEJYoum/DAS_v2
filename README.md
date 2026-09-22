@@ -42,25 +42,30 @@ conda activate das-v2
 python gui.py
 ```
 
-5. If you prefer the original terminal-driven workflow:
+5. For the full terminal workflow (including Linux):
 
 ```bash
-python IFA.py
+python cli.py
 ```
+
+`IFA.py` remains available as the older legacy terminal runtime.
 
 ## Main Launchers
 
 - `python gui.py`
   - launches the browser-backed GUI
+- `python cli.py`
+  - launches the current DAS terminal runtime
 - `python IFA.py`
-  - launches the legacy terminal menu flow
+  - launches the legacy terminal menu flow only
 - `python ds.py`
   - launches DS mode for file-backed LLM / agent control
 
 ## Which Entry Point Should I Use?
 
 - Use `gui.py` if you want the easiest normal user experience.
-- Use `IFA.py` if you are comfortable in a terminal and want the most direct legacy workflow.
+- Use `cli.py` for the current full DAS workflow in a terminal, including Linux.
+- Use `IFA.py` only when you specifically need the older legacy menu flow.
 - Use `ds.py` only if you are intentionally driving DAS through an LLM/agent setup.
 
 ## Setup Notes
@@ -126,9 +131,13 @@ If you want to understand the HTML viewer:
 ## Folder Overview
 
 - `IFA.py`
-  - legacy terminal-driven main entrypoint
+  - legacy terminal-driven compatibility entrypoint
+- `cli.py`
+  - standard terminal launcher for the current controller/spine runtime
 - `controler.py`
-  - GUI / DS wrapper around the legacy runtime
+  - session bootstrap and I/O transport wrapper
+- `spine.py`
+  - central session/menu loop and Ctrl-C baseline restore
 - `gui.py`
   - browser GUI launcher
 - `ds.py`

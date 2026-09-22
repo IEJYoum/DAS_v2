@@ -676,6 +676,8 @@ def menu(options,functions,df=9,obs=9,dfxy=9,esc = False): #MANUAL MENU
         try:
             print("send non-int when done (return df)")
             ch = int(logInput("number: "))
+        except KeyboardInterrupt:
+            raise
         except:
             return(df,obs,dfxy)
         if isinstance(obs, pd.DataFrame):
@@ -707,7 +709,7 @@ def menu(options,functions,df=9,obs=9,dfxy=9,esc = False): #MANUAL MENU
                     #df = df.apply(pd.to_numeric, errors='coerce') did not fix quantileplot
                     return(df,obs,dfxy)
             except KeyboardInterrupt:
-                break
+                raise
             except Exception as e:
                 print('Failed!',e)
 

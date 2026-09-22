@@ -81,13 +81,22 @@ python gui.py
 
 This starts a local server and opens DAS in your browser.
 
-### Original Terminal Workflow
+### Full Terminal Workflow
+
+```bash
+python cli.py
+```
+
+This opens the current DAS terminal runtime with the same controller menu
+shape used by the GUI. It is the standard Linux terminal entrypoint.
+
+### Legacy Terminal Workflow
 
 ```bash
 python IFA.py
 ```
 
-This opens the older interactive terminal menu system.
+This opens the older interactive terminal menu system for compatibility.
 
 ### DS / LLM Launch
 
@@ -134,7 +143,7 @@ These files are usually saved as:
 ## If You Already Have Prepared Data
 
 Typical workflow:
-1. launch `gui.py` or `IFA.py`
+1. launch `gui.py` or `cli.py`
 2. choose `load prepared data`
 3. browse to the correct folder or file
 4. let DAS load the triplet

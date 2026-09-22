@@ -226,6 +226,8 @@ def menu(dfs,options,functions,com=[],cat=''):
             try:
                 print("send non-int when done (return to previous menu)")
                 ch = int(input("number: "))
+            except KeyboardInterrupt:
+                raise
             except:
                 print(coms,"coms out of menu")
                 return([],coms)

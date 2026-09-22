@@ -128,6 +128,8 @@ def menu(options,functions,df=9,obs=9,dfxy=9,cdf=9):
             try:
                 print("send non-int when done (return df)")
                 ch = int(input("number: "))
+            except KeyboardInterrupt:
+                raise
             except:
                 return(df,obs,dfxy)
             if isinstance(cdf,int):
@@ -147,6 +149,8 @@ def menu(options,functions,df=9,obs=9,dfxy=9,cdf=9):
                     ch = int(input("number: "))
                     if ch >= len(functions):
                         1/0
+                except KeyboardInterrupt:
+                    raise
                 except:
                     return(df,obs,dfxy)
                 if isinstance(cdf,int):
@@ -156,7 +160,7 @@ def menu(options,functions,df=9,obs=9,dfxy=9,cdf=9):
                     df,obs,dfxy=functions[ch](df,obs,dfxy,cdf)
                     print(all(obs.index==df.index),"all index the same")
             except KeyboardInterrupt:
-                break
+                raise
             except Exception as e:
                 print('Error: ',e)
                 return(df,obs,dfxy)

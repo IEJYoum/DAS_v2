@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import ndimage
 import tifffile as tiff
 
 # Keep this import commented out for now; the loss-based flow may still be useful later.
@@ -57,7 +58,12 @@ NONREG_XLSX = TRASH / "d10_nonreg_triage.xlsx"
 SELECTION_XLSX = TRASH / "triage_selection.xlsx"
 IMAGE_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 BLACK_FRACTION_THRESHOLD = 0.01
-FIGURE_COLS = 4
+# "any" uses the original black-pixel rule. "nonrectangular" ignores solid
+# black edge strips from translations and keeps irregular black regions.
+BLACK_SHAPE_MODE = "nonrectangular"
+MIN_NONRECTANGULAR_COMPONENT_FRACTION = 0.01
+FIGURE_COLS = 3
+MAX_CANDIDATES_PER_SHEET = 9
 TITLE_FONT_SIZE = 15
 FIGURE_DPI = 100
 TITLE_WRAP_WIDTH = 18
@@ -82,6 +88,49 @@ def display_image(image):
     if image.ndim == 2:
         return image
     return image[..., :3]
+
+
+def expected_black_border_mask(mask):
+    """Return full-width/full-height black bands produced by translation."""
+    height, width = mask.shape
+    top = 0
+    while top < height and mask[top].all():
+        top += 1
+    bottom = 0
+    while bottom < height and mask[height - bottom - 1].all():
+        bottom += 1
+    left = 0
+    while left < width and mask[:, left].all():
+        left += 1
+    right = 0
+    while right < width and mask[:, width - right - 1].all():
+        right += 1
+
+    expected = np.zeros_like(mask, dtype=bool)
+    if top:
+        expected[:top, :] = True
+    if bottom:
+        expected[height - bottom:, :] = True
+    if left:
+        expected[:, :left] = True
+    if right:
+        expected[:, width - right:] = True
+    return expected
+
+
+def has_nonrectangular_black_region(mask):
+    expected = expected_black_border_mask(mask)
+    unexpected = mask & ~expected
+    labels, count = ndimage.label(unexpected)
+    min_pixels = int(math.ceil(mask.size * MIN_NONRECTANGULAR_COMPONENT_FRACTION))
+    for label, box in enumerate(ndimage.find_objects(labels), start=1):
+        if box is None:
+            continue
+        component = labels[box] == label
+        pixels = int(component.sum())
+        if pixels >= min_pixels and pixels != component.size:
+            return True
+    return False
 
 
 def thumbnail_row(path):
@@ -122,8 +171,14 @@ def scan_check_folder():
         row["black_pixels"] = int(mask.sum())
         row["total_pixels"] = int(mask.size)
         row["black_fraction"] = row["black_pixels"] / float(row["total_pixels"])
+        row["nonrectangular_black"] = has_nonrectangular_black_region(mask)
         stats.append(row)
-        if row["black_fraction"] > BLACK_FRACTION_THRESHOLD:
+        is_candidate = row["black_fraction"] > BLACK_FRACTION_THRESHOLD
+        if BLACK_SHAPE_MODE == "nonrectangular":
+            is_candidate = is_candidate and row["nonrectangular_black"]
+        elif BLACK_SHAPE_MODE != "any":
+            raise ValueError("BLACK_SHAPE_MODE must be 'any' or 'nonrectangular'")
+        if is_candidate:
             candidates.append(row)
             images[row["name"]] = display_image(image)
     return stats, candidates, images, known_prefixed
@@ -149,40 +204,47 @@ def wrapped_title(text):
 
 def show_candidates(candidates, images):
     TRASH.mkdir(parents=True, exist_ok=True)
-    sheet_path = TRASH / f"triage_candidates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     if not candidates:
-        return sheet_path
-    nrows = int(math.ceil(len(candidates) / float(FIGURE_COLS)))
-    fig, axes = plt.subplots(
-        nrows,
-        FIGURE_COLS,
-        figsize=(4 * FIGURE_COLS, 6.5 * nrows),
-        dpi=FIGURE_DPI,
-        constrained_layout=True,
-    )
-    axes = np.atleast_1d(axes).ravel()
-    for ax, row in zip(axes, candidates):
-        image = images[row["name"]]
-        ax.imshow(image, cmap="gray" if image.ndim == 2 else None)
-        ax.set_title(wrapped_title(row["name"]), fontsize=TITLE_FONT_SIZE, pad=8)
-        ax.axis("off")
-    for ax in axes[len(candidates):]:
-        ax.axis("off")
-    fig.savefig(sheet_path, dpi=FIGURE_DPI, bbox_inches="tight")
-    plt.close(fig)
+        return []
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    page_count = int(math.ceil(len(candidates) / float(MAX_CANDIDATES_PER_SHEET)))
+    sheet_paths = []
+    for page_index in range(page_count):
+        start = page_index * MAX_CANDIDATES_PER_SHEET
+        page = candidates[start:start + MAX_CANDIDATES_PER_SHEET]
+        nrows = int(math.ceil(len(page) / float(FIGURE_COLS)))
+        sheet_path = TRASH / f"triage_candidates_{timestamp}_{page_index + 1:03d}_of_{page_count:03d}.png"
+        fig, axes = plt.subplots(
+            nrows,
+            FIGURE_COLS,
+            figsize=(4 * FIGURE_COLS, 6.5 * nrows),
+            dpi=FIGURE_DPI,
+            constrained_layout=True,
+        )
+        axes = np.atleast_1d(axes).ravel()
+        for ax, row in zip(axes, page):
+            image = images[row["name"]]
+            ax.imshow(image, cmap="gray" if image.ndim == 2 else None)
+            ax.set_title(wrapped_title(row["name"]), fontsize=TITLE_FONT_SIZE, pad=8)
+            ax.axis("off")
+        for ax in axes[len(page):]:
+            ax.axis("off")
+        fig.savefig(sheet_path, dpi=FIGURE_DPI, bbox_inches="tight")
+        plt.close(fig)
+        sheet_paths.append(sheet_path)
+        print("candidate sheet:", sheet_path)
     try:
-        os.startfile(sheet_path)
+        os.startfile(sheet_paths[0])
     except Exception:
         pass
-    print("candidate sheet:", sheet_path)
-    return sheet_path
+    return sheet_paths
 
 
 def choose_trash_names(candidates, by_name, images):
+    show_candidates(candidates, images)
     while True:
         trash_names = []
         reasons = {}
-        show_candidates(candidates, images)
         for row in candidates:
             prompt = f"trash {row['name']} ({row['black_fraction']:.2%} black, {row['black_pixels']} px)? [Y/n]: "
             answer = input(prompt).strip().lower()
@@ -305,6 +367,7 @@ def write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed
             "black_pixels": row["black_pixels"],
             "total_pixels": row["total_pixels"],
             "black_fraction": row["black_fraction"],
+            "nonrectangular_black": row["nonrectangular_black"],
             "thumbnail_path_before": str(row["path"]),
             "thumbnail_path_after": str(renamed_paths.get(name, row["path"])),
             "matched_fullres_file_count": match_counts.get(name, 0),
@@ -342,7 +405,7 @@ def write_log(
     ]
     for row in stats:
         lines.append(
-            f"{row['name']}\tblack_pixels={row['black_pixels']}\ttotal_pixels={row['total_pixels']}\tblack_fraction={row['black_fraction']:.6f}"
+            f"{row['name']}\tblack_pixels={row['black_pixels']}\ttotal_pixels={row['total_pixels']}\tblack_fraction={row['black_fraction']:.6f}\tnonrectangular_black={row['nonrectangular_black']}"
         )
     lines.append("")
     lines.append("[candidate_decisions]")

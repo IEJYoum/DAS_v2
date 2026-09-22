@@ -130,14 +130,15 @@ the sleep-interrupt test.  Do not change it before then.
 
 This is a narrow, mechanical edit at 4-5 shared menu functions.
 It does not touch the hundreds of other bare-except clauses in
-analysis/visualization code — those are inside individual actions,
-not menu dispatch boundaries, and their swallowing behavior is
-tolerable because the spine restores baseline regardless of what
-the action's internal state looked like when it returned.
+analysis/visualization code. If an individual action catches
+KeyboardInterrupt itself, the spine sees an ordinary return and cannot
+restore the baseline. That action is outside this first pass until it
+is patched and tested separately.
 
-The key invariant: KeyboardInterrupt must propagate out of every
-menu dispatch loop that sits between the spine and an action.
-Internal action code may swallow it; the dispatch boundary may not.
+The key invariant: KeyboardInterrupt must propagate out of every menu
+dispatch loop that sits between the spine and an action. This first pass
+guarantees restore only for actions that propagate through those
+dispatch boundaries.
 
 
 Baseline Snapshot

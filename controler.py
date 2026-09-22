@@ -40,6 +40,7 @@ for _bootstrap_dir in _BOOTSTRAP_DIRS:
 
 import frontend
 import io_adapter as io
+import spine
 from shared_utils import (
     append_artifact_manifest_row,
     checkChange,
@@ -115,6 +116,11 @@ class SessionState:
     segmentation_root: Optional[Path] = None
     suppress_plot_windows: bool = False
     runmode: str = DEFAULT_RUNMODE
+    home_df: Optional[pd.DataFrame] = None
+    home_obs: Optional[pd.DataFrame] = None
+    home_dfxy: Optional[pd.DataFrame] = None
+    home_logdf: Optional[pd.DataFrame] = None
+    home_stem: Optional[str] = None
 
     def state_code(self) -> str:
         return get_state_code(self.logdf)
@@ -245,12 +251,11 @@ def _run_session(
             io.iprint(f"Session log: {session_log_path}")
         io.flush_session_log()
 
-        if not startup_menu(state):
-            io.iprint("Session ended.")
-            return state
-
-        while main_menu(state):
-            pass
+        spine.run_session(
+            state,
+            startup_menu=startup_menu,
+            main_menu=main_menu,
+        )
         io.iprint("Session ended.")
         return state
     except io.UserAbortError:
@@ -1641,6 +1646,7 @@ def startup_feature_extraction(state: SessionState) -> None:
     if run_meta.get("combined_csv_path"):
         io.iprint(f"Loaded combined extracted table: {run_meta['combined_csv_path']}")
     _print_current_data_summary(state)
+    spine.capture_home_baseline(state)
 
 
 def startup_spectral_flow_import(state: SessionState) -> None:
@@ -1819,6 +1825,7 @@ def startup_spectral_flow_import(state: SessionState) -> None:
     if audit_paths.get("spectral_eval_metrics_jsonl_path"):
         io.iprint(f"Saved spectral metrics: {audit_paths['spectral_eval_metrics_jsonl_path']}")
     _print_current_data_summary(state)
+    spine.capture_home_baseline(state)
 
 
 def startup_load_prepared_data(state: SessionState) -> None:
@@ -2268,6 +2275,7 @@ def _run_tabular_ingest(state: SessionState) -> None:
     )
     _print_current_data_summary(state)
     _save_tabular_ingest_triplet_if_requested(state)
+    spine.capture_home_baseline(state)
 
 
 def _save_tabular_ingest_triplet_if_requested(state: SessionState) -> None:
@@ -2696,6 +2704,8 @@ def _run_legacy_call(
 
     _print_obs_action_summary(legacy_meta)
     _print_current_data_summary(state, folder=effective_folder)
+    if action_label in {"load", "preload", "loadLast", "RAT.main", "buildDataFrame"}:
+        spine.capture_home_baseline(state)
     return legacy_meta
 
 
@@ -2785,6 +2795,7 @@ def load_by_stem(state: SessionState) -> None:
     )
     _print_loaded_target_summary("Loaded triplet", state.data_folder / stem)
     _print_current_data_summary(state)
+    spine.capture_home_baseline(state)
 
 
 def load_latest(state: SessionState) -> None:
@@ -2830,6 +2841,7 @@ def load_by_stem_with_value(
     )
     _print_loaded_target_summary(summary_label, state.data_folder / stem)
     _print_current_data_summary(state)
+    spine.capture_home_baseline(state)
 
 
 def import_explicit_paths(state: SessionState) -> None:
@@ -2862,6 +2874,7 @@ def import_explicit_paths(state: SessionState) -> None:
     )
     io.iprint(f"Loaded explicit triplet paths: df={_normalize_path_text(df_path)} | obs={_normalize_path_text(obs_path)} | dfxy={_normalize_path_text(dfxy_path)}")
     _print_current_data_summary(state)
+    spine.capture_home_baseline(state)
 
 
 def auto_clean_full(state: SessionState) -> None:
