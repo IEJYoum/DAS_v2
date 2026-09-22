@@ -32,7 +32,7 @@ def load_tissue_areas(path):
 
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for row in reader:  
             label = row["Label"]
             m = re.search(r"KPC_(\w+?)_D10_.*?(ROI\d+)", label)
             if not m:

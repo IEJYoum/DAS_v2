@@ -22,6 +22,29 @@ SUPPORTED_IMAGE_SUFFIXES = {".czi", ".tif", ".tiff"}
 PANEL_WORKBOOK_GLOB = "CyclicPanelMarkers*.xlsx"
 
 
+# Tabular conventions live here alongside image conventions because both adapt
+# lab-specific inputs to DAS-neutral fields.  Keep this registry intentionally
+# small: unknown inputs fall through to the interactive tabular importer.
+TABULAR_COORDINATE_PAIRS = (
+    ("DAS/Koei", "DAPI_X", "DAPI_Y"),
+    ("Generic centroid", "Centroid_X", "Centroid_Y"),
+    ("Generic cell", "Cell_X", "Cell_Y"),
+    ("Generic coordinate", "Coordinate_X", "Coordinate_Y"),
+    ("Generic location center", "Location_Center_X", "Location_Center_Y"),
+    ("Generic", "X", "Y"),
+)
+TABULAR_OBSERVATION_KEYS = frozenset(
+    {
+        "cellid",
+        "patient",
+        "slide",
+        "slidescene",
+        "scene",
+        "seglabel",
+    }
+)
+
+
 def read_czi_channel_names(path: Union[str, os.PathLike[str]]) -> tuple[str, ...]:
     """Extract ordered channel names from CZI XML metadata.
 
@@ -153,10 +176,48 @@ def sanitize_marker_name(marker_name: object) -> str:
     return text or "marker"
 
 
+def normalize_convention_key(value: object) -> str:
+    """Case- and punctuation-insensitive key for convention matching."""
+
+    return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
+
+
 def normalize_marker_key(marker_name: object) -> str:
     """Loose key for matching workbook labels to sanitized filenames."""
 
-    return re.sub(r"[^a-z0-9]", "", str(marker_name).strip().lower())
+    return normalize_convention_key(marker_name)
+
+
+def tabular_coordinate_pair_candidates(columns: Iterable[object]) -> tuple[tuple[str, str, str], ...]:
+    """Return known coordinate pairs present in *columns* in registry order."""
+
+    by_key: dict[str, str] = {}
+    for column in columns:
+        text = str(column)
+        key = normalize_convention_key(text)
+        if key and key not in by_key:
+            by_key[key] = text
+
+    matches: list[tuple[str, str, str]] = []
+    for convention, x_name, y_name in TABULAR_COORDINATE_PAIRS:
+        x_column = by_key.get(normalize_convention_key(x_name))
+        y_column = by_key.get(normalize_convention_key(y_name))
+        if x_column is not None and y_column is not None:
+            matches.append((convention, x_column, y_column))
+    return tuple(matches)
+
+
+def resolve_tabular_coordinate_pair(columns: Iterable[object]) -> Optional[tuple[str, str, str]]:
+    """Return the highest-priority known coordinate pair, if one exists."""
+
+    matches = tabular_coordinate_pair_candidates(columns)
+    return matches[0] if matches else None
+
+
+def is_tabular_observation_column(column: object) -> bool:
+    """True for convention-defined annotation/identity fields."""
+
+    return normalize_convention_key(column) in TABULAR_OBSERVATION_KEYS
 
 
 def is_autofluorescence_marker(marker_name: object) -> bool:

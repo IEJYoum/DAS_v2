@@ -46,6 +46,7 @@ from shared_utils import (
     load_key_value_config,
     normalize_primary_labels,
     saveF,
+    save_project_config_updates,
     write_key_value_config,
     write_figure_summary_companion,
 )
@@ -83,10 +84,12 @@ PROJECT_CONFIG_FILE = "project_config.txt"
 MASTER_CONFIG_PATH = (APP_STATE_DIR / PROJECT_CONFIG_FILE).resolve()
 SAFE_FALLBACK_PROJECT_ROOT = (APP_STATE_DIR / "fallback_project").resolve()
 FALLBACK_CONFIG_KEYS = ("fallback_data_folder", "fallback_project_folder", "safe_fallback_project_folder")
+TABULAR_IMPORT_SOURCE_CONFIG_KEY = "tabular_import_source"
 
 _LEGACY_IFA5 = None
 _FEATURE_EXTRACTION_IFA = None
 _SPECTRAL_FLOW_IFA = None
+_TABULAR_INGEST = None
 _PROJECTS_DF_CACHE: Optional[pd.DataFrame] = None
 _MASTER_CONFIG_CACHE: Optional[dict[str, str]] = None
 _PROJECT_CONFIG_CACHE: dict[str, dict[str, str]] = {}
@@ -761,6 +764,26 @@ def _save_project_current_stem(data_folder: str | Path, stem: str) -> None:
     }
 
 
+def _save_project_config_updates(data_folder: str | Path, updates: dict[str, object]) -> None:
+    """Update arbitrary project-only defaults while keeping the controller cache current."""
+
+    resolved = _resolve_usable_folder(data_folder, "project data_folder")
+    if resolved is None:
+        io.dprint(f"Skipping project config update; unusable data_folder: {data_folder}")
+        return
+    values = save_project_config_updates(
+        resolved,
+        updates,
+        filename=PROJECT_CONFIG_FILE,
+        header="# DAS_v2 project config",
+    )
+    _PROJECT_CONFIG_CACHE[str(resolved)] = {
+        str(key): str(value).strip()
+        for key, value in values.items()
+        if str(value).strip() != ""
+    }
+
+
 def _stem_triplet_exists(data_folder: str | Path, stem: str) -> bool:
     text = str(stem or "").strip()
     if text == "":
@@ -1372,8 +1395,8 @@ def startup_set_base_folder(state: SessionState) -> None:
 def startup_build_data(state: SessionState) -> None:
     data_folder = _prompt_project_root(state.data_folder, "project output folder")
     _adopt_project_context(state, data_folder=data_folder, build_folder=data_folder)
-    _record_project_use(state, last_action="buildDataFrame_setup")
-    _run_legacy_build_data(state)
+    _record_project_use(state, last_action="tabular_ingest_setup")
+    _run_tabular_ingest(state)
 
 
 def startup_prepare_data(state: SessionState) -> None:
@@ -1906,6 +1929,16 @@ def load_spectral_flow_ifa():
     return _SPECTRAL_FLOW_IFA
 
 
+def load_tabular_ingest():
+    global _TABULAR_INGEST
+    if _TABULAR_INGEST is not None:
+        return _TABULAR_INGEST
+
+    path = (_IFA_ROOT / "data_extraction" / "tabular_ingest.py").resolve()
+    _TABULAR_INGEST = _import_module_from_path(path, module_name="tabular_ingest_runtime")
+    return _TABULAR_INGEST
+
+
 @contextmanager
 def legacy_ifa5_context(
     state: SessionState,
@@ -2145,6 +2178,150 @@ def _run_legacy_build_data(state: SessionState) -> None:
         reset_log=True,
         invoker=lambda module: module.buildDataFrame(9, 9, 9),
     )
+
+
+def _run_tabular_ingest(state: SessionState) -> None:
+    """Run the new CSV/path/glob ingest flow and install its triplet in state."""
+
+    old_shape = state.shape()
+    project_config = _load_project_config(state.data_folder)
+    default_source_spec = str(project_config.get(TABULAR_IMPORT_SOURCE_CONFIG_KEY, "")).strip()
+    if not default_source_spec:
+        default_source_spec = str(state.build_folder / "*.csv")
+
+    def _browse_with_legacy_navigator():
+        try:
+            with legacy_ifa5_context(state, suppress_plot_windows=state.suppress_plot_windows) as legacy:
+                return legacy.getFile(str(state.build_folder), extension=".csv")
+        except io.UserAbortError:
+            raise
+        except Exception as exc:
+            io.iprint(f"Legacy CSV navigator failed: {exc}")
+            return []
+
+    def _split_with_legacy(frame: pd.DataFrame, title: str):
+        with legacy_ifa5_context(state, suppress_plot_windows=state.suppress_plot_windows) as legacy:
+            return legacy.splitDF(frame, title)
+
+    try:
+        module = load_tabular_ingest()
+        result = module.run_interactive(
+            state.build_folder,
+            input_fn=io.iget,
+            print_fn=io.iprint,
+            default_source_spec=default_source_spec,
+            browse_fn=_browse_with_legacy_navigator,
+            legacy_split_fn=_split_with_legacy,
+        )
+    except io.UserAbortError:
+        raise
+    except Exception as exc:
+        io.iprint(f"Tabular ingest failed: {exc}")
+        trace = traceback.format_exc().rstrip()
+        if trace:
+            for line in trace.splitlines():
+                io.dprint(line)
+        return
+
+    if result is None:
+        return
+
+    if result.source_spec:
+        _save_project_config_updates(
+            state.data_folder,
+            {TABULAR_IMPORT_SOURCE_CONFIG_KEY: result.source_spec},
+        )
+
+    df, obs, dfxy = align_triplet(result.df, result.obs, result.dfxy)
+    if df.empty:
+        io.iprint("Tabular ingest produced no rows.")
+        return
+    state.df = df
+    state.obs = normalize_primary_labels(obs.astype(str))
+    state.dfxy = dfxy
+    state.logdf = make_logdf()
+    source_paths = list(result.source_paths)
+    state.logdf = log_action(
+        state.logdf,
+        module="data_extraction.tabular_ingest",
+        function="run_interactive",
+        action_label="tabular_ingest",
+        params=_build_controller_action_params(
+            state,
+            outcome="triplet_loaded",
+            extra={
+                "source_count": result.source_count,
+                "source_paths": source_paths[:20],
+                "source_paths_truncated": len(source_paths) > 20,
+                "merge_strategy": result.merge_strategy,
+                "coordinate_convention": result.coordinate_convention,
+            },
+        ),
+        in_shape=old_shape,
+        out_shape=state.shape(),
+        event_kind="df_mutating",
+    )
+    io.iprint(
+        "Tabular ingest loaded data: "
+        + str(state.shape())
+        + f" | sources={result.source_count} | merge={result.merge_strategy}"
+    )
+    _print_current_data_summary(state)
+    _save_tabular_ingest_triplet_if_requested(state)
+
+
+def _save_tabular_ingest_triplet_if_requested(state: SessionState) -> None:
+    answer = io.iget(
+        "save assembled triplet? (y/n) [y]: ",
+        default="y",
+        prompt_meta={
+            "options": [
+                {"value": "y", "label": "Save", "description": "Write df, obs, dfxy, and log CSVs to the project folder."},
+                {"value": "n", "label": "Do not save", "description": "Keep the assembled triplet in this session only."},
+            ]
+        },
+    ).strip().lower()
+    if answer not in {"", "y", "yes"}:
+        io.iprint("Assembled triplet remains in the current session and was not saved.")
+        return
+
+    suggested = _next_tabular_ingest_stem(state.data_folder)
+    while True:
+        stem = io.iget(f"output stem [{suggested}]: ", default=suggested).strip()
+        if stem == "":
+            stem = suggested
+        if Path(stem).name != stem or stem in {".", ".."}:
+            io.iprint("Output stem must be a filename only, without a folder path.")
+            continue
+        if _stem_triplet_exists(state.data_folder, stem):
+            overwrite = io.iget(
+                f"triplet '{stem}' already exists; overwrite? (y/n) [n]: ",
+                default="n",
+                prompt_meta={
+                    "options": [
+                        {"value": "y", "label": "Overwrite", "description": "Replace this existing triplet."},
+                        {"value": "n", "label": "Choose another stem", "description": "Keep the existing triplet unchanged."},
+                    ]
+                },
+            ).strip().lower()
+            if overwrite not in {"y", "yes"}:
+                suggested = _next_tabular_ingest_stem(state.data_folder)
+                continue
+        state.stem = stem
+        paths = save_triplet(state.data_folder, state.stem, state.df, state.obs, state.dfxy, state.logdf)
+        _remember_current_stem(state, state.stem, last_action="tabular_ingest_save")
+        io.iprint(f"Saved assembled triplet: {state.stem}")
+        io.iprint(f"Saved df: {paths['df_path']}")
+        return
+
+
+def _next_tabular_ingest_stem(folder: Path) -> str:
+    base = "ingest_" + datetime.now().strftime("%y-%m-%d")
+    for number in range(1, 10000):
+        candidate = base + "_" + str(number).zfill(2)
+        if not _stem_triplet_exists(folder, candidate):
+            return candidate
+    raise RuntimeError("Could not find an unused tabular ingest stem.")
 
 
 def _run_legacy_load_prepared(state: SessionState) -> None:
@@ -2983,7 +3160,18 @@ def _import_module_from_path(
         if spec is None or spec.loader is None:
             raise ImportError(f"Could not build import spec for {path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Dataclasses and similar decorators resolve their defining module via
+        # sys.modules while the file is executing.
+        previous_module = sys.modules.get(name)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            if previous_module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous_module
+            raise
         return module
     finally:
         if inserted_path:
