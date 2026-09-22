@@ -1,0 +1,278 @@
+Spine Restructure Plan v1.1
+============================
+
+Status: proposed.  Narrowed from v1 by dropping gohome prompt command.
+
+
+Purpose
+-------
+
+Give DAS one readable program spine: one dispatch loop, one interrupt
+boundary, one triplet baseline.  No new frameworks, event systems, or
+concurrency.
+
+    cli.py / gui.py / ds.py
+                |
+                v
+      controler.py: choose I/O transport, build SessionState
+                |
+                v
+      spine.py: root menus, action dispatch, interrupt catch, baseline
+                |
+                v
+      action functions and legacy bridge (unchanged initially)
+                |
+                v
+      existing analysis, visualization, viewer, image algorithms
+
+
+Key Decisions From v1 Audit
+----------------------------
+
+Retained findings that constrain the work:
+
+1. controler.py is the actual session authority.  IFA.py is active
+   legacy code called through it, not dead code.
+
+2. IFA.main() is a second, older root runtime.  Returning the program
+   to IFA.main() would lose the newer prepare-data workflows.
+   The spine replaces both competing top-level loops.
+
+3. GUI/DS eager legacy import (~19 s) is a high-priority lazy-loading
+   candidate, but it is a separate fix, not a spine prerequisite.
+
+4. The ROI mailbox, project config, and session log are load-bearing.
+   Do not break them during structural moves.
+
+5. DEVMODE has conflicting meanings across modules.  Do not wire a
+   single global.  Clean up separately after the spine exists.
+
+
+Safety Rules
+------------
+
+1. No code deleted merely because rg shows no direct caller.
+2. Each removal/move needs an inventory row before execution.
+3. Mechanical relocation and behavior change never share a commit.
+4. ROI mailbox moves as one tested unit or not at all.
+5. Project config and session-log behavior remain functional throughout.
+
+
+Interrupt Policy
+----------------
+
+KeyboardInterrupt is the only interrupt mechanism.  There is no
+gohome prompt command, no HomeRequested exception, no sticky flag,
+no iget() hook.
+
+At the spine action boundary:
+
+    def run_session(state, *, startup_menu, main_menu):
+        while True:
+            try:
+                if state.has_data():
+                    keep_running = main_menu(state)
+                else:
+                    keep_running = startup_menu(state)
+                if not keep_running:
+                    break
+            except KeyboardInterrupt:
+                io.clear_progress()
+                restore_home_baseline(state)
+                io.iprint("Interrupted; returned to home.")
+                io.flush_session_log()
+                continue
+
+First Ctrl-C during an action: unwind to this boundary, restore
+baseline if one was captured, resume at the correct root menu.
+
+Repeated Ctrl-C: Python's default behavior; if a second interrupt
+arrives during the handler, the process terminates.  This is correct.
+
+
+Ctrl-C propagation through legacy code
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Problem: the spine can only restore baseline when KeyboardInterrupt
+actually reaches it.  Several legacy paths swallow the interrupt
+silently and return normally.  The spine then sees an ordinary return,
+does not know an interrupt occurred, and does not restore.
+
+Known swallowing sites:
+
+- IFA.menu() line 709: explicit except KeyboardInterrupt: break.
+  Breaks the inner loop and returns the (possibly mutated) triplet
+  as if the user exited the menu normally.
+
+- IFA.menu() line 679 and similar: bare except: around int(input()).
+  Catches KeyboardInterrupt, returns (df,obs,dfxy).
+
+- cmifAnalysis50.menu line ~130-150: bare except: around int(input()).
+  Same pattern — catches and returns.
+
+- IFprocessing7.menu, IFvisualization2.menu: same bare-except
+  patterns in their top-level dispatch loops.
+
+Required fix: at each audited shared menu boundary, insert an
+explicit re-raise above the bare handler:
+
+    raw = logInput("number: ")
+    try:
+        ch = int(raw)
+    except KeyboardInterrupt:
+        raise
+    except:
+        return(df,obs,dfxy)
+
+The existing except KeyboardInterrupt: break in IFA.menu() must be
+changed to raise after the outer spine boundary exists and has passed
+the sleep-interrupt test.  Do not change it before then.
+
+This is a narrow, mechanical edit at 4-5 shared menu functions.
+It does not touch the hundreds of other bare-except clauses in
+analysis/visualization code — those are inside individual actions,
+not menu dispatch boundaries, and their swallowing behavior is
+tolerable because the spine restores baseline regardless of what
+the action's internal state looked like when it returned.
+
+The key invariant: KeyboardInterrupt must propagate out of every
+menu dispatch loop that sits between the spine and an action.
+Internal action code may swallow it; the dispatch boundary may not.
+
+
+Baseline Snapshot
+-----------------
+
+SessionState gains five fields:
+
+    home_df:    Optional[pd.DataFrame] = None
+    home_obs:   Optional[pd.DataFrame] = None
+    home_dfxy:  Optional[pd.DataFrame] = None
+    home_logdf: Optional[pd.DataFrame] = None
+    home_stem:  Optional[str]          = None
+
+home_logdf is required.  Restoring df/obs/dfxy without the matching
+provenance log leaves a state where the log describes operations that
+the data no longer reflects.
+
+capture_home_baseline(state): deep-copy df, obs, dfxy, logdf, stem.
+restore_home_baseline(state): replace state fields with the copies
+if they exist; otherwise retain the current state unchanged.
+
+Capture must happen at each successful state-assignment site, not
+only after startup_menu returns.  The specific sites:
+
+    Function                       Location (approx line)
+    -------------------------------------------------------
+    startup_feature_extraction     controler.py ~1611
+    startup_spectral_flow_import   controler.py ~1739
+    _run_tabular_ingest            controler.py ~2239
+    _run_legacy_call               controler.py ~2526  (load actions only)
+    load_by_stem_with_value        controler.py ~2817
+    import_explicit_paths          controler.py ~2848
+
+Each site already has the pattern:
+
+    state.df = df
+    state.obs = obs
+    state.dfxy = dfxy
+
+The capture call goes immediately after, at the same site:
+
+    capture_home_baseline(state)
+
+Do not capture after mutation actions (processing, visualization,
+SVM, data editing, auto_clean).  Those are what interrupt undoes.
+
+Storage cost: one extra deep copy of the full triplet plus logdf.
+For a million-cell dataset with hundreds of marker columns this is
+a real cost, potentially hundreds of megabytes.  This plan accepts
+that cost explicitly for correctness.  If measurement shows it is
+prohibitive for specific large datasets, a future refinement can
+replace the deep copy with a reload reference (stem + folder path)
+that re-reads from disk on restore.  That alternative trades I/O
+time for memory and requires the on-disk triplet to still exist
+unchanged — a constraint that must be validated before adopting it.
+Do not mix the two strategies; pick one after measuring.
+
+
+Migration Sequence
+------------------
+
+Phase 1: cli.py
+    Add cli.py as a thin controler.main(use_html=False) wrapper.
+    Verify terminal parity with GUI launcher.
+
+Phase 2: Extract spine
+    Create spine.py with one function:
+
+        def run_session(state, *, startup_menu, main_menu):
+
+    controler.py calls it, passing its own startup_menu and main_menu
+    as arguments.  This avoids circular imports: spine.py owns only
+    the loop and has no knowledge of specific actions or menus.
+    All action and menu functions remain in controler.py initially.
+
+    Add the except-KeyboardInterrupt boundary and baseline
+    capture/restore inside run_session.
+
+Phase 2b: Fix legacy menu dispatch boundaries
+    At the 4-5 shared menu functions (IFA.menu, cmifAnalysis50.menu,
+    IFprocessing7.menu, IFvisualization2.menu, and controler.menu_index
+    if applicable), insert except KeyboardInterrupt: raise above the
+    bare except: that wraps int(input()).  Change the existing
+    except KeyboardInterrupt: break in IFA.menu to raise.
+    Do not touch bare-except clauses inside individual actions.
+
+Phase 3: Isolate bridge (optional, when beneficial)
+    Move legacy_ifa5_context and _run_legacy_call to legacy_bridge.py
+    verbatim.  Test viewer and mailbox explicitly.
+
+Further phases (devmode, action extraction, performance) per v1 plan
+when independently useful.  They do not gate Phase 1-2.
+
+
+Required Tests
+--------------
+
+1. Terminal parity: python cli.py reaches the same startup,
+   prepare-data, loading, editing, analysis, visualization, and
+   save/load routes as the GUI launcher.
+
+2. Sleep-interrupt: add a temporary time.sleep(30) action, press
+   Ctrl-C, confirm:
+   - progress cleared
+   - process alive
+   - correct root menu shown
+   - project folder, figure folder, stem, triplet intact (baseline)
+   - another action runs immediately afterward
+   Remove the diagnostic action after testing.
+
+3. Mutate-then-interrupt: add a temporary action that mutates the
+   triplet (e.g. drops a column, adds a row to obs) then sleeps.
+   Interrupt it and verify that df, obs, dfxy, logdf, and stem all
+   match the pre-action baseline exactly.  This catches restore
+   failures that the pure-sleep test cannot.
+
+4. Viewer/mailbox: make a viewer ROI edit, return to a legacy action,
+   confirm mailbox reaches obs.
+
+5. Project context: change project folder, run registration and a
+   legacy action, confirm folders/config/stem/log survive.
+
+6. Performance: startup and menu-redraw timing must not regress.
+
+
+Acceptance Standard
+-------------------
+
+One human can read spine.py and answer:
+
+- Which triplet is active?
+- Which folders are active?
+- Which action is running?
+- Where does Ctrl-C land?
+- What gets restored on interrupt?
+
+If the answer requires tracing callbacks through multiple files,
+the spine is not yet readable enough.

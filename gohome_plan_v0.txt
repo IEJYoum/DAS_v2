@@ -1,0 +1,420 @@
+gohome navigation plan v0
+=========================
+
+Status: draft — goals settled, shape revised to align with spine plan.
+
+
+RELATIONSHIP TO SPINE RESTRUCTURE
+----------------------------------
+
+The spine restructure (spine_restructure_plan_v0.txt) restores the
+original IFA design principle: one visible dispatch loop, functions
+return the triplet, loop continues.  Gohome depends on this shape.
+
+The current controller tangles the catch site across _run_session,
+startup_menu (its own while-True), main_menu, _run_legacy_call,
+legacy_ifa5_context, and IFA.py's menu().  There is no single place
+to catch an interrupt and resume.  The spine creates that place.
+
+Order of work:
+  1. Spine extraction (spine plan steps 1-3) — get one dispatch loop.
+  2. Gohome (this plan) — add the catch, baseline restore, and iget()
+     check inside the spine loop.
+  3. Spine Ctrl-C boundary (spine plan step 4) — becomes a subset of
+     gohome rather than a separate feature.
+
+Gohome should not be attempted before the spine loop exists.  Without
+it, the gohome catch must be threaded through multiple interleaved
+controller and legacy loop layers, requiring a sticky flag and a
+BaseException subclass to fight through 132 bare except: clauses.
+With the spine boundary, the design is simpler and the exception type
+matters less.
+
+
+SETTLED GOALS
+-------------
+
+1.  "gohome" is a prompt-time command only.
+    - The user types gohome (or a GUI/DS equivalent) as their answer to
+      any active prompt.
+    - There is no asynchronous cancellation of running Python code.
+    - If Python is busy computing and not prompting, the user waits.
+
+2.  Ctrl-C in the Python terminal triggers the same gohome behavior.
+    - First Ctrl-C during a session: set gohome flag, unwind to home.
+    - Second Ctrl-C within ~2 s of the first: hard-exit the process.
+    - This only applies to the terminal where Python is running; the HTML
+      browser and DS agent have no equivalent signal.
+
+3.  "Home" means:
+    - If a baseline triplet was captured: restore df, obs, dfxy, stem
+      to the post-load snapshot, then resume at main_menu.
+    - If no data was loaded yet: resume at startup_menu.
+    - Project folder, figure folder, project config, session log, and
+      all other session context survive.  The session is not restarted.
+
+4.  One mechanism for all modes.
+    - Terminal, HTML GUI, and DS all funnel through iget().
+    - The gohome check lives inside iget(); nothing transport-specific
+      is needed.
+
+5.  Scope exclusions:
+    - No persistent HTML Home button that interrupts running code.
+    - No DS-side signal/cancel file.
+    - No second thread or watcher for async cancellation.
+    - A convenience HTML Home button that submits "gohome" as the
+      answer to the current prompt is fine as a cosmetic follow-up
+      but is not part of this plan.
+
+
+WHY THIS IS SUFFICIENT
+----------------------
+
+The HTML frontend (frontend.py) and DS transport (ds_transport.py)
+have no out-of-band channel.  The browser can only POST /answer while
+a prompt is pending.  The DS agent can only append to ds_replies.jsonl
+keyed to the current prompt_id.  Neither can deliver a signal while
+Python is computing.  Designing for async cancellation would require
+new concurrency infrastructure with no existing foundation to build on.
+
+Ctrl-C in the terminal is the one genuine async signal, and it is
+handled by the SIGINT flag approach below.
+
+
+PROPOSED SHAPE
+--------------
+
+This section assumes the spine loop from spine_restructure_plan_v0.txt
+already exists.  References to "spine loop" mean the single dispatch
+loop in spine.py that calls action functions and resumes after each
+one returns.
+
+
+Gohome exception
+~~~~~~~~~~~~~~~~~
+
+    class HomeRequested(Exception):
+        pass
+
+With the spine boundary in place, this can be a plain Exception.
+
+Pre-spine, HomeRequested had to be BaseException to slip past the
+controller's own except-Exception handlers in _run_legacy_call.  With
+the spine, the catch site is above the action dispatch — the action
+returns or raises, and the spine catches either way.  Using Exception
+is more conventional and avoids interaction with SystemExit, generator
+cleanup, and other BaseException plumbing.
+
+The one concern is _run_legacy_call's except-Exception block, which
+would catch HomeRequested(Exception) and treat it as a failure.
+Resolution: add an explicit except-HomeRequested re-raise above the
+except-Exception in _run_legacy_call, or move _run_legacy_call's
+error handling so that HomeRequested is not caught.  This is a small
+targeted change, not a structural issue.
+
+
+Sticky flag in io_adapter
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    # io_adapter.py — new module-level state
+    _HOME_REQUESTED: bool = False
+
+    def request_home() -> None:
+        global _HOME_REQUESTED
+        _HOME_REQUESTED = True
+
+    def clear_home() -> None:
+        global _HOME_REQUESTED
+        _HOME_REQUESTED = False
+
+    def home_requested() -> bool:
+        return _HOME_REQUESTED
+
+Why still needed: bare except: in legacy code will catch HomeRequested
+at one nesting level and resume its loop.  The next iget() call checks
+the flag and raises again.  This repeats until every nested legacy
+menu has returned/broken.  The flag is only cleared by the spine after
+a successful catch.
+
+The sticky flag is needed for the gohome prompt word.  It is also
+useful for Ctrl-C: the SIGINT handler sets the flag, and even if the
+immediate KeyboardInterrupt is caught somewhere, the next iget() call
+raises HomeRequested.
+
+
+iget() gohome check
+~~~~~~~~~~~~~~~~~~~~
+
+Inside iget(), after obtaining the value from any transport mode and
+before returning it to the caller:
+
+    # Near the end of iget(), after value is resolved:
+    if _HOME_REQUESTED or str(value).strip().lower() == "gohome":
+        _HOME_REQUESTED = True          # arm the sticky flag
+        raise HomeRequested()
+
+This covers:
+- User typed "gohome" in terminal, GUI, or DS.
+- SIGINT handler already set the flag before this iget() call.
+- A previous HomeRequested was caught by legacy bare except: and
+  the loop re-entered iget().
+
+
+SIGINT handler (Ctrl-C)
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Installed once at the top of the spine session loop:
+
+    import signal, time
+
+    _last_sigint: float = 0.0
+
+    def _sigint_handler(signum, frame):
+        nonlocal _last_sigint         # or use a mutable container
+        now = time.monotonic()
+        if now - _last_sigint < 2.0:
+            raise SystemExit(1)       # second press: hard exit
+        _last_sigint = now
+        io.request_home()             # first press: set gohome flag
+
+    old_handler = signal.signal(signal.SIGINT, _sigint_handler)
+
+Restore old_handler in the spine's finally block.
+
+Effect: Ctrl-C sets the flag.  If Python is inside input() in terminal
+mode, the KeyboardInterrupt from the OS still fires (CPython special-
+cases SIGINT during input on most platforms).  That interrupt either:
+  - propagates up to the spine catch, or
+  - is caught by a bare except: in legacy code, which re-enters
+    iget(), which sees the flag and raises HomeRequested.
+
+If Python is busy computing (not in input()), the flag sits until the
+next iget() call.  This is the "wait for the next prompt" behavior,
+which is the accepted scope.
+
+
+Baseline triplet on SessionState
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    @dataclass
+    class SessionState:
+        # ... existing fields ...
+        home_df:   Optional[pd.DataFrame] = None
+        home_obs:  Optional[pd.DataFrame] = None
+        home_dfxy: Optional[pd.DataFrame] = None
+        home_stem: Optional[str]          = None
+
+    def capture_home_triplet(state: SessionState) -> None:
+        state.home_df   = state.df.copy(deep=True)
+        state.home_obs  = state.obs.copy(deep=True)
+        state.home_dfxy = state.dfxy.copy(deep=True)
+        state.home_stem = str(state.stem)
+
+    def restore_home_triplet(state: SessionState) -> None:
+        if state.home_df is not None:
+            state.df   = state.home_df.copy(deep=True)
+            state.obs  = state.home_obs.copy(deep=True)
+            state.dfxy = state.home_dfxy.copy(deep=True)
+            state.stem = str(state.home_stem)
+
+
+Action classification
+~~~~~~~~~~~~~~~~~~~~~
+
+The spine needs to know which actions establish a new baseline versus
+which mutate from baseline.  Only load/import actions trigger a
+capture.  Mutation actions (processing, visualization, SVM, data
+editing) are what Home undoes.
+
+Load/import actions (capture after return):
+
+    Function                       Current location (approx line)
+    -------------------------------------------------------
+    startup_feature_extraction     controler.py ~1611
+    startup_spectral_flow_import   controler.py ~1739
+    _run_tabular_ingest            controler.py ~2239
+    _run_legacy_call (load*)       controler.py ~2526
+    load_by_stem_with_value        controler.py ~2817
+    import_explicit_paths          controler.py ~2848
+
+    * _run_legacy_call is also used for non-load actions (ifp.main,
+      ifv.main, etc.).  Capture only when action_label is load,
+      preload, loadLast, or buildDataFrame.
+
+The spine can handle this with a simple tag or return convention:
+
+    result = action(state)
+    if action.is_load:             # or: if action returned a flag
+        capture_home_triplet(state)
+
+The exact mechanism (tag, return value, naming convention) is left to
+the spine implementation.  What matters is that capture happens at the
+spine boundary, not scattered inside 6 different action functions.
+
+
+Spine catch site
+~~~~~~~~~~~~~~~~~
+
+The spine loop (once it exists per the spine restructure plan) becomes:
+
+    while True:
+        try:
+            if state.has_data():
+                keep_going = main_menu(state)
+            else:
+                keep_going = startup_menu(state)
+                if keep_going and state.has_data():
+                    capture_home_triplet(state)
+            if not keep_going:
+                break
+        except HomeRequested:
+            io.clear_home()
+            io.clear_progress()
+            restore_home_triplet(state)
+            io.iprint("Returned to home.")
+            io.flush_session_log()
+            continue
+        except KeyboardInterrupt:
+            # Ctrl-C that reached here directly (not via sticky flag).
+            # Treat identically to HomeRequested.
+            io.clear_home()
+            io.clear_progress()
+            restore_home_triplet(state)
+            io.iprint("Operation interrupted; returned to home.")
+            io.flush_session_log()
+            continue
+
+Both HomeRequested and KeyboardInterrupt land at the same boundary
+and do the same thing.  The SIGINT handler provides the double-press
+hard exit; single interrupts that reach the spine are handled here.
+
+
+LEGACY CODE INTERACTION
+-----------------------
+
+legacy_ifa5_context (controler.py ~1943) is a context manager with a
+finally block that restores builtins.input, module globals, patched
+print shims, plt.show, and working directory.  HomeRequested triggers
+the finally block correctly — Python guarantees finally runs for any
+exception type.  No changes needed to the context manager.
+
+_run_legacy_call (controler.py ~2451) wraps the legacy invocation in
+except-UserAbortError (re-raises) and except-Exception (reports and
+returns None).  HomeRequested(Exception) would be caught by the
+except-Exception block.  Fix: add an explicit re-raise:
+
+    except HomeRequested:
+        raise
+    except Exception as exc:
+        _report_legacy_error(action_label, exc)
+        return
+
+This is the only place in controller code that needs this addition.
+
+Bare except: in legacy code will catch HomeRequested, but the sticky
+flag ensures the next iget() raises again.  Typical patterns:
+
+    try:
+        ch = int(logInput("number: "))
+    except:
+        return(df,obs,dfxy)          # returns — unwinds one level
+
+    try:
+        offs = float(logInput("offset"))
+    except:
+        offs = 1                     # falls through with default
+
+In the return/break case, the function exits and the legacy call
+returns to the spine.  In the default-and-continue case, the function
+proceeds with a default value until the next iget() call raises again.
+Sequential inputs with defaults may execute a few lines with default
+parameters before the next raise, but this is bounded and the baseline
+restore at the spine level repairs any state damage.
+
+
+KNOWN LIMITATIONS
+-----------------
+
+1.  Long computation with no prompts.
+    If Python is in a 10-minute UMAP and never calls iget(), Ctrl-C
+    sets the flag but nothing happens until the computation finishes
+    and the next prompt fires.  Accepted scope.
+
+2.  Legacy bare-except default cascades.
+    A legacy function with five sequential input() calls, each in a
+    bare except: with a default fallback, will execute with all
+    defaults before the function eventually returns.  This might
+    trigger a save or file write with default parameters.  Mitigated
+    by the baseline triplet restore, which reverses any in-memory
+    damage.  Leftover files on disk are acceptable (same as a crash).
+
+3.  Second Ctrl-C timing.
+    The 2-second window for hard exit is approximate.  A user who
+    mashes Ctrl-C rapidly will hard-exit.  This is correct behavior
+    — repeated Ctrl-C should terminate.
+
+4.  GUI and DS cannot Ctrl-C.
+    The HTML browser and DS agent have no way to send a signal to the
+    Python process.  Their only option is typing gohome at the next
+    prompt.  This is an inherent limitation of the transport layer,
+    not a design gap.
+
+
+IMPLEMENTATION SEQUENCE
+-----------------------
+
+Prerequisite: spine extraction (spine plan steps 1-3).
+
+Step 1.  Add HomeRequested exception and sticky flag helpers to
+         io_adapter.py.
+
+Step 2.  Add the gohome check to iget().
+
+Step 3.  Add home_df/home_obs/home_dfxy/home_stem fields to
+         SessionState.  Add capture_home_triplet and
+         restore_home_triplet helpers.
+
+Step 4.  Add the except-HomeRequested and except-KeyboardInterrupt
+         catch in the spine loop.
+
+Step 5.  Add capture_home_triplet calls at the spine boundary after
+         load/import actions return.
+
+Step 6.  Add except-HomeRequested re-raise in _run_legacy_call above
+         the existing except-Exception.
+
+Step 7.  Add SIGINT handler installation and teardown in the spine.
+
+Step 8.  Manual test:
+         - terminal: type gohome at a menu prompt
+         - terminal: press Ctrl-C during a prompt
+         - terminal: press Ctrl-C twice fast (should exit)
+         - HTML GUI: type gohome in the input box
+         - Verify session context (folder, log, config) survives
+         - Verify baseline df is restored after an analysis mutation
+
+
+REFINEMENTS TO SPINE PLAN
+--------------------------
+
+The spine plan (spine_restructure_plan_v0.txt) should be updated in
+three areas to accommodate gohome:
+
+1.  Ctrl-C policy section (lines 147-171).
+    Currently says "does not add gohome" and "does not attempt silent
+    data rollback."  Should instead say:
+    - The spine catches both KeyboardInterrupt and HomeRequested.
+    - Both restore the baseline triplet if one was captured.
+    - The gohome prompt word and the Ctrl-C SIGINT flag both produce
+      the same outcome at the spine boundary.
+
+2.  Action classification.
+    The spine plan's actions.py section does not distinguish load
+    actions from mutation actions.  Should add: actions need a tag or
+    naming convention so the spine knows when to capture a baseline.
+    This is a property of the action, not of the spine.
+
+3.  State rule section (lines 101-121).
+    Should mention the baseline triplet fields (home_df, etc.) as
+    part of SessionState.  They are plain data fields with visible
+    assignments — consistent with the existing state rule.

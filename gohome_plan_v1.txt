@@ -1,0 +1,197 @@
+gohome navigation plan v1
+=========================
+
+Status: proposed, intentionally narrow.
+
+
+GOAL
+----
+
+Allow a user to type the exact word ``gohome`` at a known DAS menu prompt
+and return to the appropriate controller home menu.
+
+This is navigation only.  It is not a rollback system, a computation cancel
+system, or a recovery system.
+
+
+STRICT CONTRACT
+---------------
+
+1. ``gohome`` is recognized only at audited menu-selection prompts.
+   It is not a special command in paths, labels, yes/no questions, numeric
+   parameters, filenames, or arbitrary legacy input prompts.
+
+2. ``gohome`` changes no data and writes no files.
+   It preserves the active ``df``, ``obs``, ``dfxy``, stem, project folder,
+   figure folder, project config, and session log exactly as they are.
+
+3. ``gohome`` is prompt-time only.
+   It cannot interrupt an active computation, image operation, file write, or
+   other code that has not returned to a menu prompt.
+
+4. The controller session is never restarted.
+   It returns to the existing root loop, so project setup and folder prompts
+   are not repeated.
+
+5. Terminal, HTML, and DS use the same command.
+   Each transport already delivers a text reply to the same Python runtime;
+   no GUI button, watcher, thread, or DS side channel is required.
+
+If a desired future behavior violates one of these rules, it is a separate
+feature and must not be added to ``gohome`` opportunistically.
+
+
+WHY THIS IS NARROW
+------------------
+
+The legacy modules contain many broad ``except:`` blocks.  If ``iget()``
+globally raises an exception for every occurrence of ``gohome``, one of those
+blocks can swallow it and continue with a fallback/default value.  That is
+not acceptable for a scientific analysis runtime.
+
+Likewise, converting ``gohome`` to a blank input globally is unsafe because
+many old prompts interpret a blank as "use the default" or "continue".
+
+Therefore, the command must be recognized before a known menu converts its
+reply to an integer, and outside that menu's broad invalid-number handler.
+This makes its behavior explicit and auditable.
+
+
+DATA SEMANTICS
+--------------
+
+``gohome`` does not restore an original/raw triplet in v1.
+
+Restoring data requires either a deep copy of every loaded triplet or a
+guaranteed on-disk reload target.  Both add memory, capture-site, and stale-
+state policy questions.  They are unrelated to safely leaving a menu.
+
+The existing "start over with raw data" behavior remains a separate legacy
+analysis action.  A future controller-level reset feature can be designed
+explicitly after navigation has proven stable.
+
+
+MECHANISM
+---------
+
+Put one small exception and one command parser in ``support/shared_utils.py``
+so every intended dispatcher uses the same definition.
+
+    class HomeRequested(BaseException):
+        """Unwind an approved menu directly to the controller root."""
+
+    def is_gohome_command(value):
+        return str(value).strip().lower() == "gohome"
+
+``BaseException`` is deliberate: controller wrappers commonly catch
+``Exception`` when reporting legacy failures.  Home is control flow, not a
+legacy runtime error, so it must bypass those handlers.
+
+At each approved menu, read the reply before the existing ``try/except`` that
+handles ordinary invalid numeric input:
+
+    raw = input("number: ")
+    if is_gohome_command(raw):
+        raise HomeRequested()
+    try:
+        choice = int(raw)
+    except:
+        return_to_previous_menu()
+
+Every non-``gohome`` reply follows the existing code unchanged.
+
+
+APPROVED MENU SITES
+-------------------
+
+The initial implementation should modify only these shared dispatch menus:
+
+- ``controler.menu_index``
+- ``IFA.menu``
+- ``analysis/IFprocessing7.menu``
+- ``visualization/IFvisualization2.menu``
+- ``analysis/cmifAnalysis50.menu``
+
+Before implementation, verify each is actually invoked by the DAS controller.
+Do not add the command to lower-level prompts just because they call
+``input()``.
+
+The legacy modules may import the parser/exception from ``shared_utils``.
+They already bootstrap or can bootstrap the ``support`` directory.  In DAS,
+``legacy_ifa5_context`` already routes legacy ``input`` calls through the
+terminal/HTML/DS adapter, so the same typed word reaches these menus in every
+transport mode.
+
+
+CONTROLLER SHAPE
+----------------
+
+Only the controller decides which home menu to show.  Do not call
+``main_menu`` from a nested legacy menu.
+
+    def _run_session(state):
+        initialize_once(state)
+
+        while True:
+            try:
+                keep_running = (
+                    main_menu(state)
+                    if state.has_data()
+                    else startup_menu(state)
+                )
+            except HomeRequested:
+                io.clear_progress()
+                io.iprint("Returned to home.")
+                io.flush_session_log()
+                continue
+
+            if not keep_running:
+                return state
+
+``HomeRequested`` passes through ``legacy_ifa5_context``; its ``finally``
+block still restores patched input, print, working-directory, and module
+state before the controller receives it.
+
+
+EXCLUDED FROM V1
+----------------
+
+- Ctrl-C handling or a custom SIGINT handler.
+- Repeated-Ctrl-C exit behavior.
+- Data snapshots, rollback, reload, or "restore raw" behavior.
+- Persistent HTML Home buttons.
+- DS cancellation events or files.
+- Background threads, event watchers, and asynchronous cancellation.
+- Recognition of ``gohome`` at arbitrary free-text prompts.
+
+These exclusions are intentional.  They avoid hidden state changes and make
+the v1 behavior easy to test and explain.
+
+
+ACCEPTANCE TESTS
+----------------
+
+1. In terminal mode, type ``gohome`` at each approved controller and legacy
+   menu.  Confirm the correct root menu appears.
+
+2. Repeat in HTML and DS by typing the same literal text into the active menu
+   prompt.  Confirm no transport-specific code path is required.
+
+3. Before and after each command, confirm ``df``, ``obs``, ``dfxy``, stem,
+   project folder, and figure folder are unchanged.
+
+4. Confirm a normal non-integer reply still performs the original local
+   "return to previous menu" behavior, not global home.
+
+5. Type ``gohome`` into a non-menu prompt.  In v1 this is unsupported; it
+   must not be documented as a safe escape route.
+
+
+GO / NO-GO
+----------
+
+Implement only if the five approved menu sites can be patched and tested
+without altering their ordinary menu behavior.  If any menu catches
+``HomeRequested`` before it reaches the controller, or needs broad changes
+outside its dispatch code, do not widen the feature.  Leave ``gohome`` out
+until the legacy control flow can be made explicit.

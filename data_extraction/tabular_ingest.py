@@ -269,12 +269,9 @@ def partition_triplet(
     dfxy = dfxy.apply(pd.to_numeric, errors="raise")
 
     proposed_obs = _infer_observation_columns(remaining)
+    print_fn(remaining.columns)
     if proposed_obs:
-        # Keep the complete proposed schema in the unified session log before
-        # the user accepts it or switches to the legacy selector.
-        print_fn(f"Detected observation columns ({len(proposed_obs)}):")
-        for column in proposed_obs:
-            print_fn("  " + str(column))
+        print_fn("Autodetected observation columns: " + str(pd.Index(proposed_obs)))
         use_observations = _ask(
             input_fn,
             "use detected observation columns? (y/n) [y]:",

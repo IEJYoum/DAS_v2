@@ -1,0 +1,373 @@
+Spine Restructure Plan v1
+==========================
+
+Status: audit-backed proposal.  No deletion or behavior change is authorized
+by this document alone.
+
+
+Purpose
+-------
+
+Give DAS one readable program spine without discarding working legacy
+algorithms or breaking the HTML viewer, DS transport, Linux terminal use,
+project configuration, or ROI mailbox workflow.
+
+The desired shape is deliberately plain:
+
+    cli.py / gui.py / ds.py
+                |
+                v
+      controler.py: choose I/O transport and build SessionState
+                |
+                v
+      spine.py: root menus, action dispatch, interruption policy
+                |
+                v
+      named action functions and narrow legacy bridge
+                |
+                v
+      existing analysis, visualization, viewer, and image algorithms
+
+The spine is ordinary functions passing one explicit session/triplet holder.
+No event bus, observer pattern, background worker, inheritance tree, or
+hidden action registry is wanted.  ``SessionState`` may remain a dumb named
+container because the triplet, folders, stem, log, and UI flags travel
+together.  It must not become an object-oriented framework.
+
+
+Audit Findings
+--------------
+
+1. ``controler.py`` is already the actual session authority.  It owns
+   startup/main menus, project folders, config adoption, session logs, new
+   prepare-data actions, and calls into legacy menus through
+   ``legacy_ifa5_context``.
+
+2. ``IFA.py`` is still active legacy code, not dead code.  The controller
+   currently calls its loading/editing/processing/visualization/SVM/old-tool
+   functions directly.  It also owns the current mailbox-backed HTML viewer
+   wrapper and ROI-mailbox ingest helper.  Those are integration-critical and
+   must not be deleted as part of an architectural cleanup.
+
+3. ``IFA.main()`` and ``IFA.prepareData()`` are a second, older root-menu
+   runtime.  They do not contain the newer controller prepare-data workflow
+   (current registration, StarDist bridge, project-context handling, new
+   tabular ingest, etc.).  Returning the whole program to ``IFA.main()``
+   would therefore lose functionality and make controller state stale.
+
+4. GUI and DS currently call ``controler.load_legacy_ifa5()`` before the
+   controller starts.  In this environment a direct ``import IFA`` takes
+   about 19 seconds before stopping on missing ``shapely``; importing
+   ``controler`` itself takes about 0.9 seconds.  This eager import is a
+   concrete startup slowdown and makes unrelated actions such as registration
+   depend on legacy analysis dependencies.  It is a high-priority candidate
+   for a guarded, separately tested lazy-loading cleanup -- not an immediate
+   deletion.
+
+5. ``RUNMODE='Koei'`` is real but narrow.  It changes the old IFA import
+   path (DAPI_X/DAPI_Y and fixed observation defaults).  The current
+   controller tabular-ingest path bypasses that code and instead uses its new
+   convention/default detection.  This explains why Koei mode appears to do
+   little in newer workflows: there are now two simplification mechanisms.
+
+6. ``DEVMODE`` is scattered and has conflicting meanings.  In IFA,
+   IFprocessing7, and cmifAnalysis50 it controls menu exception behavior;
+   in feature extraction and stain correction it controls visual/debug
+   artifacts.  A single global assignment would be unsafe.  Development
+   error reporting must be separated from algorithm-specific diagnostic
+   output flags.
+
+7. There are plausible slow-path candidates besides image algorithms:
+   - ``find_latest_stem`` stats every ``*_df.csv`` whenever relevant menus
+     render, which can be expensive in a large/network project directory.
+   - ``flush_session_log`` rewrites the complete in-memory log at each
+     controller checkpoint; this becomes quadratic in total log size and is
+     worse on a network share.
+   - each legacy action performs a mailbox check and enters a large context
+     patch/restore bridge.  The mailbox check is probably small, but it is
+     required by viewer edits and must be measured before changing it.
+
+These findings are reasons to measure and simplify carefully, not permission
+to remove code by appearance alone.
+
+
+Non-Negotiable Safety Rules
+---------------------------
+
+1. No code is deleted merely because ``rg`` does not show a direct caller.
+   Dynamic imports, legacy globals, user-launched standalone scripts, HTML
+   viewer mailbox files, and callback-style entrypoints are all real uses.
+
+2. Each removal/move needs a short inventory row: current owner, direct
+   callers, dynamic/external callers, test route, and replacement (if any).
+   Until that row is complete, classify the code as retained.
+
+3. A mechanical relocation and a behavior change never occur in the same
+   commit.  First preserve behavior and test it; improve it in a later,
+   narrow commit.
+
+4. The ROI mailbox is explicitly retained during the restructure.  Current
+   ownership is legacy IFA/viewer code plus the controller pre-action ingest
+   call.  It can be moved only as one tested unit, not split casually.
+
+5. Project config and session-log behavior remain functional throughout.
+   They are I/O/context state, not optional polish.
+
+
+Rollback And Checkpoints
+------------------------
+
+Git can restore committed history, including the current HEAD backup commit
+``7b99e7c``.  It does not protect uncommitted or untracked work by itself.
+Before restructuring:
+
+1. Review ``git status`` and deliberately preserve the current IFA and
+   tabular-ingest edits plus the existing plan files.
+2. Create one coherent commit for the known-good pre-restructure work.
+3. Create a named branch for the migration and tag/record the pre-spine
+   commit.
+4. Commit each migration phase separately, with a smoke-test note.
+
+Do not use reset/checkout to discard work during this project.  Reverting a
+committed, isolated migration commit is the intended escape hatch.
+
+
+Target Ownership
+----------------
+
+``cli.py``
+    New terminal launcher.  It selects terminal I/O and calls the controller.
+    It owns no menus or analysis logic.  ``python cli.py`` is the documented
+    Linux command.
+
+``gui.py`` and ``ds.py``
+    Transport launchers only.  They parse launch arguments, initialize their
+    transport through controller entrypoints, and do not preload legacy
+    analysis unless a tested compatibility reason remains.
+
+``controler.py``
+    Bootstrap/input-output adapter: initial context, ``SessionState``,
+    terminal/GUI/DS selection, and legacy-bridge construction.  It should not
+    be a second menu runtime once the spine exists.
+
+``spine.py``
+    Small, readable central loop.  It owns root-menu routing, calls actions,
+    chooses startup versus loaded-data home, and owns the one documented
+    interruption boundary.
+
+``actions.py`` (or a small set of plainly named action modules)
+    Holds controller workflow functions only after mechanical extraction.
+    Keep image registration, segmentation, feature extraction, ingest,
+    loading, saving, legacy processing, legacy visualization, and viewer
+    actions as ordinary named functions.  Do not create a parallel runtime.
+
+``legacy_bridge.py``
+    Eventually owns the current ``legacy_ifa5_context`` and
+    ``_run_legacy_call`` behavior.  Move it verbatim first.  Its ``finally``
+    cleanup must run for normal returns, errors, Ctrl-C, and home requests;
+    Python guarantees this when the exception propagates out of ``yield``.
+
+``IFA.py``
+    Archive/compatibility module, not the normal launcher.  Retain the active
+    algorithms and the mailbox/viewer compatibility code until individual
+    replacements are proven.  Archive only its root-menu orchestration after
+    controller/spine parity is demonstrated.
+
+
+RUNMODE And DEVMODE Contract
+----------------------------
+
+``runmode``
+    Selects intentional lab/workflow defaults only.  It must never control
+    traceback visibility.  Filename/lab convention parsers named Koei remain
+    separate from this UI default setting.
+
+``devmode``
+    Selects developer error visibility only.  Normal launch defaults to
+    ``False``; developer launch explicitly requests ``True``.  In dev mode an
+    unexpected action exception reaches a traceback.  In normal mode the same
+    unexpected exception is reported clearly, logged, and returns control to
+    a known menu.  Ctrl-C is control flow in both modes.
+
+Algorithm diagnostic flags
+    ``feature_extract_17.DEVMODE`` and stain-correction ``DEVMODE`` currently
+    request QC figures/heavy debug.  Rename or isolate these later as local
+    diagnostic settings; do not wire them blindly to session ``devmode``.
+
+Runmode cleanup sequence:
+
+1. Make a one-page table of every ``RUNMODE``/``_koei_runmode`` check and
+   identify its actual caller.
+2. Make tabular ingest the documented source of convention/default detection.
+3. Decide whether legacy IFA import still needs Koei mode.  If yes, pass it
+   explicitly through the bridge.  If no, retire only that redundant path
+   after matching import tests.
+4. Do not alter image convention names or parser behavior under this task.
+
+
+Interrupt And Home Policy
+-------------------------
+
+The spine needs one explicit policy rather than a mixture of legacy
+``except KeyboardInterrupt: break`` handlers.
+
+1. ``KeyboardInterrupt`` reaches the spine action boundary, clears progress,
+   and returns to the appropriate root menu.  It is not suppressed as a
+   normal error in either run or dev mode.
+
+2. ``gohome`` is a separate prompt-time command and must be designed as
+   control flow, not as a fake blank value.  If retained after the audit, use
+   one ``HomeRequested(BaseException)`` and a narrowly documented sticky flag
+   in ``io_adapter.iget``.  The sticky flag is needed because legacy bare
+   ``except:`` blocks can swallow the first exception; the next adapter input
+   re-raises until the spine receives it.
+
+3. The spine captures an explicit baseline triplet after actions that create
+   a new dataset: load, import, feature extraction, spectral flow, and
+   tabular ingest.  Mutating actions do not replace that baseline.  The
+   storage cost (deep in-memory copy versus saved-triplet reload reference)
+   must be measured and chosen explicitly before implementation; no silent
+   stale-data restore is acceptable.
+
+4. On a received home/interrupt request, the spine restores the documented
+   baseline if one exists, otherwise retains the current valid triplet.  It
+   does not undo partial external files.  The session/project context remains
+   alive and the process does not restart.
+
+5. Do not remove a legacy interrupt handler until the outer spine boundary,
+   bridge-finally cleanup, and a real interrupt test have passed.  Do not use
+   ``time.sleep`` as signal-routing machinery.
+
+This is a gated phase.  If the bare-except/sticky behavior cannot be shown to
+be predictable in the audited menu routes, do not ship arbitrary-prompt
+``gohome``; retain Ctrl-C at the spine boundary only.
+
+
+Performance Workstream
+----------------------
+
+Do not optimize algorithms during the spine move.  First add small, explicit
+timers around only these boundaries, logged to the existing session log:
+
+1. launcher to first startup prompt;
+2. first legacy-module load;
+3. project/config/latest-stem discovery;
+4. session-log checkpoint write;
+5. legacy mailbox ingest and bridge setup;
+6. each top-level action total.
+
+For each slow path, record folder type (local/network), file count where
+relevant, elapsed seconds, and action.  Do not print per-cell/per-file noise.
+
+Candidate fixes, each separately tested:
+
+1. Remove GUI/DS eager legacy import only after an A/B smoke test proves no
+   startup side effect is required.  Legacy code should load on first legacy
+   action, not before registration/segmentation/ingest.
+2. Cache latest-stem results for one menu render/session state and invalidate
+   only after saving/loading/changing the data folder.  Preserve the existing
+   modified-time selection rule.
+3. Change session-log checkpoints from full-file rewrites to safe incremental
+   appends only if rebasing still writes full prior history to a newly selected
+   project log and permission-lock behavior remains nonfatal.
+4. Measure mailbox scans before considering cache/invalidation.  The mailbox
+   remains functionally required; performance is not a reason to disable it.
+
+
+Migration Sequence
+------------------
+
+Phase 0: Freeze and map
+    - Create the Git checkpoint/branch described above.
+    - Produce the deletion/reachability inventory for all candidates.
+    - Run baseline smoke tests and capture timings before changing structure.
+
+Phase 1: One terminal entrypoint
+    - Add ``cli.py`` as a thin ``controler.main(use_html=False)`` wrapper.
+    - Document it as the standard Linux terminal command.
+    - Keep ``IFA.py`` runnable only as explicit legacy compatibility during
+      this phase.
+
+Phase 2: Extract the spine without behavior changes
+    - Move only ``_run_session``, startup/main routing, and menu dispatch into
+      ``spine.py``.
+    - Preserve the present controller menu shape exactly.
+    - Keep all action functions in place initially; no new prompts or action
+      naming changes.
+
+Phase 3: Isolate the bridge verbatim
+    - Move ``legacy_ifa5_context`` and ``_run_legacy_call`` to
+      ``legacy_bridge.py`` with the same patched globals, mailbox pre-ingest,
+      ``finally`` restoration, metadata capture, and logging behavior.
+    - Test the HTML viewer and mailbox patch application explicitly here.
+
+Phase 4: Establish explicit modes
+    - Add ``devmode`` to launch/session state with default ``False``.
+    - Make action-level exception reporting honor it.
+    - Apply/deapply only the legacy menu error-mode globals through the bridge.
+    - Reconcile runmode handling after its call-site table is complete.
+
+Phase 5: Interrupt/home boundary
+    - Add Ctrl-C first, then execute the sleep-interrupt test.
+    - Add baseline capture and prompt-time ``gohome`` only if the sticky
+      propagation test is deterministic across controller and legacy menus.
+
+Phase 6: Mechanical action extraction and slow-path fixes
+    - Move action groups one at a time only where it makes ownership clearer.
+    - Apply measured performance fixes in isolated commits.
+    - Update README/usage guides: ``cli.py`` standard; ``IFA.py`` legacy.
+
+
+Required Tests
+--------------
+
+1. Terminal parity: ``python cli.py`` on Linux reaches the same current
+   startup, prepare-data, loading, editing, analysis, visualization, viewer,
+   and save/load routes as the controller terminal run.
+
+2. GUI/DS startup: both reach their first prompt without importing/failing on
+   unrelated legacy optional dependencies, once eager load is removed.
+
+3. Viewer/mailbox: make a viewer ROI edit, return to a normal legacy action,
+   and confirm the mailbox patch reaches ``obs``.  This is a release blocker
+   for any bridge move.
+
+4. Project context: change project folder, then run registration,
+   segmentation, feature extraction, tabular ingest, and a legacy action.
+   Confirm folders, config, stem, and session log are retained/rebased as
+   they are today.
+
+5. Run/dev matrix: test Koei and non-Koei input defaults in both devmode
+   states.  Confirm runmode never changes error visibility and devmode never
+   changes data/default selection.
+
+6. Interrupt: run a temporary ``time.sleep(30)`` action, press Ctrl-C once,
+   and confirm the same process survives, progress clears, bridge cleanup
+   occurs, and the correct home appears.  Remove the diagnostic action after
+   testing.
+
+7. Home, if Phase 5 proceeds: type ``gohome`` through terminal, HTML, and DS
+   at both controller and legacy prompts; verify a baseline restore, no stale
+   state ghost, and no partial external-file rollback claim.
+
+8. Performance: compare baseline and post-change timings for local and
+   network project folders.  A restructure is rejected if normal startup or
+   root-menu redraw becomes slower without a clear functional reason.
+
+
+Acceptance Standard
+-------------------
+
+One human can read the central loop in one sitting and answer:
+
+- Which triplet is active?
+- Which project/figure/segmentation folders are active?
+- Which action is running?
+- Where do terminal, HTML, and DS answers enter?
+- Where does Ctrl-C land?
+- Which pieces are legacy compatibility and why are they retained?
+
+If the answer requires following callbacks through many files or guessing
+which global is authoritative, the restructure is incomplete.  If a cleanup
+would make that code shorter but risks a viewer, mailbox, standalone script,
+or unproven indirect caller, retain it until its integration test exists.

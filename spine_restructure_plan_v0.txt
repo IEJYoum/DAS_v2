@@ -1,0 +1,257 @@
+Spine Restructure Plan v0
+=========================
+
+Status: proposed architecture migration.
+
+
+Purpose
+-------
+
+Restore the original useful IFA design principle without restoring the old
+IFA runtime itself:
+
+    one visible program loop
+    -> one active triplet and project context
+    -> menus dispatch functions
+    -> functions return/update the triplet
+    -> return to the same program loop
+
+The program must have one runtime whether launched on Linux terminal, Windows
+terminal, HTML GUI, or DS.  GUI and DS are input/output transports, not
+alternate analysis runtimes.
+
+
+Target Architecture
+-------------------
+
+    cli.py / gui.py / ds.py
+                 |
+                 v
+       controler.py: choose and initialize I/O transport
+                 |
+                 v
+       spine.py: session loop, root menus, dispatch, Ctrl-C policy
+                 |
+                 v
+       actions.py: registration, segmentation, loading, ingest, processing,
+                   visualization, save/load, and other workflow actions
+                 |
+                 v
+       legacy bridges and current algorithm modules
+
+``controler.py`` should become a thin launcher/adapter.  It initializes the
+selected I/O mode, builds the initial project context, and calls the spine.
+It should not be an alternative menu runtime.
+
+``spine.py`` owns only control flow.  It must stay small enough to read in one
+sitting.  It owns no image algorithm, clustering algorithm, or lab convention
+rule.
+
+``actions.py`` owns named workflow actions.  During the first migration pass,
+existing controller action functions may be moved mechanically with no logic
+change.  They may continue to call the current legacy modules through narrow
+bridges.
+
+``support/io_adapter.py`` remains the only terminal/HTML/DS input-output
+adapter.  It does not own menus, data, or workflow policy.
+
+
+IFA Status
+----------
+
+``IFA.py`` is to be relegated to explicit legacy/archive status.
+
+- Do not delete it in this migration.
+- Do not use ``IFA.main()`` as a normal DAS launcher.
+- Preserve it as reference material and as a compatibility bridge for legacy
+  functions that have not yet been adapted.
+- Update documentation so ``python IFA.py`` is labelled legacy-only rather
+  than the standard terminal entrypoint.
+- Do not copy old IFA menu structure into the spine.  The current controller
+  menu shape is the starting behavior to preserve.
+
+The desired result is not "move controller into IFA."  It is "replace both
+competing top-level runtimes with one new, simple spine."
+
+
+CLI Launcher
+------------
+
+Create ``cli.py`` as the standard terminal launcher:
+
+    import controler
+
+    def main():
+        controler.main(use_html=False)
+        return 0
+
+    if __name__ == "__main__":
+        raise SystemExit(main())
+
+It must not duplicate menu logic, project discovery, command-line parsing, or
+I/O handling.  It only selects terminal mode and calls the controller.  The
+initial Linux command becomes:
+
+    python cli.py
+
+This gives Linux users the same DAS actions as GUI and DS users, with terminal
+prompts supplied by ``io_adapter``.
+
+
+State Rule
+----------
+
+Use one explicit mutable state container for the active triplet and project
+context.  The current ``SessionState`` can remain if it stays a plain data
+holder.  It has one concrete benefit over passing many independent values:
+each action needs the same ``df``, ``obs``, ``dfxy``, stem, project folder,
+figure folder, segmentation root, run mode, and session log.
+
+Do not add object hierarchies, inheritance, event classes, observers,
+registries with hidden behavior, or methods that conceal normal data changes.
+If a field is only needed by one action, pass it directly to that action rather
+than adding it to global session state.
+
+The spine and actions should be ordinary functions.  Data must be changed in
+visible assignments such as:
+
+    state.df, state.obs, state.dfxy = df, obs, dfxy
+
+or an equally explicit dictionary assignment.  Readability wins over a more
+abstract API.
+
+
+Run Mode And Dev Mode
+---------------------
+
+``RUNMODE`` and ``DEVMODE`` solve different problems and must remain separate.
+
+- ``runmode``: lab convention and user-workflow defaults.  Example: Koei
+  coordinate and observation defaults.
+- ``devmode``: exception visibility for development.
+
+Normal DAS launches use ``devmode=False``.  Expected user errors are reported
+without a traceback where the relevant action already handles them.
+
+Developer launches may use ``devmode=True``.  Unexpected exceptions must
+propagate with a traceback.
+
+``KeyboardInterrupt`` is neither an expected user error nor a developer
+exception.  It is control flow and must be handled identically in both modes.
+
+Avoid scattered module-level ``DEVMODE`` defaults.  The spine receives the
+explicit setting and the legacy bridge temporarily applies it to the legacy
+modules it invokes, then restores their prior values in ``finally``.
+
+
+Ctrl-C Policy
+-------------
+
+The first implementation does not add ``gohome`` or asynchronous browser/DS
+cancellation.
+
+At the spine action boundary only:
+
+    try:
+        action(state)
+    except KeyboardInterrupt:
+        io.clear_progress()
+        io.iprint("Operation interrupted; returning to DAS home.")
+        continue
+
+The next spine iteration shows ``main_menu`` if a triplet is loaded or
+``startup_menu`` if it is not.
+
+This retains project context and the current active triplet.  It does not
+attempt silent data rollback, recreate raw data, restart project setup, or
+undo partially written files.
+
+Remove explicit legacy ``except KeyboardInterrupt: break`` handlers only
+after this spine boundary exists and has passed the tests below.  Do not use
+``time.sleep`` as interrupt-routing logic.
+
+
+Migration Steps
+---------------
+
+1. Add ``cli.py`` and verify that it starts the current controller in terminal
+   mode with no GUI or DS dependency.
+
+2. Extract only the controller's root session loop and current startup/main
+   menu shape into ``spine.py``.  Leave all actions where they are initially.
+   This step must preserve ordinary menu behavior exactly.
+
+3. Make ``controler.main``, ``controler.main_html``, and ``controler.main_ds``
+   initialize their transport and call the one spine function.
+
+4. Add the spine-level ``KeyboardInterrupt`` boundary.  Keep the existing
+   legacy handlers until the sleep test succeeds.
+
+5. Make ``devmode`` an explicit launch/session setting, separate from
+   ``runmode``.  Apply it temporarily through the legacy bridge and restore
+   legacy globals after every call.
+
+6. Move controller action implementations into ``actions.py`` only when it
+   improves the separation.  Each move must be mechanical: no behavior
+   improvement, redesign, or new prompts in the same change.
+
+7. Mark ``IFA.py`` and its direct launcher as legacy in the README and usage
+   guides.  Retain compatibility bridges until every still-used function has
+   a tested replacement.
+
+
+Required Tests
+--------------
+
+1. Linux terminal parity
+
+   Start ``python cli.py`` in a Linux terminal.  Confirm access to the same
+   startup, prepare-data, loading, editing, processing, visualization, and
+   save/load actions available through the HTML launcher, except for browser-
+   only display behavior.
+
+2. Interrupt a sleep and continue
+
+   Add a temporary diagnostic action that calls ``time.sleep(30)``.  Start it
+   from the normal DAS menu, press Ctrl-C once, and confirm:
+
+   - progress is cleared;
+   - the same Python process remains alive;
+   - DAS returns to the correct root menu;
+   - project folder, figure folder, stem, and active triplet remain intact;
+   - another normal menu action can run immediately afterward.
+
+   Remove the diagnostic action after this test.
+
+3. Dev mode versus run mode
+
+   Run the same harmless failing diagnostic action in all four combinations:
+
+       runmode=Koei, devmode=False
+       runmode=Koei, devmode=True
+       runmode=custom, devmode=False
+       runmode=custom, devmode=True
+
+   Confirm run mode changes only lab/default behavior.  Confirm dev mode
+   changes only traceback/error visibility.  Confirm Ctrl-C has the same
+   return-to-home behavior in all four runs.
+
+4. No hidden state test
+
+   Inspect the spine and action interfaces.  A reviewer must be able to see
+   where the triplet and project context enter, where they are changed, and
+   where they return.  Reject abstractions that hide routine state changes or
+   require tracing callbacks through several files to understand a menu
+   action.
+
+
+Acceptance Standard
+-------------------
+
+The restructure is accepted only if a lab user can understand the top-level
+runtime without reading GUI, DS, or legacy module internals; terminal use has
+full DAS access; and Ctrl-C has one documented, repeatable outcome.
+
+If an abstraction makes the code look cleaner but makes it harder to identify
+the active triplet, current folder, action being run, or failure boundary, do
+not use it.

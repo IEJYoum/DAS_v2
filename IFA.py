@@ -875,9 +875,49 @@ def scaledRaw(df,obs,dfxy):
     df = df/stds
     return(df,obs,dfxy)
 
+def trimPrefix(df,obs,dfxy):
+    markers = ['PANCK','CD45','CD3','CD4','CD8','CD20','CD68','CD163','FOXP3','PD1','PDL1', 'CD31', 'Ecad']
+    prefixes = []
+    for col in df.columns:
+        cl = str(col).split('_')
+        marker_ind = None
+        for i,part in enumerate(cl):
+            if any(part.upper() == m.upper() for m in markers):
+                marker_ind = i
+                break
+        if marker_ind is None or marker_ind == 0:
+            continue
+        prefixes.append('_'.join(cl[:marker_ind])+'_')
+
+    renames = {}
+    for prefix in dict.fromkeys(prefixes):
+        count = sum(str(col).startswith(prefix) for col in df.columns)
+        if count < 2:
+            continue
+        print('trimming repeated prefix:',prefix)
+        for col in df.columns:
+            if not str(col).startswith(prefix):
+                continue
+            new_name = str(col)[len(prefix):]
+            if '_' not in new_name:
+                new_name += '_'
+            renames[col] = new_name
+
+    if len(renames) == 0:
+        print('no repeated marker prefixes found')
+    else:
+        for old,new in renames.items():
+            print(old,'->',new)
+        df.rename(columns=renames,inplace=True)
+
+    return(df,obs,dfxy)
+            
 
 def doPart(df,obs,dfxy, method = 'max'): #edited recently, malwina version doesn't have done = []
     """Partition harmonization: combine marker partitions (e.g., nuclei/cyto/cellmem) into one per marker."""
+    print(df.columns)
+    if input('trim prefixes? (y)') == 'y':
+        df,obs,dfxy = trimPrefix(df,obs,dfxy)
     toSkip = flexMenu('strings to ignore (leave all categories)')
     newDF = pd.DataFrame()
     toSkip += ['nuclei_','cell_','cytoplasm_']

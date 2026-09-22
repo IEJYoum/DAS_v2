@@ -18,7 +18,39 @@ import tifffile as tiff
 # Keep this import commented out for now; the loss-based flow may still be useful later.
 # from realign_mihc_test import mse_loss, rgb_to_k_channel
 
-ROOT = Path(r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\Run")
+# Set to None for the original D10 behavior. Set to one of the named profiles
+# below when triaging that dataset; no command-line arguments are needed.
+DATASET_CONFIG = "ap_mouse_4x"
+DATASET_CONFIGS = {
+    "ap_mouse_3x": {
+        "root": Path(r"Z:\Multiplex_IHC_studies\AP_mouse\2022_TLSworkup\3x Tumor Screen\3x_slides"),
+        "layout": "ap_mouse_3x",
+        "write_nonreg_workbook": False,
+        "rename_without_match": False,
+    },
+    "ap_mouse_4x": {
+        "root": Path(r"Z:\Multiplex_IHC_studies\AP_mouse\2022_TLSworkup\4x\4x_Slides"),
+        "layout": "flat_slides",
+        "write_nonreg_workbook": False,
+        "rename_without_match": False,
+    },
+}
+
+DEFAULT_CONFIG = {
+    "root": Path(r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\Run"),
+    "layout": "d10",
+    "write_nonreg_workbook": True,
+    "rename_without_match": True,
+}
+
+if DATASET_CONFIG is None:
+    ACTIVE_CONFIG = DEFAULT_CONFIG
+else:
+    if DATASET_CONFIG not in DATASET_CONFIGS:
+        raise ValueError("unknown DATASET_CONFIG: " + str(DATASET_CONFIG))
+    ACTIVE_CONFIG = DATASET_CONFIGS[DATASET_CONFIG]
+
+ROOT = ACTIVE_CONFIG["root"]
 CHECK = ROOT / "Registration_Check"
 TRASH = CHECK / "trash"
 NONREG_XLSX = TRASH / "d10_nonreg_triage.xlsx"
@@ -54,10 +86,18 @@ def display_image(image):
 
 def thumbnail_row(path):
     parts = path.stem.split("_")
+    layout = ACTIVE_CONFIG.get("layout", "d10")
+    if layout == "flat_slides":
+        slide = parts[3] if len(parts) > 3 else ""
+    elif layout == "ap_mouse_3x":
+        # 3x check names append one scene digit to the five-digit slide folder.
+        slide = parts[3][0:5] if len(parts) > 3 else ""
+    else:
+        slide = parts[-5] if len(parts) >= 5 else ""
     return {
         "name": path.name,
         "path": path,
-        "slide": parts[-5] if len(parts) >= 5 else "",
+        "slide": slide,
         "roi": parts[-1] if parts else "",
         "tail": path.stem.split("_", 1)[1] if "_" in path.stem else path.stem,
     }
@@ -178,12 +218,20 @@ def choose_trash_names(candidates, by_name, images):
 
 
 def matching_fullres_files(row):
-    roi_dir = ROOT / row["slide"] / "Registered_Regions" / row["roi"]
-    if not roi_dir.is_dir():
-        return []
+    layout = ACTIVE_CONFIG.get("layout", "d10")
+    if layout == "ap_mouse_3x":
+        roi_dirs = [
+            ROOT / group / row["slide"] / "Registered_Regions" / row["roi"]
+            for group in ("R", "NR")
+        ]
+    else:
+        roi_dirs = [ROOT / row["slide"] / "Registered_Regions" / row["roi"]]
     return sorted(
         [
-            p for p in roi_dir.iterdir()
+            p
+            for roi_dir in roi_dirs
+            if roi_dir.is_dir()
+            for p in roi_dir.iterdir()
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS and row["tail"] in p.stem
         ],
         key=lambda p: p.name.lower(),
@@ -323,13 +371,15 @@ def main():
         [p for p in CHECK.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS and p.name.lower().startswith("trash_")]
     )
     print("output folder:", TRASH)
-    print("nonreg workbook will be saved to:", NONREG_XLSX)
+    if ACTIVE_CONFIG.get("write_nonreg_workbook", True):
+        print("nonreg workbook will be saved to:", NONREG_XLSX)
     print("selection workbook will be saved to:", SELECTION_XLSX)
     print("candidate PNGs will be saved in:", TRASH)
     print("debug logs will be saved in:", TRASH)
     print("known moved failure image files already in trash:", known_failures_before)
     print("known prefixed thumbnails already in Registration_Check:", known_prefixed_before)
-    write_nonreg_xlsx()
+    if ACTIVE_CONFIG.get("write_nonreg_workbook", True):
+        write_nonreg_xlsx()
     stats, candidates, images, known_prefixed = scan_check_folder()
     print("scanned files:", len(stats))
     print("black-pixel candidates:", len(candidates))
@@ -352,9 +402,12 @@ def main():
             missing_lines.append(f"{name}\tno full-res match found")
         for path in matches:
             move_to_trash(path, moved_lines)
-        new_path = rename_thumbnail_as_trash(row["path"], renamed_lines)
-        renamed_paths[name] = new_path
-        row["path"] = new_path
+        if matches or ACTIVE_CONFIG.get("rename_without_match", True):
+            new_path = rename_thumbnail_as_trash(row["path"], renamed_lines)
+            renamed_paths[name] = new_path
+            row["path"] = new_path
+        else:
+            renamed_lines.append(f"SKIP_NO_FULLRES_MATCH\t{row['path']}")
     write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed_paths)
     write_log(
         stats,
