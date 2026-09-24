@@ -1914,7 +1914,7 @@ def reconstructIndex(df,obs,dfxy):
     ind = cm.multiObMenu(obs,'columns to combine to make new index',required=True)
     indx = obs.loc[:,ind[0]].astype(str).copy()
     for col in ind[1:]:
-        indx += obs.loc[:,col].astype(str)
+        indx += '_' + obs.loc[:,col].astype(str)
     df.index,obs.index,dfxy.index = indx,indx,indx
     return(df,obs,dfxy)
 
