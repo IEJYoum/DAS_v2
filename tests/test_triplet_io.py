@@ -45,6 +45,27 @@ class TripletIoTests(unittest.TestCase):
             self.assertTrue(all(path.is_file() for path in paths.values()))
             self.assertFalse((folder / "sample_logdf.csv").exists())
 
+    def test_tabular_ingest_does_not_fabricate_cellid(self):
+        assembled = pd.DataFrame(
+            {
+                "DAPI_X": [10.0, 20.0],
+                "DAPI_Y": [30.0, 40.0],
+                "patient": ["P1", "P1"],
+                "marker": [1.1, 2.2],
+            }
+        )
+        answers = iter(["y", "y"])
+        ingest = controler.load_tabular_ingest()
+
+        _df, obs, _dfxy, _convention = ingest.partition_triplet(
+            assembled,
+            input_fn=lambda *args, **kwargs: next(answers),
+            print_fn=lambda *args: None,
+        )
+
+        self.assertNotIn("cellid", obs.columns)
+        self.assertListEqual(list(obs.columns), ["patient"])
+
 
 if __name__ == "__main__":
     unittest.main()

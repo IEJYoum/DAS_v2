@@ -62,6 +62,15 @@ try:
     import image_sources
 except Exception:
     image_sources = None
+try:
+    from ingest_sources import expand_source_spec as expand_generic_source_spec
+    from ingest_sources import has_glob_magic
+except Exception:
+    expand_generic_source_spec = None
+
+    def has_glob_magic(value):
+        text = str(value or "")
+        return "*" in text or "?" in text or ("[" in text and "]" in text)
 from shared_utils import (
     load_project_config_values,
     save_project_config_updates,
@@ -972,16 +981,20 @@ def expand_input_line(line):
     out = []
 
     if has_glob_magic(line):
-        try:
-            matches = glob.glob(line, recursive=True)
-        except Exception:
-            matches = []
-        i = 0
-        while i < len(matches):
-            p = os.path.normpath(matches[i])
+        if callable(expand_generic_source_spec):
+            try:
+                matches = expand_generic_source_spec(line, want="files")
+            except Exception:
+                matches = []
+        else:
+            try:
+                matches = [Path(path) for path in glob.glob(line, recursive=True)]
+            except Exception:
+                matches = []
+        for match in matches:
+            p = os.path.normpath(str(match))
             if os.path.isfile(p) and is_supported_asset_file(p):
                 out.append(p)
-            i += 1
         return dedupe_keep_order(out)
 
     if os.path.isdir(s):
@@ -1316,6 +1329,28 @@ def _normalize_path_list(values, *, keep_missing=False):
             out.append(candidate)
         i += 1
     return out
+
+
+def _expand_viewer_segmentation_glob(raw):
+    """Resolve a viewer glob to existing segmentation roots.
+
+    The viewer maps each slide_scene against roots, not against a global list
+    of mask files.  Globbed files therefore contribute their parent folders.
+    Literal files keep the legacy single-scene behavior in the prompt below.
+    """
+    if not callable(expand_generic_source_spec):
+        return []
+    try:
+        matches = expand_generic_source_spec(raw, want="either")
+    except Exception:
+        return []
+    roots = []
+    for match in matches:
+        candidate = match if match.is_dir() else match.parent
+        path = normalize_stored_path(candidate)
+        if path != "" and os.path.isdir(path) and path not in roots:
+            roots.append(path)
+    return roots
 
 
 def load_inherited_project_segmentation_roots(folder):
@@ -2539,7 +2574,7 @@ def prompt_segmentation_roots(meta, current_roots=None):
                         {
                             "value": "y",
                             "label": "change folders",
-                            "description": "Replace or edit the segmentation folder list.",
+                            "description": "Replace or add segmentation folders or globs.",
                         },
                     ]
                 },
@@ -2555,14 +2590,14 @@ def prompt_segmentation_roots(meta, current_roots=None):
         print("Segmentation folders are not configured.")
         if hint != "":
             print("Hint:", hint)
-        print("Enter one segmentation folder at a time. Blank finishes the list.")
+        print("Enter one segmentation folder or glob at a time. Blank finishes the list.")
         pending = []
 
     out = []
     while True:
         raw = pending.pop(0) if len(pending) > 0 else strip_quotes(
             cvh_input(
-                "segmentation folder [blank = done]: ",
+                "segmentation folder or glob [blank = done]: ",
                 prompt_meta={
                     "options": [
                         {
@@ -2576,6 +2611,16 @@ def prompt_segmentation_roots(meta, current_roots=None):
         )
         if raw == "":
             break
+        if has_glob_magic(raw):
+            matches = _expand_viewer_segmentation_glob(raw)
+            if len(matches) == 0:
+                print("Segmentation glob matched no usable folders:", raw)
+                continue
+            for candidate in matches:
+                if candidate not in out:
+                    out.append(candidate)
+            print("Segmentation glob added", len(matches), "folder(s).")
+            continue
         candidate = normalize_stored_path(raw)
         if candidate == "":
             print("Path is not usable on this system. Please enter a native path.")

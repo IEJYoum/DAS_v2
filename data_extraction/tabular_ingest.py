@@ -320,8 +320,6 @@ def partition_triplet(
         obs = pd.DataFrame(index=remaining.index)
         print_fn("No observation columns were detected.")
 
-    if "cellid" not in {normalize_convention_key(column) for column in obs.columns}:
-        obs.insert(0, "cellid", remaining.index.astype(str))
     obs = obs.astype(str)
 
     if remaining.empty or len(remaining.columns) == 0:
