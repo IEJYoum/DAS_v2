@@ -1349,10 +1349,15 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
         chanT = input('compare to chanel threshold? (y)')
         log = input('log2 transform data (before scoring step- does not impact thresholds) (y)')
         return([],[chanT,log])
+    # Matrix typing may rename/clean its working dataframe.  Keep that work
+    # isolated so auxiliary neighborhood/radius features remain available to
+    # downstream analysis after the new obs labels are added.
+    original_df,original_obs,original_dfxy = dfs[0],dfs[1],dfs[2]
     drop_cols = [col for col in dfs[0].columns if 'neighbors' in str(col).lower() or 'radius' in str(col).lower()]
+    scoring_df = original_df.drop(columns=drop_cols).copy()
     if len(drop_cols) > 0:
         print('ignoring neighborhood/radius columns for matrix celltyping:',drop_cols)
-        dfs = [dfs[0].drop(columns=drop_cols),dfs[1],dfs[2]]
+    dfs = [scoring_df,original_obs.copy(),original_dfxy.copy()]
     if clean:
         print(dfs[0].shape,dfs[0].columns,'... cleaning')
         dfs,n = ifv.autoClean(dfs,['n'])
@@ -1380,7 +1385,7 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
     typed_dfs = maxeyTypeH(dfs, below_thresh_key = btkey, bias = BIAS, threshold = PRIMARY_MT_THRESH, method = PRIMARY_MT_METHOD,log=log)
     if typed_dfs is None:
         print('celltyping failed')
-        return(dfs,[])
+        return([original_df,original_obs,original_dfxy],[])
     dfs = typed_dfs
 
     #each of the 4 pieces below is independent: subsets fresh from dfs, and only recombines
@@ -1419,7 +1424,17 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
         print('skipping Immune Functional: Matrix (no matrix file found)')
 
 
-    return(dfs,[])
+    type_cols = [col for col in dfs[1].columns if str(col).endswith(': Matrix')]
+    for col in type_cols:
+        # Rows removed only from the temporary scoring view have no valid
+        # matrix result.  Mark those explicitly rather than dropping their
+        # measurements or retaining a stale label from an earlier run.
+        original_obs[col] = 'not evaluated'
+        original_obs.loc[dfs[1].index,col] = dfs[1].loc[:,col]
+    if dfs[0].shape[0] != original_df.shape[0]:
+        print('matrix celltyping retained all original data; ',original_df.shape[0] - dfs[0].shape[0],
+              'cells were not evaluated after temporary cleaning')
+    return([original_df,original_obs,original_dfxy],[])
 
 def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName = 'Primary Celltype: Matrix', default = '5: stromal',
                singleType = True, threshold = None, below_thresh_key = None, bias = {},log=''):

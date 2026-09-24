@@ -730,10 +730,10 @@ def loadingMenu(df=9,obs=9,dfxy=9):
           "save unique list of obs for making import table","rename column",
           "combine another prepared dataset (and handle mixed partitions)","handle mixed partitons in existing data",
           "scale data (z-score, etc)","autoclean NA values","edit observation labels","fillna","annotate cells that agree in other annotation categories",
-          "sum columns"]
+          "sum columns","reconstruct index"]
     fn = [save,dropCells,editObs,dropCols,importBiom,
           combineObs,saveObs,renCol,combineData,doPart,scale,autoClean,editLabels,fillNA,agreeThresh,
-          sumcols]
+          sumcols,reconstructIndex]
     df,obs,dfxy,*log = menu(op,fn,df,obs,dfxy)
     print(df.shape,obs.shape,dfxy.shape)
 
@@ -1075,10 +1075,62 @@ def combineData(df,obs,dfxy):
     return(D[0],D[1],D[2])
 
 
+def _prefix_strip_align(target_index, source_df, max_strips=3):
+    """Reindex source_df by stripping _-delimited prefixes until indexes match.
+
+    Tries all combinations of stripping 0..max_strips leading tokens from
+    both target_index and source_df.index.  Returns a reindexed copy of
+    source_df whose index uses the original target values, or None.
+    """
+    def _strip(idx, n):
+        if n == 0:
+            return idx
+        return idx.str.split('_', n=n).str[n:].str.join('_')
+
+    best_combo = None
+    best_count = 0
+    for tn in range(max_strips + 1):
+        t_s = _strip(target_index, tn)
+        if t_s.duplicated().any():
+            continue
+        for sn in range(max_strips + 1):
+            if tn == 0 and sn == 0:
+                continue
+            s_s = _strip(source_df.index, sn)
+            if s_s.duplicated().any():
+                continue
+            count = int(s_s.isin(t_s).sum())
+            if count > best_count:
+                best_count = count
+                best_combo = (tn, sn)
+
+    if best_combo is None or best_count == 0:
+        return None
+
+    tn, sn = best_combo
+    t_s = _strip(target_index, tn)
+    s_s = _strip(source_df.index, sn)
+    stripped_to_orig = pd.Series(target_index.values, index=t_s)
+    new_index = s_s.map(stripped_to_orig)
+    matched = new_index.notna()
+    out = source_df.loc[matched].copy()
+    out.index = new_index[matched]
+    return out
+
+
 def combineObs(df,obs,dfxy):
     """Import observation columns from another prepared triplet using index intersection."""
     tdf,nobs,txy = load(9,9,9)
     binds = obs.index.intersection(nobs.index)
+    if len(binds) == 0:
+        print("no direct index match — trying prefix-stripped alignment...")
+        aligned = _prefix_strip_align(obs.index, nobs)
+        if aligned is not None:
+            nobs = aligned
+            binds = obs.index.intersection(nobs.index)
+            print("matched",len(binds),"rows after stripping index prefixes")
+        else:
+            print("prefix stripping found no match either")
     tdf,txy = 9,9
     added_cols = []
     filled_existing_cols = []
@@ -1731,14 +1783,16 @@ def unpackObs(obs):
 def loadLast(bl1=None,bl2=None,bl3=None):
     """Resolve most-recent saved stem and delegate to preload()."""
     global TSTEM
-    for file in sortByTime(os.listdir(SAVEFOLDER)):
+    for file in sortByTime(os.listdir(SAVEFOLDER), path=SAVEFOLDER):
         if file.endswith('_df.csv') and not file.endswith('_logdf.csv'):
             TSTEM = '_'.join(file.split('_')[:-1])
             print(TSTEM)
             return(preload(9,9,9))
 
-def sortByTime(files,path=SAVEFOLDER):
+def sortByTime(files,path=None):
     """Return files ordered by modified time (newest first)."""
+    if path is None:
+        path = SAVEFOLDER
     print(files)
     times = []
     for f in files:
@@ -1756,24 +1810,35 @@ def sortByTime(files,path=SAVEFOLDER):
     return(sortd)
 
 
+def _triplet_paths(folder, stem):
+    """Resolve only the three real triplet members; never treat logdf as df."""
+    folder = Path(folder)
+    stem = str(stem).strip()
+    paths = (
+        folder / (stem + "_df.csv"),
+        folder / (stem + "_obs.csv"),
+        folder / (stem + "_dfxy.csv"),
+    )
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("missing prepared triplet file(s): " + "; ".join(missing))
+    return tuple(str(path) for path in paths)
+
+
+def _stem_from_triplet_member(path):
+    name = Path(str(path)).name
+    for suffix in ("_df.csv", "_obs.csv", "_dfxy.csv"):
+        if name.endswith(suffix):
+            return name[:-len(suffix)]
+    return ""
+
+
 def preload(bl1,bl2,bl3,path = TPATH):
     """Load df/obs/dfxy triplet by current TSTEM naming convention."""
     if path == "none" or path == "":
         path = SAVEFOLDER
     print(path)
-    df_path = None
-    obs_path = None
-    dfxy_path = None
-    for file in os.listdir(path):
-        #print("_".join(file.split("_")[:-1]))
-        if TSTEM == "_".join(file.split("_")[:-1]):
-            print('loading..',file)
-            if "dfxy" in file:
-                dfxy_path = path+"/"+file
-            elif "df" in file:
-                df_path = path+"/"+file
-            elif "obs" in file:
-                obs_path = path+"/"+file
+    df_path, obs_path, dfxy_path = _triplet_paths(path, TSTEM)
 
     df,obs,dfxy = ifprog.load_triplet_csvs(
         df_path,
@@ -1801,38 +1866,30 @@ def load(bl1,bl2,bl3,path = "none"):
     if path == "none":
         path = SAVEFOLDER
     print(path)
-    #"C:/Users/youm/.spyder-py3/src"
     while True:
-        #logInput('going into navigate')
         npath = navigate(path,text="select dataframe to load",sbt=True)
         print(npath,"out of navigate")
-        if npath is list:
+        if npath == "done":
+            return(bl1,bl2,bl3)
+        if isinstance(npath, list):
             print("please select specific file")
             continue
-        path = npath
-        if not os.path.isdir(path):
+        selected = Path(str(npath))
+        if selected.is_dir():
+            path = str(selected)
+            continue
+        stem = _stem_from_triplet_member(selected)
+        if stem == "":
+            print("please select a _df.csv, _obs.csv, or _dfxy.csv triplet member")
+            path = str(selected.parent)
+            continue
+        path = str(selected.parent)
+        try:
+            df_path, obs_path, dfxy_path = _triplet_paths(path, stem)
             break
-
-    name = "_".join(path.split("_")[:-1])
-    name=name.split("/")[-1]+"_"
-    #print(name,path)
-    path = "/".join(path.split("/")[:-1])
-    #print('searching for',name,'in',path)
-    df_path = None
-    obs_path = None
-    dfxy_path = None
-    for file in os.listdir(path):
-        fn = "_".join(file.split("_")[:-1])
-        fn=fn.split("/")[-1]+"_"
-        #print(fn,fn==name)
-        if fn == name:
-            print(file)
-            if "dfxy" in file:
-                dfxy_path = path+"/"+file
-            elif "df" in file:
-                df_path = path+"/"+file
-            elif "obs" in file:
-                obs_path = path+"/"+file
+        except FileNotFoundError as exc:
+            print(exc)
+            continue
 
     df,obs,dfxy = ifprog.load_triplet_csvs(
         df_path,
@@ -1848,7 +1905,17 @@ def load(bl1,bl2,bl3,path = "none"):
     #obs.index = ser
     #dfxy = dfxy.loc[df.index,:]
     #logInput()
-    _record_loaded_triplet_context(path, df_path or obs_path or dfxy_path or "", name[:-1] if name.endswith("_") else name)
+    _record_loaded_triplet_context(path, df_path, stem)
+    return(df,obs,dfxy)
+
+
+def reconstructIndex(df,obs,dfxy):
+    """Rebuild the shared dataframe index by concatenating selected obs columns."""
+    ind = cm.multiObMenu(obs,'columns to combine to make new index',required=True)
+    indx = obs.loc[:,ind[0]].astype(str).copy()
+    for col in ind[1:]:
+        indx += obs.loc[:,col].astype(str)
+    df.index,obs.index,dfxy.index = indx,indx,indx
     return(df,obs,dfxy)
 
 

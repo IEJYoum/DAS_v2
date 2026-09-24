@@ -1,8 +1,19 @@
+import os
+import sys
 import time
+from math import ceil
+from pathlib import Path
 
 import numpy as np
 
 import seg_v0 as seg
+try:
+    import image_sources
+except ImportError:
+    support_dir = Path(__file__).resolve().parents[1] / "support"
+    if str(support_dir) not in sys.path:
+        sys.path.insert(0, str(support_dir))
+    import image_sources
 
 
 def check_stardist_available():
@@ -72,6 +83,179 @@ def predict_stardist(stardist_model, stardist_normalize, dapi_array):
         out[wy0:wy1, wx0:wx1][mask] = crop[mask] + label_offset
         label_offset += int(tile_labels.max())
     return out
+
+
+def _normalize_with_bounds(tile, low, high):
+    image = np.asarray(tile, dtype=np.float32)
+    if high <= low:
+        return image - float(low)
+    image -= float(low)
+    image /= float(high - low)
+    return image
+
+
+def _preview_shape(shape_yx, max_edge):
+    stride = max(1, int(ceil(max(shape_yx) / float(max_edge))))
+    return stride, (int(ceil(shape_yx[0] / stride)), int(ceil(shape_yx[1] / stride)))
+
+
+def _copy_preview(preview, tile, y0, x0, stride):
+    y1, x1 = y0 + tile.shape[0], x0 + tile.shape[1]
+    ys = np.arange(((y0 + stride - 1) // stride) * stride, y1, stride, dtype=np.int64)
+    xs = np.arange(((x0 + stride - 1) // stride) * stride, x1, stride, dtype=np.int64)
+    if len(ys) == 0 or len(xs) == 0:
+        return
+    preview[np.ix_(ys // stride, xs // stride)] = tile[np.ix_(ys - y0, xs - x0)]
+
+
+def _stream_source(image_path, dapi_contains):
+    sources = image_sources.iter_channel_sources(image_path)
+    if len(sources) == 1:
+        return sources[0]
+    return image_sources.resolve_channel(sources, contains=dapi_contains)
+
+
+def _save_streaming_run_text(output_folder, scene_name, source, low, high, runtime_seconds, engine_timings, lines, saved_paths):
+    """Write the normal StarDist run artifact without re-reading the full source TIFF."""
+
+    text_path = output_folder / (str(scene_name) + "_training.txt")
+    text = [
+        "scene: " + str(scene_name),
+        "mode: " + str(seg.RUN_MODE),
+        "core: " + str(seg.CORE),
+        "dapi_path: " + str(source.path),
+        "dapi_channel: " + str(source.channel_name or source.marker or source.channel_index),
+        "dapi_p1: " + str(low),
+        "dapi_p99_8: " + str(high),
+        "output_folder: " + str(output_folder),
+        "runtime_seconds: " + str(runtime_seconds),
+    ]
+    text.extend(lines)
+    text.append("")
+    text.append("saved_outputs:")
+    for key in sorted(saved_paths):
+        text.append(key + ": " + str(saved_paths[key]))
+    text.append("")
+    text.append("engine_runtimes:")
+    for key in ["stardist_model_load_seconds", "stardist_predict_seconds"]:
+        text.append(key + ": " + str(engine_timings.get(key)))
+    text_path.write_text("\n".join(text) + "\n", encoding="utf-8")
+    return text_path
+
+
+def run_stardist_streaming(input_path, output_root, scene_name, dapi_contains):
+    """Run StarDist from bounded TIFF windows and write labels directly to disk."""
+
+    started = time.time()
+    source = _stream_source(Path(input_path), dapi_contains)
+    print("StarDist memory-safe input:", source.path)
+    print("StarDist channel:", source.channel_name or source.marker or source.channel_index)
+    with image_sources.open_channel_window_reader(source) as reader:
+        shape_yx = reader["shape_yx"]
+        print("StarDist window reader:", image_sources.window_reader_summary(reader))
+        low, high = image_sources.estimate_channel_percentiles(reader, 1.0, 99.8)
+        print("StarDist global normalization:", "p1=", low, "p99.8=", high)
+        windows = list(image_sources.iter_tile_windows(shape_yx, seg.STARDIST_TILE_SIZE, seg.STARDIST_TILE_OVERLAP))
+        print("StarDist inference windows:", len(windows), "| tile=", seg.STARDIST_TILE_SIZE, "| overlap=", seg.STARDIST_TILE_OVERLAP)
+
+        output_root = Path(output_root)
+        seg.OUTPUT_ROOT = output_root
+        output_folder = seg.next_output_folder()
+        base_name = "StarDist_" + str(scene_name) + "_labeled_cells"
+        labeled_tiff_path = output_folder / (base_name + ".tif")
+        partial_tiff_path = output_folder / (base_name + "__partial.tif")
+        stride, preview_shape = _preview_shape(shape_yx, seg.DEBUG_MAX_SIZE)
+        dapi_preview = np.zeros(preview_shape, dtype=np.float32)
+        labels_preview = np.zeros(preview_shape, dtype=np.uint32)
+
+        load_started = time.time()
+        stardist_model, _stardist_normalize = load_stardist_model()
+        model_load_seconds = time.time() - load_started
+        predict_started = time.time()
+        label_offset = 0
+        assigned_labels = 0
+        sink = image_sources.create_label_tiff_sink(partial_tiff_path, shape_yx, dtype=np.uint32)
+        target = None
+        try:
+            progress_every = max(1, len(windows) // 20)
+            for index, window in enumerate(windows, start=1):
+                tile = image_sources.read_channel_window(reader, window)
+                normalized = _normalize_with_bounds(tile, low, high)
+                tile_labels, _ = stardist_model.predict_instances(normalized, axes="YX")
+                read_y0, read_x0 = window["read_y0"], window["read_x0"]
+                write_y0, write_y1 = window["write_y0"], window["write_y1"]
+                write_x0, write_x1 = window["write_x0"], window["write_x1"]
+                crop = tile_labels[
+                    write_y0 - read_y0:write_y1 - read_y0,
+                    write_x0 - read_x0:write_x1 - read_x0,
+                ]
+                target = sink[write_y0:write_y1, write_x0:write_x1]
+                mask = crop > 0
+                target[mask] = crop[mask] + label_offset
+                assigned_labels += int(tile_labels.max())
+                if int(tile_labels.max()) > 0:
+                    label_offset += int(tile_labels.max())
+
+                raw_crop = tile[
+                    write_y0 - read_y0:write_y1 - read_y0,
+                    write_x0 - read_x0:write_x1 - read_x0,
+                ]
+                _copy_preview(dapi_preview, raw_crop, write_y0, write_x0, stride)
+                _copy_preview(labels_preview, target, write_y0, write_x0, stride)
+                if index == 1 or index == len(windows) or index % progress_every == 0:
+                    print("StarDist tile", str(index) + "/" + str(len(windows)), "| labels_assigned=", assigned_labels)
+            sink.flush()
+        finally:
+            target = None
+            sink.flush()
+            mmap = getattr(sink, "_mmap", None)
+            del sink
+            if mmap is not None:
+                mmap.close()
+        os.replace(partial_tiff_path, labeled_tiff_path)
+
+    normalized_preview = _normalize_with_bounds(dapi_preview, low, high)
+    binary_path = output_folder / ("StarDist_" + str(scene_name) + "_prediction_binary.png")
+    overlay_path = output_folder / ("StarDist_" + str(scene_name) + "_prediction_overlay.png")
+    labeled_png_path = output_folder / (base_name + ".png")
+    seg.save_png(binary_path, (labels_preview > 0).astype(np.uint8) * 255)
+    seg.save_label_overlay_png(overlay_path, labels_preview, normalized_preview, color=(255, 0, 0))
+    seg.save_label_overlay_png(labeled_png_path, labels_preview, normalized_preview, color=(255, 0, 0))
+
+    engine_timings = seg.make_engine_timings()
+    engine_timings["stardist_model_load_seconds"] = model_load_seconds
+    engine_timings["stardist_predict_seconds"] = time.time() - predict_started
+    runtime_seconds = time.time() - started
+    saved_paths = {
+        "StarDist_prediction_binary_png": binary_path,
+        "StarDist_labeled_cells_png": labeled_png_path,
+        "StarDist_labeled_cells_tif": labeled_tiff_path,
+        "StarDist_prediction_overlay_png": overlay_path,
+    }
+    lines = [
+        "StarDist_model_name: " + str(seg.STARDIST_MODEL_NAME),
+        "StarDist_memory_mode: windowed",
+        "StarDist_window_reader: " + str(source.path),
+        "StarDist_global_p1: " + str(low),
+        "StarDist_global_p99_8: " + str(high),
+        "StarDist_windows: " + str(len(windows)),
+        "StarDist_cells_assigned: " + str(assigned_labels),
+    ]
+    text_path = _save_streaming_run_text(
+        output_folder,
+        scene_name,
+        source,
+        low,
+        high,
+        runtime_seconds,
+        engine_timings,
+        lines,
+        saved_paths,
+    )
+    saved_paths["training_txt"] = text_path
+    for path in saved_paths.values():
+        seg.print_saved(path)
+    return text_path
 
 
 def run_stardist(output_folder, dapi_array, mask_labeled, dapi_scale, engine_timings):

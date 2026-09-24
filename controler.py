@@ -57,10 +57,8 @@ from state_log import (
     get_df_state_code,
     get_obs_state_code,
     get_state_code,
-    load_logdf,
     log_action,
     make_logdf,
-    save_logdf,
     state_snapshot,
 )
 
@@ -1529,7 +1527,10 @@ def _run_stardist_segmentation(state: SessionState) -> None:
         builtins.input = old_input
         builtins.print = old_print
         os.chdir(old_cwd)
-    if output_root is not None:
+    if isinstance(output_root, list):
+        state.segmentation_root = None
+        io.iprint(f"segmentation completed in {len(output_root)} per-source sibling folders")
+    elif output_root is not None:
         _adopt_project_context(
             state,
             data_folder=state.data_folder,
@@ -1787,7 +1788,7 @@ def startup_spectral_flow_import(state: SessionState) -> None:
         out_shape=state.shape(),
         event_kind="df_mutating",
     )
-    triplet_paths = save_triplet(state.data_folder, state.stem, state.df, state.obs, state.dfxy, state.logdf)
+    triplet_paths = save_triplet(state.data_folder, state.stem, state.df, state.obs, state.dfxy)
     audit_paths = spectral_module.load_core().write_audit_artifacts(state.data_folder, state.stem, run_meta)
     _write_artifact_stub(
         state.data_folder,
@@ -1831,18 +1832,29 @@ def startup_spectral_flow_import(state: SessionState) -> None:
 
 
 def startup_load_prepared_data(state: SessionState) -> None:
-    meta = _run_legacy_load_prepared(state)
-    if not state.has_data():
+    selected = _pick_prepared_triplet_member(state)
+    if selected is None:
         return
-    data_folder = _infer_loaded_project_root(meta, state.data_folder)
-    resolved = Path(data_folder).resolve()
-    if resolved != state.data_folder:
-        _adopt_project_context(state, data_folder=resolved, build_folder=resolved)
+    _load_triplet_into_state(
+        state,
+        selected.parent,
+        _stem_from_triplet_member(selected),
+        action_function="startup_load_prepared_data",
+        action_label="load_prepared_triplet",
+        summary_label="Loaded prepared triplet",
+    )
 
 
 def startup_preload_stem(state: SessionState) -> None:
     io.iprint(f"Preloading stem {state.stem} from {state.data_folder}")
-    _run_legacy_preload(state)
+    _load_triplet_into_state(
+        state,
+        state.data_folder,
+        state.stem,
+        action_function="startup_preload_stem",
+        action_label="preload_triplet",
+        summary_label="Loaded current stem",
+    )
 
 
 def startup_import_rna_data(state: SessionState) -> None:
@@ -1855,15 +1867,14 @@ def startup_load_last(state: SessionState) -> None:
         io.iprint("No saved triplet found in folder.")
         return
     io.iprint(f"Loading most recent save: {latest}")
-    load_by_stem_with_value(
+    _load_triplet_into_state(
         state,
+        state.data_folder,
         latest,
         action_function="startup_load_last",
-        action_label="startup_load_latest_triplet",
+        action_label="load_latest_triplet",
         summary_label="Loaded most recent save",
     )
-    if state.has_data():
-        _adopt_project_context(state, data_folder=state.data_folder, build_folder=state.data_folder)
 
 
 def legacy_data_editing_menu(state: SessionState) -> None:
@@ -2286,7 +2297,7 @@ def _save_tabular_ingest_triplet_if_requested(state: SessionState) -> None:
         default="y",
         prompt_meta={
             "options": [
-                {"value": "y", "label": "Save", "description": "Write df, obs, dfxy, and log CSVs to the project folder."},
+                {"value": "y", "label": "Save", "description": "Write df, obs, and dfxy CSVs to the project folder."},
                 {"value": "n", "label": "Do not save", "description": "Keep the assembled triplet in this session only."},
             ]
         },
@@ -2318,7 +2329,7 @@ def _save_tabular_ingest_triplet_if_requested(state: SessionState) -> None:
                 suggested = _next_tabular_ingest_stem(state.data_folder)
                 continue
         state.stem = stem
-        paths = save_triplet(state.data_folder, state.stem, state.df, state.obs, state.dfxy, state.logdf)
+        paths = save_triplet(state.data_folder, state.stem, state.df, state.obs, state.dfxy)
         _remember_current_stem(state, state.stem, last_action="tabular_ingest_save")
         io.iprint(f"Saved assembled triplet: {state.stem}")
         io.iprint(f"Saved df: {paths['df_path']}")
@@ -2334,28 +2345,77 @@ def _next_tabular_ingest_stem(folder: Path) -> str:
     raise RuntimeError("Could not find an unused tabular ingest stem.")
 
 
-def _run_legacy_load_prepared(state: SessionState) -> None:
-    return _run_legacy_call(
-        state,
-        action_label="load",
-        folder=state.data_folder,
-        event_kind="param_only",
-        advance_state=False,
-        load_saved_log=True,
-        invoker=lambda module: module.load(9, 9, 9, path=str(state.data_folder)),
-    )
+def _pick_prepared_triplet_member(state: SessionState) -> Optional[Path]:
+    """Use the legacy file picker only for selection; controller loads the triplet."""
+    folder = state.data_folder
+    while True:
+        with legacy_ifa5_context(state, suppress_plot_windows=state.suppress_plot_windows) as legacy:
+            selected = legacy.navigate(str(folder), text="select dataframe to load", sbt=True)
+        if selected in (None, "", "done"):
+            return None
+        if isinstance(selected, list):
+            io.iprint("Please select one _df.csv, _obs.csv, or _dfxy.csv file.")
+            continue
+        path = Path(str(selected)).expanduser()
+        if path.is_dir():
+            folder = path.resolve()
+            continue
+        if _stem_from_triplet_member(path) == "":
+            io.iprint("Please select one _df.csv, _obs.csv, or _dfxy.csv file.")
+            folder = path.parent.resolve()
+            continue
+        return path.resolve()
 
 
-def _run_legacy_preload(state: SessionState) -> None:
-    return _run_legacy_call(
-        state,
-        action_label="preload",
-        folder=state.data_folder,
+def _load_triplet_into_state(
+    state: SessionState,
+    folder: Path,
+    stem: str,
+    *,
+    action_function: str,
+    action_label: str,
+    summary_label: str,
+    remember_as_current: bool = True,
+) -> bool:
+    """Controller-owned prepared-triplet load used by every top-level load action."""
+    folder = Path(folder).expanduser().resolve()
+    stem = str(stem).strip()
+    if stem == "":
+        io.iprint("No triplet stem selected.")
+        return False
+
+    old_shape = state.shape()
+    try:
+        df, obs, dfxy = load_triplet(folder, stem)
+    except Exception as exc:
+        io.iprint(f"Prepared triplet load failed: {exc}")
+        return False
+    if df.empty or obs.empty or dfxy.empty:
+        io.iprint("Prepared triplet has no aligned rows; current data was left unchanged.")
+        return False
+
+    if folder != state.data_folder:
+        _adopt_project_context(state, data_folder=folder, build_folder=folder)
+    state.df, state.obs, state.dfxy = df, obs, dfxy
+    state.stem = stem
+    state.logdf = make_logdf()
+    if remember_as_current:
+        _remember_current_stem(state, stem, last_action=action_function)
+    state.logdf = log_action(
+        state.logdf,
+        module="controler",
+        function=action_function,
+        action_label=action_label,
+        params={"stem": stem, "folder": _normalize_path_text(folder)},
+        in_shape=old_shape,
+        out_shape=state.shape(),
         event_kind="param_only",
         advance_state=False,
-        load_saved_log=True,
-        invoker=lambda module: module.preload(9, 9, 9, path=str(state.data_folder)),
     )
+    _print_loaded_target_summary(summary_label, folder / stem)
+    _print_current_data_summary(state, folder=folder)
+    spine.capture_home_baseline(state)
+    return True
 
 
 def _run_legacy_rna_import(state: SessionState) -> None:
@@ -2366,18 +2426,6 @@ def _run_legacy_rna_import(state: SessionState) -> None:
         event_kind="df_mutating",
         reset_log=True,
         invoker=lambda module: module.RAT.main(state.df, state.obs, state.dfxy),
-    )
-
-
-def _run_legacy_load_last(state: SessionState) -> None:
-    return _run_legacy_call(
-        state,
-        action_label="loadLast",
-        folder=state.data_folder,
-        event_kind="param_only",
-        advance_state=False,
-        load_saved_log=True,
-        invoker=lambda module: module.loadLast(9, 9, 9),
     )
 
 
@@ -2467,55 +2515,32 @@ def _run_legacy_call(
     invoker: Callable[[object], tuple],
     advance_state: Optional[bool] = None,
     reset_log: bool = False,
-    load_saved_log: bool = False,
 ) -> Optional[dict]:
-    show_preflight_progress = action_label in {"load", "preload", "loadLast"}
-    if show_preflight_progress:
-        io.reset_progress(2, f"Preparing legacy action | {action_label} | loading legacy runtime")
     try:
         state.obs = _ingest_legacy_roi_mailbox_before_action(state)
-        if show_preflight_progress:
-            io.tick_progress(f"Preparing legacy action | {action_label} | loading legacy runtime")
-            io.tick_progress(f"Preparing legacy action | {action_label} | wiring legacy bridge", inc=0)
     except Exception as exc:
-        if show_preflight_progress:
-            io.clear_progress()
         io.iprint(f"ROI mailbox ingest failed before {action_label}: {exc}")
         raise
     old_shape = state.shape()
     old_cols = [list(state.df.columns), list(state.obs.columns), list(state.dfxy.columns)]
-    loaded_logdf: Optional[pd.DataFrame] = None
     legacy_meta: dict = {}
     effective_folder = Path(folder).resolve()
-    selected_stem = ""
     try:
         with legacy_ifa5_context(state, suppress_plot_windows=state.suppress_plot_windows) as module:
-            if show_preflight_progress:
-                io.tick_progress(f"Preparing legacy action | {action_label} | wiring legacy bridge")
             io.dprint(f"Starting legacy action: {action_label} | folder={effective_folder}")
             result = invoker(module)
             io.dprint(f"Legacy action returned: {action_label}")
             legacy_meta = dict(getattr(module, "_new_das_meta", {}) or {})
-            if action_label == "load":
-                selected_stem = _stem_from_triplet_member(legacy_meta.get("last_selected_path"))
             if action_label == "ifv.main" and getattr(module, "ifv", None) is not None:
                 runtime_folder = str(getattr(module.ifv, "SPATH", "") or "").strip()
                 if runtime_folder:
                     legacy_meta["ifv_runtime_figure_folder"] = str(
                         _resolve_figure_folder_input(runtime_folder, state.data_folder)
                     )
-            if load_saved_log:
-                if legacy_meta.get("last_selected_dir"):
-                    effective_folder = Path(str(legacy_meta["last_selected_dir"])).resolve()
-                loaded_logdf = load_logdf(selected_stem or state.stem, effective_folder)
         df, obs, dfxy = _extract_triplet_result(result)
     except io.UserAbortError:
-        if show_preflight_progress:
-            io.clear_progress()
         raise
     except Exception as exc:
-        if show_preflight_progress:
-            io.clear_progress()
         _report_legacy_error(action_label, exc)
         return
 
@@ -2536,9 +2561,6 @@ def _run_legacy_call(
     state.df = df
     state.obs = obs
     state.dfxy = dfxy
-    if action_label == "load" and selected_stem:
-        state.stem = selected_stem
-        _remember_current_stem(state, selected_stem, last_action="legacy_load")
     if state.stem == "":
         state.stem = TSTEM
 
@@ -2580,9 +2602,7 @@ def _run_legacy_call(
                 segmentation_root=Path(viewer_seg_root_text).expanduser().resolve(),
             )
 
-    if loaded_logdf is not None:
-        state.logdf = loaded_logdf
-    elif reset_log:
+    if reset_log:
         state.logdf = make_logdf()
 
     extra_params = {
@@ -2697,16 +2717,9 @@ def _run_legacy_call(
                 },
                 summary_text=str(item.get("summary_text") or f"Figure saved: {artifact_path.name}"),
             )
-    if action_label == "load":
-        _print_loaded_target_summary("Loaded prepared triplet", Path(effective_folder) / state.stem)
-    elif action_label == "preload":
-        _print_loaded_target_summary("Loaded current stem", Path(effective_folder) / state.stem)
-    elif action_label == "loadLast":
-        _print_loaded_target_summary("Loaded latest triplet", Path(effective_folder) / state.stem)
-
     _print_obs_action_summary(legacy_meta)
     _print_current_data_summary(state, folder=effective_folder)
-    if action_label in {"load", "preload", "loadLast", "RAT.main", "buildDataFrame"}:
+    if action_label in {"RAT.main", "buildDataFrame"}:
         spine.capture_home_baseline(state)
     return legacy_meta
 
@@ -2763,8 +2776,9 @@ def preload_current_stem(state: SessionState) -> None:
     if not stem:
         io.iprint("No current stem set.")
         return
-    load_by_stem_with_value(
+    _load_triplet_into_state(
         state,
+        state.data_folder,
         stem,
         action_function="preload_current_stem",
         action_label="preload_current_stem",
@@ -2777,27 +2791,14 @@ def load_by_stem(state: SessionState) -> None:
     if not stem:
         io.iprint("No stem given.")
         return
-
-    old_shape = state.shape()
-    new = load_triplet(state.data_folder, stem)
-    state.df, state.obs, state.dfxy, state.logdf, state.stem = new
-    _remember_current_stem(state, stem, last_action="load_by_stem")
-
-    # Record load event without changing state identity of loaded dataset.
-    state.logdf = log_action(
-        state.logdf,
-        module="controler",
-        function="load_by_stem",
+    _load_triplet_into_state(
+        state,
+        state.data_folder,
+        stem,
+        action_function="load_by_stem",
         action_label="load_triplet",
-        params={"stem": stem, "folder": str(state.data_folder)},
-        in_shape=old_shape,
-        out_shape=state.shape(),
-        event_kind="param_only",
-        advance_state=False,
+        summary_label="Loaded triplet",
     )
-    _print_loaded_target_summary("Loaded triplet", state.data_folder / stem)
-    _print_current_data_summary(state)
-    spine.capture_home_baseline(state)
 
 
 def load_latest(state: SessionState) -> None:
@@ -2806,45 +2807,15 @@ def load_latest(state: SessionState) -> None:
         io.iprint("No saved triplet found in folder.")
         return
     io.iprint(f"Latest stem: {latest}")
-    load_by_stem_with_value(
+    _load_triplet_into_state(
         state,
+        state.data_folder,
         latest,
         remember_as_current=False,
         action_function="load_latest",
         action_label="load_latest_triplet",
         summary_label="Loaded latest triplet",
     )
-
-
-def load_by_stem_with_value(
-    state: SessionState,
-    stem: str,
-    *,
-    remember_as_current: bool = True,
-    action_function: str = "load_by_stem",
-    action_label: str = "load_triplet",
-    summary_label: str = "Loaded triplet",
-) -> None:
-    old_shape = state.shape()
-    new = load_triplet(state.data_folder, stem)
-    state.df, state.obs, state.dfxy, state.logdf, state.stem = new
-    if remember_as_current:
-        _remember_current_stem(state, stem, last_action="load_by_stem")
-    state.logdf = log_action(
-        state.logdf,
-        module="controler",
-        function=action_function,
-        action_label=action_label,
-        params={"stem": stem, "folder": str(state.data_folder)},
-        in_shape=old_shape,
-        out_shape=state.shape(),
-        event_kind="param_only",
-        advance_state=False,
-    )
-    _print_loaded_target_summary(summary_label, state.data_folder / stem)
-    _print_current_data_summary(state)
-    spine.capture_home_baseline(state)
-
 
 def import_explicit_paths(state: SessionState) -> None:
     df_path = io.iget("path to df csv: ").strip()
@@ -2921,39 +2892,54 @@ def save_current(state: SessionState) -> None:
     if not state.has_data():
         io.iprint("No data to save.")
         return
-    old_shape = state.shape()
-    legacy_meta: dict[str, object] = {}
-    try:
-        with legacy_ifa5_context(state, suppress_plot_windows=state.suppress_plot_windows) as module:
-            df, obs, dfxy = module.save(state.df, state.obs, state.dfxy)
-            legacy_meta = dict(getattr(module, "_new_das_meta", {}) or {})
-    except Exception as exc:
-        io.iprint(f"Legacy save failed: {exc}")
+    save_mode = "explicit"
+    while True:
+        filename = io.iget("filename: ").strip()
+        if len(filename) >= 2:
+            break
+        latest = find_latest_stem(state.data_folder)
+        if latest is None:
+            io.iprint("No prior triplet to overwrite; enter a filename.")
+            continue
+        io.iprint(f"overwriting {latest}_df.csv {latest}")
+        overwrite = io.iget("overwrite most recent save? (y)").strip().lower()
+        if overwrite not in {"", "y", "yes"}:
+            continue
+        filename = latest
+        save_mode = "overwrite_latest"
+        break
+
+    save_prefix = Path(filename).expanduser()
+    if not save_prefix.is_absolute():
+        save_prefix = state.data_folder / save_prefix
+    save_folder = save_prefix.parent.resolve()
+    save_stem = save_prefix.name.strip()
+    if save_stem in {"", ".", ".."}:
+        io.iprint("Invalid save filename.")
         return
 
-    state.df, state.obs, state.dfxy = align_triplet(df, obs.astype(str), dfxy)
-    save_prefix_text = str(legacy_meta.get("last_save_prefix") or "").strip()
-    save_folder = state.data_folder
-    save_stem = state.stem
-    if save_prefix_text:
-        save_prefix = Path(save_prefix_text)
-        save_folder = save_prefix.parent
-        save_stem = save_prefix.name
+    old_shape = state.shape()
+    try:
+        paths = save_triplet(save_folder, save_stem, state.df, state.obs, state.dfxy)
+    except Exception as exc:
+        io.iprint(f"Triplet save failed: {exc}")
+        return
+
     state.logdf = log_action(
         state.logdf,
-        module="legacy_IFanalysisPackage5",
-        function="save",
+        module="controler",
+        function="save_current",
         action_label="save",
         params=_build_controller_action_params(
             state,
             outcome="save_completed",
             data_folder=save_folder,
             extra={
-                "save_prefix": legacy_meta.get("last_save_prefix"),
-                "save_df_path": legacy_meta.get("last_save_df_path"),
-                "save_obs_path": legacy_meta.get("last_save_obs_path"),
-                "save_dfxy_path": legacy_meta.get("last_save_dfxy_path"),
-                "save_mode": legacy_meta.get("last_save_mode"),
+                "save_prefix": save_prefix,
+                "save_df_path": paths["df_path"],
+                "save_obs_path": paths["obs_path"],
+                "save_dfxy_path": paths["dfxy_path"],
+                "save_mode": save_mode,
             },
         ),
         in_shape=old_shape,
@@ -2961,23 +2947,21 @@ def save_current(state: SessionState) -> None:
         event_kind="param_only",
         advance_state=False,
     )
-    saved_logdf_path = save_logdf(state.logdf, save_stem, save_folder)
     _write_artifact_stub(
         save_folder,
         artifact_kind="triplet_bundle",
-        source_module="legacy_IFanalysisPackage5",
-        source_function="save",
+        source_module="controler",
+        source_function="save_current",
         action_label="save",
         stem=save_stem,
         state_code_ref=state.state_code(),
         artifact_prefix=save_folder / save_stem,
         extra={
             "artifact_group": "triplet_bundle",
-            "df_path": legacy_meta.get("last_save_df_path"),
-            "obs_path": legacy_meta.get("last_save_obs_path"),
-            "dfxy_path": legacy_meta.get("last_save_dfxy_path"),
-            "logdf_path": saved_logdf_path,
-            "save_mode": legacy_meta.get("last_save_mode"),
+            "df_path": paths["df_path"],
+            "obs_path": paths["obs_path"],
+            "dfxy_path": paths["dfxy_path"],
+            "save_mode": save_mode,
         },
         summary_text=f"Save-time triplet bundle stub for stem {save_stem}; interpretation deferred.",
     )
@@ -3064,9 +3048,9 @@ def make_figure_path(
     )
 
 
-def load_triplet(folder: Path, stem: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+def load_triplet(folder: Path, stem: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Load df/obs/dfxy plus optional logdf for a stem.
+    Load exactly the df/obs/dfxy members for a saved stem.
     """
     df_path = folder / f"{stem}{TRIPLET_FILES['df']}"
     obs_path = folder / f"{stem}{TRIPLET_FILES['obs']}"
@@ -3084,8 +3068,7 @@ def load_triplet(folder: Path, stem: str) -> Tuple[pd.DataFrame, pd.DataFrame, p
         io.tick_progress(f"Loading triplet | {dfxy_path.name}")
         df, obs, dfxy = align_triplet(df, obs, dfxy)
         obs = normalize_primary_labels(obs)
-        logdf = load_logdf(stem, folder)
-        return df, obs, dfxy, logdf, stem
+        return df, obs, dfxy
     finally:
         io.clear_progress()
 
@@ -3096,7 +3079,6 @@ def save_triplet(
     df: pd.DataFrame,
     obs: pd.DataFrame,
     dfxy: pd.DataFrame,
-    logdf: pd.DataFrame,
 ) -> dict[str, Path]:
     folder.mkdir(parents=True, exist_ok=True)
     df_path = folder / f"{stem}{TRIPLET_FILES['df']}"
@@ -3105,12 +3087,10 @@ def save_triplet(
     df.to_csv(df_path)
     obs.to_csv(obs_path)
     dfxy.to_csv(dfxy_path)
-    logdf_path = save_logdf(logdf, stem, folder)
     return {
         "df_path": df_path,
         "obs_path": obs_path,
         "dfxy_path": dfxy_path,
-        "logdf_path": logdf_path,
     }
 
 

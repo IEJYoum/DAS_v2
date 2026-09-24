@@ -29,6 +29,7 @@ except Exception:
 
 
 TIFF_SUFFIXES = {".tif", ".tiff"}
+STREAMING_REQUIRED_PIXELS = 100_000_000
 
 
 def _matching_files(folder: Path, contains: str, excludes: list[str]) -> list[Path]:
@@ -143,7 +144,7 @@ def _scene_jobs_from_source_spec(
         if exact_matches:
             matches = _matching_files(input_path, dapi_contains, dapi_excludes)
             if len(matches) == 1:
-                jobs.append(input_path)
+                jobs.append(matches[0])
             elif len(matches) > 1:
                 _print_ambiguous_folders([(input_path, matches)], print_fn=print_fn)
             else:
@@ -151,7 +152,10 @@ def _scene_jobs_from_source_spec(
             continue
         valid_folders, ambiguous_folders = _find_valid_stardist_folders(input_path, dapi_contains, dapi_excludes)
         _print_ambiguous_folders(ambiguous_folders, print_fn=print_fn)
-        jobs.extend(valid_folders)
+        for folder in valid_folders:
+            matches = _matching_files(folder, dapi_contains, dapi_excludes)
+            if len(matches) == 1:
+                jobs.append(matches[0])
     return jobs
 
 
@@ -169,6 +173,29 @@ def _unique_scene_label(default_name: str, used: set[str]) -> str:
         number += 1
     used.add(label.lower())
     return label
+
+
+def _ask_yes_no(input_fn: Callable[..., str], prompt: str, *, default: bool) -> bool:
+    default_text = "y" if default else "n"
+    prompt_meta = {
+        "options": [
+            {"value": "y", "label": "Yes", "description": "Use the default behavior."},
+            {"value": "n", "label": "No", "description": "Choose a different output root."},
+        ]
+    }
+    try:
+        answer = input_fn(prompt, default=default_text, prompt_meta=prompt_meta)
+    except TypeError:
+        answer = input_fn(prompt)
+    text = str(answer).strip().lower()
+    if text == "":
+        return bool(default)
+    return text in {"y", "yes", "1", "true"}
+
+
+def _sibling_segmentation_root(source_path: Path, folder_name: str = "Segmentation") -> Path:
+    source_folder = source_path if source_path.is_dir() else source_path.parent
+    return source_folder.parent / str(folder_name or "Segmentation")
 
 
 def _print_ambiguous_folders(ambiguous_folders: list[tuple[Path, list[Path]]], *, print_fn: Callable[..., None] = print) -> None:
@@ -321,6 +348,21 @@ def _run_stardist_runtime(input_folder: Path, output_root: Path, dapi_contains: 
         raise RuntimeError("StarDist did not produce an output; check the input folder and DAPI filename key string.")
 
 
+def _run_stardist_streaming_runtime(input_path: Path, output_root: Path, dapi_contains: str, scene_name: str) -> None:
+    """Run the current StarDist model from windowed source TIFF reads."""
+
+    sys.path.insert(0, str(MISC_SEG_DIR))
+    import seg_v0 as seg
+    import stardist_seg_v0
+
+    seg.CORE = scene_name
+    seg.SCENE_NAME_FORMAT = "{core}"
+    seg.RUN_MODE = "test"
+    seg.RM_0 = "test"
+    seg.OUTPUT_ROOT = Path(output_root)
+    stardist_seg_v0.run_stardist_streaming(input_path, output_root, scene_name, dapi_contains)
+
+
 def _run_stardist_subprocess(input_folder: Path, output_root: Path, dapi_contains: str, scene_name: str) -> bool:
     before_outputs = {str(path.resolve()) for path in _find_stardist_labeled_outputs(output_root, scene_name)}
     cmd = [
@@ -353,8 +395,54 @@ def _run_stardist_subprocess(input_folder: Path, output_root: Path, dapi_contain
     return True
 
 
+def _run_stardist_streaming_subprocess(input_path: Path, output_root: Path, dapi_contains: str, scene_name: str) -> bool:
+    before_outputs = {str(path.resolve()) for path in _find_stardist_labeled_outputs(output_root, scene_name)}
+    cmd = [
+        sys.executable,
+        "-u",
+        str(Path(__file__).resolve()),
+        "stardist-stream",
+        "--input-file",
+        str(input_path),
+        "--output-root",
+        str(output_root),
+        "--dapi-contains",
+        dapi_contains,
+        "--scene-name",
+        scene_name,
+    ]
+    return_code = _stream_subprocess(cmd, DAS_ROOT)
+    if return_code != 0:
+        print("Memory-safe StarDist failed with exit code:", return_code)
+        return False
+    after_outputs = _find_stardist_labeled_outputs(output_root, scene_name)
+    new_outputs = [path for path in after_outputs if str(path.resolve()) not in before_outputs]
+    if not new_outputs:
+        print("Memory-safe StarDist exited cleanly, but no new labeled-cell TIFF was found.")
+        return False
+    print("Memory-safe StarDist completed.")
+    print("StarDist labeled output:", new_outputs[-1])
+    return True
+
+
 def _run_stardist_subprocess_for_input(input_path: Path, output_root: Path, dapi_contains: str, scene_name: str) -> bool:
     if input_path.is_file() and input_path.suffix.lower() in TIFF_SUFFIXES:
+        try:
+            source = _resolve_dapi_channel_source(input_path, dapi_contains)
+            with image_sources.open_channel_window_reader(source) as reader:
+                height, width = reader["shape_yx"]
+                print("StarDist memory-safe reader available:", image_sources.window_reader_summary(reader))
+            return _run_stardist_streaming_subprocess(input_path, output_root, dapi_contains, scene_name)
+        except Exception as exc:
+            try:
+                info = image_sources.inspect_image_source(input_path)
+                pixels = int(info.shape_yx[0]) * int(info.shape_yx[1])
+            except Exception:
+                pixels = 0
+            if pixels >= STREAMING_REQUIRED_PIXELS:
+                print("Memory-safe StarDist is required for this large TIFF but unavailable:", exc)
+                return False
+            print("Windowed TIFF access unavailable; using the existing full-image StarDist path:", exc)
         input_folder = _materialize_stardist_input_image(input_path, output_root, dapi_contains, scene_name)
     else:
         input_folder = input_path
@@ -368,7 +456,7 @@ def run_stardist_interactive(
     project_root: Path | None = None,
     input_fn: Callable[..., str] = input,
     print_fn: Callable[..., None] = print,
-) -> Path | None:
+) -> Path | list[Path] | None:
     """Prompt through injected I/O, then run the existing StarDist child process."""
 
     print_fn("StarDist segmentation wrapper")
@@ -381,11 +469,6 @@ def run_stardist_interactive(
 
     source_default = _cfg_default("seg_input_sources", _cfg_default("seg_input_folder", default_input))
     source_specs = _prompt_source_specs(source_default, input_fn=input_fn, print_fn=print_fn)
-    output_text = str(checkChange(_cfg_default("seg_output_root", default_output), "segmentation output root", input_fn=input_fn)).strip()
-    if output_text == "":
-        print_fn("segmentation output root is required")
-        return None
-    output_root = Path(output_text).expanduser().resolve()
     dapi_default = _cfg_default("seg_dapi_contains", "NUCA")
     if _source_specs_are_direct_tiffs(source_specs):
         dapi_contains = dapi_default
@@ -425,23 +508,48 @@ def run_stardist_interactive(
             default_name = source_path.stem.replace(".ome", "") if source_path.is_file() else (source_path.name or "scene")
             scene_jobs.append((source_path, _unique_scene_label(default_name, used_scene_names)))
 
+    sibling_name = str(cfg.get("seg_output_sibling_name", "")).strip() or "Segmentation"
+    use_siblings = _ask_yes_no(
+        input_fn,
+        "use a sibling " + sibling_name + " folder for each segmentation source? (y/n) [y]:",
+        default=True,
+    )
+    if use_siblings:
+        output_roots = [_sibling_segmentation_root(source_path, sibling_name).resolve() for source_path, _scene_name in scene_jobs]
+        print_fn("StarDist outputs will use each source's sibling", sibling_name, "folder.")
+        manual_output_root = None
+    else:
+        output_text = str(checkChange(_cfg_default("seg_output_root", default_output), "segmentation output root", input_fn=input_fn)).strip()
+        if output_text == "":
+            print_fn("segmentation output root is required")
+            return None
+        manual_output_root = Path(output_text).expanduser().resolve()
+        output_roots = [manual_output_root for _scene_job in scene_jobs]
+    unique_outputs = list(dict.fromkeys(output_roots))
+
     if project_root:
         config_updates = {
             "seg_input_sources": join_source_specs(source_specs),
             "seg_input_folder": source_specs[0] if len(source_specs) == 1 else "",
-            "seg_output_root": str(output_root),
+            "seg_output_root": str(manual_output_root) if manual_output_root is not None else "",
+            "seg_output_sibling_name": sibling_name,
+            "segmentation_root": str(unique_outputs[0]) if len(unique_outputs) == 1 else "",
             "seg_dapi_contains": dapi_contains,
             "seg_scene_name": scene_jobs[0][1] if len(scene_jobs) == 1 else "",
         }
         save_project_config_updates(project_root, config_updates)
 
-    for idx, (source_path, scene_name) in enumerate(scene_jobs, start=1):
+    for idx, ((source_path, scene_name), output_root) in enumerate(zip(scene_jobs, output_roots), start=1):
         print_fn("StarDist scene", str(idx) + "/" + str(len(scene_jobs)) + ":", scene_name)
         print_fn("StarDist source:", source_path)
+        print_fn("StarDist output root:", output_root)
         if not _run_stardist_subprocess_for_input(source_path, output_root, dapi_contains, scene_name):
             return None
 
-    return output_root
+    if len(unique_outputs) == 1:
+        return unique_outputs[0]
+    print_fn("StarDist completed with per-source output roots; no single segmentation root was selected.")
+    return unique_outputs
 
 
 def print_training_standalone_note() -> None:
@@ -461,6 +569,12 @@ def main(argv: list[str] | None = None) -> int:
     stardist.add_argument("--dapi-contains", required=True)
     stardist.add_argument("--scene-name", required=True)
 
+    stardist_stream = subparsers.add_parser("stardist-stream", help="Run StarDist with windowed TIFF I/O")
+    stardist_stream.add_argument("--input-file", type=Path, required=True)
+    stardist_stream.add_argument("--output-root", type=Path, required=True)
+    stardist_stream.add_argument("--dapi-contains", required=True)
+    stardist_stream.add_argument("--scene-name", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "stardist":
         input_folder = args.input_folder
@@ -473,6 +587,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         _run_stardist_runtime(
             input_folder=input_folder,
+            output_root=args.output_root,
+            dapi_contains=args.dapi_contains,
+            scene_name=args.scene_name,
+        )
+        return 0
+    if args.command == "stardist-stream":
+        _run_stardist_streaming_runtime(
+            input_path=args.input_file,
             output_root=args.output_root,
             dapi_contains=args.dapi_contains,
             scene_name=args.scene_name,
