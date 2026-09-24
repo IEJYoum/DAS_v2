@@ -602,6 +602,9 @@ def main(dataFolder=DATAFOLDER,saveFolder=SAVEFOLDER,runmode=None):
 def htmlViewer(df=9,obs=9,dfxy=9):
     """Resolve viewer inputs from the active project, then launch the HTML viewer once."""
     _sync_cvh_meta_sink()
+    if not cvh.preflight_project_viewer_obs(obs):
+        print("Viewer preflight failed. No viewer assets or HTML were written.")
+        return(df,obs,dfxy)
     current = _viewer_project_root()
     viewer_context = cvh.prompt_project_viewer_context(
         {
@@ -614,9 +617,6 @@ def htmlViewer(df=9,obs=9,dfxy=9):
     if not isinstance(viewer_context, dict):
         print("Could not resolve HTML viewer context from the current project.")
         return(df,obs,dfxy)
-    per_slide_scene_viewers = cvh.prompt_per_slide_scene_viewers(obs)
-    if per_slide_scene_viewers is not None:
-        viewer_context["per_slide_scene_viewers"] = per_slide_scene_viewers
     viewer_root = str(viewer_context.get("viewer_root", "")).strip()
     transient_seed_viewer = ""
     if not cvh.has_reusable_viewer_assets(viewer_root, obs=obs):
@@ -1915,6 +1915,9 @@ def reconstructIndex(df,obs,dfxy):
     indx = obs.loc[:,ind[0]].astype(str).copy()
     for col in ind[1:]:
         indx += '_' + obs.loc[:,col].astype(str)
+    # The first selected Series carries its name into the CSV index header.
+    # Keep that header generic so it cannot duplicate an obs column.
+    indx.name = '__das_index__'
     df.index,obs.index,dfxy.index = indx,indx,indx
     return(df,obs,dfxy)
 

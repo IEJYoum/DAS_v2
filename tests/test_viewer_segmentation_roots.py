@@ -85,6 +85,35 @@ class ViewerSegmentationRootTests(unittest.TestCase):
 
             self.assertEqual(paths, [str(image1.resolve()), str(image2.resolve())])
 
+    def test_per_slide_scene_choice_uses_gui_aware_prompt(self):
+        obs = viewer.pd.DataFrame({"slide_scene": ["ROI01", "ROI02"]})
+
+        with mock.patch.object(viewer, "cvh_input", return_value="y") as prompt:
+            choice = viewer.prompt_per_slide_scene_viewers(obs)
+
+        self.assertTrue(choice)
+        self.assertIn("Build individual viewer per slide_scene", prompt.call_args.args[0])
+
+    def test_viewer_preflight_reports_renamed_slide_scene(self):
+        obs = viewer.pd.DataFrame({"slide_scene.1": ["ROI01", "ROI02"]})
+
+        with mock.patch("builtins.print") as output:
+            valid = viewer.preflight_project_viewer_obs(obs)
+
+        self.assertFalse(valid)
+        self.assertIn("slide_scene.1", str(output.call_args_list))
+
+    def test_viewer_context_preserves_per_slide_scene_choice(self):
+        context = viewer.normalize_viewer_context(
+            {
+                "data_folder": "C:/project",
+                "viewer_root": "C:/project/HTMLs",
+                "per_slide_scene_viewers": "y",
+            }
+        )
+
+        self.assertTrue(context["per_slide_scene_viewers"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,7 @@ from image_conventions import (
     tabular_coordinate_pair_candidates,
 )
 from ingest_sources import expand_source_spec as expand_generic_source_spec
-from ingest_sources import join_source_specs, split_source_specs
+from ingest_sources import has_glob_magic, join_source_specs, split_source_specs
 
 
 CSV_SUFFIX = ".csv"
@@ -337,7 +337,7 @@ def partition_triplet(
 
 def _expand_source_spec(spec: object) -> list[Path]:
     candidates = expand_generic_source_spec(spec, want="either")
-    if len(candidates) == 1 and candidates[0].is_dir() and not any(char in str(spec or "") for char in "*?["):
+    if len(candidates) == 1 and candidates[0].is_dir() and not has_glob_magic(spec):
         candidates = sorted(candidates[0].glob("*.csv"), key=lambda path: str(path).lower())
     return _csv_files_only(candidates)
 

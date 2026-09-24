@@ -40,6 +40,24 @@ class IngestSourceTests(unittest.TestCase):
             self.assertEqual(files, [(first / "one.csv").resolve(), (second / "two.csv").resolve()])
             self.assertEqual(ingest_sources.source_display_id(second, root), "B/nested/RegisteredImages")
 
+    def test_extended_unc_prefix_is_not_glob_syntax(self):
+        prefix = r"\\?\UNC\server\share"
+
+        self.assertFalse(ingest_sources.has_glob_magic(prefix + r"\PerCellStats"))
+        self.assertTrue(ingest_sources.has_glob_magic(prefix + r"\FOV?\*.csv"))
+
+    def test_tabular_expands_extended_unc_folder_selected_by_legacy_navigator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            csv_path = folder / "perCellStats.csv"
+            csv_path.write_text("value\n1\n", encoding="utf-8")
+            extended_unc = r"\\?\UNC\server\share\PerCellStats"
+
+            with mock.patch.object(tabular_ingest, "expand_generic_source_spec", return_value=[folder]):
+                paths = tabular_ingest._expand_source_spec(extended_unc)
+
+            self.assertEqual(paths, [csv_path.resolve()])
+
     def test_tabular_multiple_globs_and_zero_match_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

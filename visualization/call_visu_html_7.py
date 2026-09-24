@@ -317,7 +317,27 @@ def normalize_viewer_context(context):
     return out
 
 
+def preflight_project_viewer_obs(obs):
+    """Reject loaded triplets that cannot be mapped safely to viewer assets."""
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return True
+    if "slide_scene" not in obs.columns:
+        candidates = [str(column) for column in obs.columns if str(column).lower().startswith("slide_scene")]
+        print("HTML viewer requires an obs column named 'slide_scene'.")
+        if len(candidates) > 0:
+            print("Possible renamed slide_scene column(s):", ", ".join(candidates))
+        return False
+    values = _clean_obs_values(obs["slide_scene"]).dropna()
+    if values.shape[0] == 0:
+        print("HTML viewer requires nonblank values in obs['slide_scene'].")
+        return False
+    return True
+
+
 def main(df=9, obs=9, dfxy=9, *args, **kwargs):
+    if not preflight_project_viewer_obs(obs):
+        print("Viewer preflight failed. No viewer assets or HTML were written.")
+        return (df, obs, dfxy)
     meta = _cvh_meta_sink()
     viewer_context = normalize_viewer_context(kwargs.get("viewer_context", None))
     roi_mailbox = kwargs.get("roi_mailbox", None)
@@ -858,6 +878,9 @@ def prompt_project_viewer_context(meta, obs=None):
         ).lower()
         use_existing_seed_viewer = raw in ["", "y", "yes", "use"]
 
+    # Ask before any asset discovery/building so long viewer work needs no input.
+    per_slide_scene_viewers = prompt_per_slide_scene_viewers(obs)
+
     updated_meta = dict(meta)
     updated_meta["data_folder"] = data_folder
     updated_meta["build_folder"] = str(meta.get("build_folder", "") or data_folder)
@@ -877,6 +900,7 @@ def prompt_project_viewer_context(meta, obs=None):
         "viewer_root": viewer_root,
         "seed_viewer_path": seed_path,
         "use_existing_seed_viewer": use_existing_seed_viewer,
+        "per_slide_scene_viewers": per_slide_scene_viewers,
     }
 
 
@@ -970,10 +994,6 @@ def strip_quotes(s):
     if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
         return s[1:-1].strip()
     return s
-
-
-def has_glob_magic(s):
-    return ("*" in s) or ("?" in s) or ("[" in s and "]" in s)
 
 
 def expand_input_line(line):
@@ -4467,6 +4487,12 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
         seed_viewer_just_built = False
         use_existing_seed_viewer = None
         per_slide_scene_viewers = None
+
+    # External callers may supply an incomplete context.  Resolve this choice
+    # here, before any reusable assets are read or reconstructed.
+    if per_slide_scene_viewers is None:
+        per_slide_scene_viewers = prompt_per_slide_scene_viewers(obs)
+
     reuse_json_var = False
     if seed_path != "" and os.path.isfile(seed_path):
         seed_name = os.path.basename(str(seed_path).strip())
@@ -4476,7 +4502,26 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
         elif use_existing_seed_viewer is not None:
             reuse_json_var = bool(use_existing_seed_viewer)
         else:
-            reuse_raw = str(input("Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ")).strip().lower()
+            reuse_raw = str(
+                cvh_input(
+                    "Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ",
+                    default="y",
+                    prompt_meta={
+                        "options": [
+                            {
+                                "value": "y",
+                                "label": "Use assets",
+                                "description": "Reuse the existing viewer asset map and write a fresh project-aware viewer run.",
+                            },
+                            {
+                                "value": "n",
+                                "label": "Skip assets",
+                                "description": "Try to rebuild from the asset registry instead.",
+                            },
+                        ]
+                    },
+                )
+            ).strip().lower()
             reuse_json_var = reuse_raw in ["", "y", "yes"]
     base_viewer = None
     provenance = {}
@@ -4560,11 +4605,7 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
             key=natural_sort_key,
         )
         if len(unique_scenes) > 1:
-            if per_slide_scene_viewers is None:
-                raw = str(input("Build individual viewer per slide_scene? (" + str(len(unique_scenes)) + " found) (y/n) [n]: ")).strip().lower()
-                per_roi = raw in ["y", "yes"]
-            else:
-                per_roi = bool(per_slide_scene_viewers)
+            per_roi = bool(per_slide_scene_viewers)
 
     if per_roi:
         built_count = 0

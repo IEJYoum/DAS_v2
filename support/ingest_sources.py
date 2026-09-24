@@ -14,6 +14,12 @@ SourceKind = Literal["files", "directories", "either"]
 
 def has_glob_magic(text: object) -> bool:
     value = str(text or "")
+    # ``\\\\?\\UNC\\`` is Windows' extended UNC prefix, not a ``?`` wildcard.
+    # Keep any later question marks intact so normal single-character globs work.
+    if value.startswith("\\\\?\\UNC\\"):
+        value = value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
     return "*" in value or "?" in value or ("[" in value and "]" in value)
 
 
