@@ -1349,6 +1349,10 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
         chanT = input('compare to chanel threshold? (y)')
         log = input('log2 transform data (before scoring step- does not impact thresholds) (y)')
         return([],[chanT,log])
+    drop_cols = [col for col in dfs[0].columns if 'neighbors' in str(col).lower() or 'radius' in str(col).lower()]
+    if len(drop_cols) > 0:
+        print('ignoring neighborhood/radius columns for matrix celltyping:',drop_cols)
+        dfs = [dfs[0].drop(columns=drop_cols),dfs[1],dfs[2]]
     if clean:
         print(dfs[0].shape,dfs[0].columns,'... cleaning')
         dfs,n = ifv.autoClean(dfs,['n'])
@@ -1370,9 +1374,6 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
     #    dfs[1].drop(typeName,axis=1,inplace=True)
     #nope this doesn't work either. No time today, Koei wants to see primary celltypes, can avoid glitch by deleting matrixtype columns before typing
     #Haven't been able to figure out why, key.sum() stays the same (whether there's a glitch or not, whether the glitch is from running on multiple cats or from the label already existingin the data- both conditions must be met for glitch)
-    for tn in ['Primary Celltype: Matrix','Tumor Subtype: Matrix','Immune Subtype: Matrix','Tumor Functional: Matrix','Immune Functional: Matrix']: #this should fix it- helper function only cleans subset
-        dfs[1][tn] = 'nan'
-
     if not (MAXEY_MATRIX_DIR / 'primary_celltype.csv').exists():
         print('WARNING: primary_celltype.csv not found in',MAXEY_MATRIX_DIR)
         print('WARNING: primary celltyping is required; maxeyType cannot run without it.')
@@ -1403,7 +1404,7 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
         print('skipping Tumor Functional: Matrix (no matrix file found)')
 
     idfs,key = subset(dfs,typeName,['2: immune'])
-    idfs = maxeyTypeH(idfs, typeName = 'Immune Subtype: Matrix', default = ' ', fileName = 'immune_celltype.csv',method='rank',
+    idfs = maxeyTypeH(idfs, typeName = 'Immune Subtype: Matrix', default = 'unclassified immune', fileName = 'immune_celltype.csv',method='rank',
                       threshold = .2, below_thresh_key = btkey.loc[key,:],log=log, singleType = True) #SINGLETYPE should be True for general use and default = 'unclassified'
     if idfs is not None:
         dfs = recombine(dfs,idfs,key)
@@ -1423,12 +1424,12 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
 def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName = 'Primary Celltype: Matrix', default = '5: stromal',
                singleType = True, threshold = None, below_thresh_key = None, bias = {},log=''):
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
+    matrix_path = MAXEY_MATRIX_DIR / fileName
+    if not matrix_path.exists():
+        print('warning: missing celltyping matrix:', matrix_path)
+        return(None)
     obs[typeName] = default #did this solve the issue from earlier???
     if df.shape[0] > 0:
-        matrix_path = MAXEY_MATRIX_DIR / fileName
-        if not matrix_path.exists():
-            print('warning: missing celltyping matrix:', matrix_path)
-            return(None)
         prim = pd.read_csv(matrix_path,index_col=0)
         print(prim,'prim\n')
 
@@ -1464,7 +1465,7 @@ def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName 
         #print(dm)
         prim = prim.loc[:,dm.columns]
         #print(prim)
-        psum = prim.sum(axis=1)
+        psum = (prim > 0).sum(axis=1)
         #print(prim.sum(axis=1))
         prim = prim.loc[psum > 0,:]
         psum = prim.sum(axis=1)

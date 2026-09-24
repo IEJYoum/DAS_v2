@@ -1,0 +1,367 @@
+# Shared Ingest Mechanics Plan v1
+
+## Decision
+
+Do not introduce a segmentation manifest as a prerequisite for feature
+extraction.  A manifest produced by one segmentation wrapper would be another
+lab convention, could be wrong or incomplete, and would not exist for external
+segmentation outputs.  Feature extraction must discover and validate image and
+mask files directly every time.  The first refactor only expands selected
+source paths and then keeps its current convention matcher; broader automatic
+or interactive per-source pairing is explicitly deferred.
+
+Build this as several small passes.  The same source-spec mechanics must be
+used by tabular ingest, segmentation, and feature extraction before expanding
+to registration or more segmentation engines.  The shared layer is deliberately
+small: source expansion, source labels, and windowed image access.  It is not a
+new framework or a convention registry.
+
+## Current State
+
+- `data_extraction/tabular_ingest.py` already supports one file, one folder,
+  or one recursive glob through `glob.glob(..., recursive=True)`.  It should
+  keep its dataframe assembly, triplet partitioning, and legacy `navigate`
+  fallback.
+- `data_extraction/segmentation_bridge.py` currently accepts one literal
+  folder or TIFF only.  It recursively searches a literal folder for exactly
+  one filename containing `seg_dapi_contains`.
+- The active DAS StarDist path is not accidentally importing an obsolete
+  duplicate: `segmentation_bridge.py` launches the current
+  `misc mIHC utility/seg_v0.py` and `stardist_seg_v0.py` runtime.
+- The active runtime already tiles *model inference*.  It does **not** tile
+  image I/O: `seg_v0.read_2d_tiff()` calls `tifffile.imread()` and converts the
+  complete image to `float32`; `stardist_seg_v0.predict_stardist()` then tiles
+  that in-memory array.  It also creates a complete in-memory `uint32` labels
+  array.  This is why the existing tiling does not solve large-image RAM use.
+- The older ImageJ/Fiji StarDist batch scripts also choose an `nTiles` value,
+  but they are separate legacy runtimes.  They are not a reusable Python
+  memory-management implementation and should remain untouched.
+- `support/image_sources.py` already owns TIFF/OME inspection and channel
+  selection.  It can inspect the actual AP H3NUCA image as `YX`, 39798 x
+  70301, `uint8`; the source TIFF is uncompressed, physically tiled at 1024 x
+  1024, and exposes `aszarr()`.  Therefore true windowed reads are feasible
+  for this immediate test case.
+- The same H3NUCA TIFF is roughly 3.55 GB.  A full `float32` copy is about
+  11.2 GB and a full `uint32` label array is another roughly 11.2 GB before
+  model, debug, or temporary arrays.  This must be fixed before attempting a
+  broad AP batch.
+- Feature extraction currently receives one image root and one segmentation
+  root.  It uses folder names and filename conventions to pair them.  This is
+  insufficient for a batch containing many unrelated folders all named
+  `RegisteredImages`, but it must still work for external labs with no DAS
+  provenance files.
+
+## Non-Negotiable Behavior
+
+- A user may enter multiple literal paths, folders, or globs.  The prompt is
+  repeated as `path, folder, or glob (blank when done)`.
+- A zero-match glob prints the exact unmatched specification and asks again.
+  It must not silently scan a broader parent folder.
+- An explicit `browse` choice may call the existing legacy navigator.  It is a
+  real fallback, not dead compatibility code.
+- `**` is recursive at arbitrary depth because the shared expander calls
+  `glob.glob(spec, recursive=True)`.
+- A direct file glob such as
+  `Z:\...\**\*H3NUCA*.ome.tiff` is valid.  It solves both location and
+  filename discovery without assuming `RegisteredImages`, DAPI, or a lab.
+- A DAS-generated `RegisteredImages` / sibling `Segmentation` layout is a
+  strong default, never a requirement.
+- Existing literal folder, single-source, convention-based, and manual paths
+  remain valid.
+- No source manifest is read or written in this work.
+- No new class hierarchy or engine contract is needed.  Plain dictionaries and
+  short functions are preferred.  A context manager is acceptable only where
+  it keeps an open TIFF/Zarr handle safely scoped.
+
+## Responsibilities
+
+### `support/ingest_sources.py`: Generic Filesystem Expansion
+
+Create one small, transport-neutral module with only these helpers:
+
+    has_glob_magic(text)
+    split_source_specs(text)
+    join_source_specs(specs)
+    expand_source_spec(spec, want)
+    source_display_id(path, anchor=None)
+
+- `split_source_specs` / `join_source_specs` use the existing `||` separator
+  for project-config storage.  They preserve the original typed
+  specifications, not expanded file lists.
+- `expand_source_spec` accepts a literal file, literal directory, or glob; it
+  returns stable, de-duplicated `Path` values filtered only by structural type
+  (`files`, `directories`, or `either`).  It does not know CSV, TIFF, DAPI,
+  segmentation, or any lab convention.
+- `source_display_id` returns a human-readable relative path when a static
+  glob anchor is available, otherwise a normalized resolved path.  It must
+  never use `RegisteredImages` alone as a batch identity.
+- The module never calls `input()` or imports GUI/DSI code.  Each consumer
+  keeps a short prompt loop through an explicit `input_fn` / `print_fn` and
+  the existing `checkChange` helper.  In particular,
+  `segmentation_bridge.run_stardist_interactive` must accept these parameters;
+  the controller passes `io.iget` / `io.iprint`, while standalone use defaults
+  to built-in `input` / `print`.  Do not rely on controller mutation of
+  `builtins.input` for the bridge's own prompts.
+
+### `support/image_conventions.py`: Known Naming Defaults Only
+
+Keep this module for:
+
+- parsing known image and feature filenames;
+- supplying a likely selector when a known lab convention truly supports one;
+- existing registered-output and legacy feature/segmentation pairing fallbacks.
+
+Do not put glob expansion, user prompts, recursive folder walking, StarDist,
+or generic image tiling here.  Unknown names fall through to an explicit user
+selector and then manual selection; absence from the registry is never an
+error.
+
+### `support/image_sources.py`: Physical Image Access And Tile Windows
+
+Extend the existing image-source module rather than creating parallel TIFF
+readers.  Add small shared primitives:
+
+    iter_tile_windows(shape_yx, inner_size, halo)
+    open_channel_window_reader(channel_source)
+    read_channel_window(reader, window)
+    estimate_channel_percentiles(reader, windows, p_low, p_high)
+
+- A window contains both a read area (with halo/overlap) and the owned inner
+  write area.  It is a small dictionary or tuple, not a class hierarchy.
+- The reader must select a single OME channel without materializing the entire
+  multichannel file.  Use the image's native tiled/Zarr access when available;
+  use a safe memory-mapped direct TIFF path when it is genuinely supported.
+- If an image cannot be read window-by-window, report that capability clearly
+  and stop that job.  Do not silently fall back to a full-image read for a
+  supposedly memory-safe run.
+- Reader resources are closed after each source.  Network paths use the
+  existing bounded read/retry policy, but no generic network-recovery redesign
+  is included here.
+
+### Segmentation Branch: Shared Inputs, Engine-Specific Predictions
+
+`data_extraction/segmentation_bridge.py` owns the shared segmentation input
+collection and output defaults.  A job is a plain dictionary:
+
+    {
+        "source_folder": Path(...),
+        "source_id": "relative/source/path",
+        "nuclear_inputs": [ChannelSource-or-path],
+        "combine": "single",
+        "output_folder": Path(...),
+    }
+
+- The selected engine applies to the whole run; do not repeat it in every job.
+- A direct image file is assigned `source_folder = image.parent`.
+- The default output is `source_folder.parent / "Segmentation"`.  This puts
+  segmentation beside the folder containing its inputs.  A user may still
+  supply an explicit legacy/shared output root.
+- For a folder source, a selector finds exactly one nuclear image.  Zero or
+  multiple matches are shown in a preflight table and are skipped until the
+  user refines the selector.  The system never chooses an arbitrary image.
+- Direct files need no second selector.  Thus the AP first pass may simply use
+  `Z:\...\**\*H3NUCA*.ome.tiff`.
+- `nuclear_inputs` and `combine` intentionally make a later H3NUCA + HEM
+  `max`, `min`, or weighted tile combination possible in the shared branch,
+  not inside StarDist.  The first implementation supports only `single`.
+- A failure for one job is logged and the next job runs.  The final report
+  lists successful, skipped, and failed source paths.
+
+### Out-Of-Core StarDist
+
+Replace only the current full-array portion of the active StarDist path.
+
+1. Inspect source axes, shape, dtype, and window-read capability before model
+   startup; print an explicit preflight line.
+2. Derive global normalization bounds without a full image allocation.
+   For integer TIFFs, stream a histogram over tile windows to reproduce global
+   percentile normalization.  For float sources, use a documented bounded,
+   deterministic tile sample until an exact streaming method is needed.
+3. Load the StarDist model once for the source.
+4. Read one halo tile, apply the same global normalization to that tile, run
+   `predict_instances`, and retain only its owned central write region.
+5. Stream labels into a temporary on-disk `uint32` BigTIFF/memmap output.
+   Offset each tile's labels exactly as the current tiled StarDist code does,
+   so label IDs remain unique without holding the complete label image in RAM.
+6. Close and validate the temporary output, then atomically rename it to the
+   final label TIFF.  A failed job leaves a clearly named partial artifact that
+   is not considered valid output.
+7. Produce debug PNGs from a bounded downsampled tile preview, never by
+   reconstructing the full DAPI or label array in memory.
+
+The existing `stardist_seg_v0.py` overlap/crop semantics are the behavioral
+reference.  The new streaming implementation must first match those semantics
+on a small image before it replaces the large-image path.  Do not use the
+current `_stardist_channel_inputs` materialization for an already-2-D TIFF;
+it needlessly creates a second multi-GB file.  Materialization remains only
+for a selected channel from a true multichannel source when window access is
+not yet supported.
+
+Custom-model and Mesmer adapters will consume the same window iterator later.
+They retain control of their own prediction and label/postprocessing behavior;
+the shared code owns input tiles, output ownership windows, and disk-backed
+sink utilities only.
+
+### Feature Extraction: First Shared-Source Adoption
+
+This pass does **not** pretend that feature extraction already has a generic
+source-to-mask pairing system.  Today
+`stain_correction24_pTMA._build_job_from_core_folder` receives one image root
+and one segmentation root, then calls
+`image_conventions.find_segmentation_pair(seg_root, core_name)`.  It has no
+sibling search, multi-root search, or interactive per-core mask fallback.
+
+The first shared-source change is deliberately smaller:
+
+1. Resolve the user-selected image path/folder/glob with
+   `ingest_sources.expand_source_spec`.
+2. Resolve the selected segmentation path/folder/glob the same way.
+3. Require exactly one usable image root and one usable segmentation root for
+   a feature run.  Zero or multiple matches are displayed and returned to the
+   existing folder-selection prompt; no pair is guessed.
+4. Pass those two roots to the current `collect_core_jobs` and existing
+   `image_conventions.find_segmentation_pair` flow unchanged.
+
+This proves that external labs can use the shared discovery layer without
+requiring DAS provenance: users select an existing image root and segmentation
+root, and current convention/filename matching remains authoritative.  It also
+lets a user select one DAS sibling `Segmentation` folder directly.
+
+StarDist's single labels TIFF remains a valid nucleus-only pair through the
+extractor's existing identical-mask path that skips cytoplasm handling.  A
+future per-source batch pairing design must handle duplicate
+`RegisteredImages` names, assign a non-leaf feature identity, and include
+manual resolution.  It is not smuggled into this first refactor.
+
+### Tabular Ingest: Reuse Without Rewriting The Working Parts
+
+Replace only `tabular_ingest._has_glob_magic` and `_expand_source_spec` with
+calls into `support/ingest_sources.py`.  Keep:
+
+- CSV filtering and prepared-triplet exclusion;
+- current index and schema inference;
+- horizontal/vertical assembly choices;
+- coordinate and observation autodetection;
+- the current `browse` -> legacy `navigate` fallback.
+
+This is a regression-control test of whether the shared source layer is truly
+generic.  No new tabular assembly architecture is justified.
+
+## Project Config
+
+Project config stores paths, globs, folder names, and selector strings only.
+It does not store engine/model/runtime settings.
+
+New plural source keys:
+
+    tabular_import_source                 # retain current single-string key
+    seg_input_sources
+    seg_nuclear_selector
+    seg_output_sibling_name
+
+- Multiple source specs are joined with `||`.
+- Existing values (`seg_input_folder`, `seg_dapi_contains`, `seg_output_root`,
+  `images_root`, `seg_root`, and `segmentation_root`) remain read-compatible
+  defaults.  A project without new keys behaves exactly as before.
+- New project config overrides application defaults; a user-entered value
+  overwrites the corresponding project key only after successful validation.
+- Use the existing controller config update path or explicitly invalidate its
+  cache after a standalone-friendly writer updates the file.  No second config
+  cache is introduced.
+
+## Implementation Passes
+
+### Pass 0: Baseline And Tests
+
+- Preserve the current branch as the rollback point.
+- Add small synthetic directory/TIFF fixtures before changing runtime wiring.
+- Record current single-folder StarDist behavior on a modest image: output
+  shape, count, overlap behavior, and filenames.
+- Confirm each target TIFF's window-read capability in the actual DAS
+  environment before submitting the AP batch.
+
+### Pass 1: Shared Source Acquisition In All Three Consumers
+
+- Add `support/ingest_sources.py`.
+- Change tabular ingest to call it without changing tabular UI or assembly.
+- Change segmentation to collect one or more source specifications, including
+  direct image globs, while retaining literal-parent recursive discovery.  Its
+  own prompts use explicit injected I/O rather than patched `builtins.input`.
+- Change feature extraction to resolve its selected image root and segmentation
+  root with the same helper, then call its existing one-root convention matcher
+  unchanged.  Multiple resolved roots are visible but not auto-paired.
+- Keep the currently selected StarDist runtime for modest test inputs only; do
+  not pretend it is safe for the 3.55-GB AP TIFF.
+
+### Pass 2: Segmentation Output And Existing-Path Validation
+
+- Default a segmentation job's output to its input folder's sibling
+  `Segmentation`, while retaining the current explicitly chosen output-root
+  behavior as a fallback.
+- Validate that feature extraction can use a selected sibling segmentation
+  folder through its existing `find_segmentation_pair` matcher.
+- Validate literal folders, direct files, directory globs, direct image globs,
+  and the project-config default/override behavior on small inputs.
+
+### Pass 3: Freeze The Shared Segmentation Input Shape
+
+- Retain the plain `nuclear_inputs` / `combine="single"` job shape and verify
+  that it remains only discovery/output plumbing, not a second algorithm.
+- Do not wire the custom forward-pass runtime yet: it has the same full-image
+  memory limitation and would create a second partially migrated consumer.
+- Defer H3NUCA + HEM combination and Mesmer entirely.  They are future users
+  of the shared input/window helpers, not requirements for this architecture.
+
+### Pass 4: Memory-Safe Image Windows And StarDist
+
+- Add windowed read and output-sink primitives to `image_sources.py`.
+- Add streaming global normalization and streamed StarDist inference while
+  preserving the existing halo/crop label behavior.
+- Eliminate full-image staging for direct 2-D TIFF inputs.
+- Test first on a small image, then one AP H3NUCA image, with tile progress,
+  window count, output path, and bounded-memory diagnostics in the session log.
+
+### Pass 5: Registration Adoption
+
+- Let registration use the same multi-source acquisition helper, then pass
+  each selected raw-image folder to its existing convention parser.
+- Do not alter its registration algorithm or force raw images into a new
+  naming convention.
+
+## Acceptance Tests
+
+- `**` finds arbitrary-depth paths; a direct H3NUCA file glob and a directory
+  glob both create the expected source jobs.
+- A zero-match spec warns and returns to the same source prompt; `browse`
+  still reaches legacy navigation.
+- Tabular ingest produces the same triplet for existing path/folder/glob
+  examples and retains all legacy manual fallbacks.
+- A direct 2-D TIFF is not copied into `_stardist_channel_inputs`.
+- On a small image, streamed StarDist and the old active implementation have
+  equal output dimensions and comparable cell counts; tile ownership prevents
+  duplicate label IDs across overlaps.
+- On the AP H3NUCA image, logs show windowed input reads and disk-backed label
+  writing; process RAM does not scale as a full float image plus full labels.
+- A source under `.../40393/RegisteredImages` defaults to
+  `.../40393/Segmentation`.
+- One failed source records its error and does not prevent later sources from
+  running.
+- Feature extraction succeeds with a selected DAS sibling segmentation folder
+  and with a selected external segmentation root, neither requiring a manifest.
+- A feature-source glob resolving multiple roots prints every match and does
+  not auto-pair them in this pass.
+- Existing single-folder segmentation, existing feature extraction defaults,
+  `image_conventions` fallback matching, and standalone training remain
+  functional.
+
+## Explicit Deferrals
+
+- Registration glob execution until segmentation / feature / tabular prove the
+  shared path code.
+- Multi-source feature pairing, duplicate-leaf source identities, and a
+  per-core manual pairing UI.
+- Custom forward-pass segmentation wiring and H3NUCA + HEM combination policy.
+- Mesmer wiring and environment repair.
+- StarDist model changes.
+- A generic provenance/manifest system.  It is not required for correct file
+  discovery and would be a separate design question if it ever becomes useful.

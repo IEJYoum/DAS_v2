@@ -1,0 +1,294 @@
+# Shared Ingest Mechanics Plan v0
+
+## Goal
+
+Build one small, transport-neutral source-acquisition layer that can be used by
+tabular ingest first and then image preparation.  The immediate target is
+segmentation of many independently registered image folders.  The longer-term
+chain is:
+
+    raw image folders -> registration -> registered image folders -> segmentation -> feature extraction
+
+Registration is upstream of segmentation.  Segmentation must not assume that
+an input came from DAS registration, but a DAS-created `RegisteredImages`
+folder is a useful default when it is present.
+
+This plan does not change segmentation algorithms.  StarDist is one consumer
+of shared segmentation jobs; the custom forward-pass runtime and Mesmer should
+be additional consumers later.  `train_seg_v0.py` remains a standalone training
+runtime.  The first pass keeps all existing engines and manual fallbacks; it
+removes no apparently-unused code.
+
+## Findings
+
+- `data_extraction/tabular_ingest.py` already accepts literal paths, folders,
+  and Python glob patterns.  It uses `glob.glob(spec, recursive=True)`, so
+  `**` spans arbitrary directory depth.
+- `data_extraction/segmentation_bridge.py` currently accepts only one literal
+  folder or TIFF.  A literal folder is recursively searched for exactly one
+  TIFF whose filename contains the configured `seg_dapi_contains` text.
+- The segmentation bridge does not use lab-convention parsing for folder
+  discovery.  It has its own recursive filename-token search.
+- `data_extraction/realign_v1.py` accepts only one flat folder containing raw
+  CZI/TIFF files, then uses `image_conventions.py` to parse the selected files.
+  It has no glob support.
+- Feature extraction currently resolves one image root and only direct TIFFs
+  or immediate child image folders.  It matches masks from their filenames and
+  cannot safely distinguish many source folders all named `RegisteredImages`.
+- For the inspected AP-mouse folder:
+
+    Z:\Multiplex_IHC_studies\AP_mouse\2022_TLSworkup\3x Tumor Screen\3x_slides\NR\40393\RegisteredImages
+
+  `*H3NUCA*.ome.tiff` and `*HEM*.ome.tiff` each resolve to one 2-D YX TIFF
+  (39798 x 70301).  H3NUCA is therefore a valid first single-image selector;
+  a combined H3NUCA/HEM input can be deferred without blocking this work.
+- Those TIFFs are about 3.8 GB each.  The current StarDist runtime reads a
+  whole input image and converts it to `float32` before tiled inference, so
+  tiling does not prevent a large initial RAM allocation.  Source discovery
+  can be safely generalized now, but this AP-mouse batch needs a deliberate
+  memory preflight before it is run at scale.
+
+## Boundary: What Each Module Owns
+
+### New shared source layer: `support/ingest_sources.py`
+
+This is generic path acquisition, not a lab convention, an image reader, or a
+new UI framework.  It should provide only four small functions:
+
+1. `has_glob_magic(text)`
+   - Detect `*`, `?`, and bracket glob syntax.
+
+2. `split_source_specs(text)` and `join_source_specs(specs)`
+   - Convert the project-config representation to and from a plain list.
+   - Use the existing viewer-compatible `||` separator.
+   - Preserve original user specifications; never save expanded paths.
+
+3. `expand_source_spec(spec, want)`
+   - Accept one literal file, literal directory, or glob.
+   - Use `glob.glob(spec, recursive=True)` for glob text.
+   - Return stable, de-duplicated `Path` values.
+   - Filter only by the requested structural type (`files`, `directories`, or
+     `either`); do not inspect lab naming conventions.
+
+4. `source_display_id(path, anchor=None)`
+   - Return a readable relative path for logging and manifests when an anchor
+     exists, otherwise the resolved path.
+   - Never treat the leaf directory name alone as a unique identity.
+
+Each runtime keeps its own short prompt loop using existing `io.iget` and
+`checkChange` machinery.  A changed source list is entered one item at a time:
+`path, folder, or glob (blank when done)`.  A zero-match entry warns and is
+retried (or may explicitly invoke that runtime's legacy browse callback); it
+does not silently broaden the search.  This preserves the working tabular
+`navigate` fallback without embedding UI policy in the shared module.
+
+The existing tabular private helpers should call this layer rather than keep a
+second glob implementation.  Table reading, dataframe assembly, coordinate
+selection, and observation selection remain in `tabular_ingest.py`.
+
+### `support/image_conventions.py`
+
+Keep this file as the registry of known conventions and neutral image contracts.
+It should own:
+
+- parsing known raw/registered filenames into records;
+- defaults supplied by known lab conventions, such as a likely nuclear-image
+  selector when evidence supports one;
+- registered-output names, panel-workbook marker mapping, and legacy
+  segmentation/feature filename fallback matching.
+
+It should not own:
+
+- glob expansion or recursive filesystem walking;
+- project-config prompts or GUI/DS input;
+- assumptions that an input folder is named `RegisteredImages`;
+- StarDist, Mesmer, or custom-model execution.
+
+Unknown naming conventions must fall through to explicit user selectors rather
+than being rejected because they are absent from the registry.
+
+## Shared Segmentation Branch
+
+Create a segmentation-level job layer before wiring more engines.  It may
+initially live in `data_extraction/segmentation_bridge.py` and be split only if
+that makes the code smaller and clearer.
+
+### Segmentation Job
+
+Each job is a plain dictionary, not a new class or engine contract:
+
+    {
+        "source_folder": Path(...),
+        "source_id": "readable/relative/source/path",
+        "nuclear_inputs": [Path(...)],
+        "combine": "single",
+        "output_folder": Path(...),
+    }
+
+The chosen engine applies to the whole run, so it is not repeated in every job.
+`nuclear_inputs` initially contains one selected 2-D image path.  Later it can
+hold a small list plus an explicit combine rule, without putting H3NUCA/HEM
+logic inside StarDist.
+
+### Discovery
+
+- Prompt for one or more `image source path, folder, or glob` values rather
+  than one `image folder`; blank finishes the list.
+- A glob such as:
+
+    Z:\...\3x_slides\**\RegisteredImages
+
+  resolves exact source directories.  Do not recursively search below each
+  glob match; the user has already specified the target depth.
+- A direct file glob such as `Z:\...\**\*H3NUCA*.ome.tiff` is equally valid.
+  This solves arbitrary directory depth and arbitrary filename conventions
+  without requiring a registered-folder name.
+- Preserve current literal-folder behavior as the legacy fallback: a literal
+  parent folder may still recurse to find eligible image folders.
+- Prompt for a neutral `nuclear image filename contains or glob` selector
+  when the chosen source is a folder.  A direct file source needs no second
+  filename selector.
+  For the immediate AP-mouse run, `H3NUCA` is sufficient.
+- Known conventions may propose a default selector.  If none applies, the
+  current default must be visible and editable; do not assume DAPI, `NUCA`, or
+  a `RegisteredImages` folder name.
+- Exactly one matching nuclear image creates a job.  Zero or multiple matches
+  are reported in a preflight summary and skipped unless the user refines the
+  selector.  Never choose one arbitrarily.  A later failure in one prepared
+  source is recorded and does not abort the remaining batch.
+
+### Engine Adapters
+
+The shared branch owns discovery, source identity, output locations, progress,
+and manifests.  Engines only receive a prepared job and return result paths.
+
+- StarDist adapter: initially delegates to the current subprocess/runtime.
+  It must pass a direct 2-D TIFF through unchanged; only an image selected from
+  a true multichannel source may need temporary channel materialization.
+- Custom trained-model adapter: forward pass only when it is ready.
+- Mesmer adapter: later consumes the same job, with a model-specific request
+  for one or more prepared channels.
+- Training remains standalone and is not routed through a production batch.
+
+No engine may implement its own folder globbing, source labels, or downstream
+feature-extraction naming policy.
+
+## Output And Handoff To Feature Extraction
+
+For a source folder such as:
+
+    ...\NR\40393\RegisteredImages
+
+the default segmentation output should be its sibling:
+
+    ...\NR\40393\Segmentation
+
+This preserves the familiar Koei/DAS layout while remaining a default, not a
+requirement.  A user may override the output location.  For a glob batch, use
+the same sibling rule independently for every source folder.
+
+After each successful engine run, append a small manifest record beside the
+result:
+
+    source_folder
+    source_id
+    nuclear_source
+    engine_name
+    cell_label_path
+    nucleus_label_path
+    created_at
+
+For current StarDist, the one label TIFF is recorded as both cell and nucleus
+labels, explicitly marked as nucleus-only.  This matches the extractor's
+existing no-cytoplasm path.
+
+The manifest is written in this pass because duplicate folders named
+`RegisteredImages` make basename-only handoff unsafe.  Do not change feature
+extraction or the viewer to consume a multi-source segmentation batch yet.
+That later work must resolve by canonical `source_folder` through this manifest
+first, carry `source_id` into `slide_scene`/per-core identity, and retain
+`image_conventions.find_segmentation_pair()` only as the legacy fallback.
+
+## Registration Follow-Up
+
+Registration remains upstream and should eventually use the same source-spec
+prompt.  A registration glob resolves raw-image directories; each directory is
+then independently passed through its existing convention parser.  Registration
+does not need to guess that a downstream folder is named `RegisteredImages`.
+
+Do not implement this in the first segmentation pass.  The shared source layer
+should be designed so registration can adopt it without a second discovery
+implementation.
+
+## Project Config
+
+Config remains paths and key strings only.  Store source specifications, not
+expanded file lists:
+
+    seg_input_sources
+    seg_nuclear_selector
+    seg_output_sibling_name
+    feature_images_source
+    registration_input_source
+
+`seg_input_sources` contains original specifications joined with `||`.
+
+Read the existing keys as backward-compatible defaults:
+
+    seg_input_folder
+    seg_dapi_contains
+    seg_output_root
+    images_root
+
+Do not store engine/model/runtime settings in project config during this work.
+The segmentation bridge must either write config through the controller's
+existing update path or cause its project-config cache to be invalidated after
+the standalone-friendly shared-utils write.  Otherwise a same-session prompt
+can read stale controller defaults.
+
+## First Implementation Slice
+
+1. Add `support/ingest_sources.py` and move tabular path/glob expansion to it
+   without changing tabular dataframe behavior.
+2. Refactor StarDist entry so it creates shared segmentation jobs from literal
+   paths, directory globs, or direct image globs, using `H3NUCA` as a manually
+   selectable selector.
+3. Default each job's output to the source folder's sibling `Segmentation`.
+4. Append a per-source segmentation manifest recording the exact source and
+   output mask; do not add a feature/viewer manifest consumer yet.
+5. Leave registration, H3NUCA/HEM combination, Mesmer execution, and custom
+   forward-pass wiring unchanged until the simple H3NUCA batch works.
+6. Keep `seg_v0.py`, `stardist_seg_v0.py`, `train_seg_v0.py`, `mesmer_DAS.py`,
+   legacy `IFA.py` navigation, and `image_conventions.py` fallbacks intact.
+
+## Tests And Safety Checks
+
+- Unit test `**` expansion against a synthetic nested directory tree with
+  repeated leaf names such as `RegisteredImages`.
+- Test a zero-match glob: show warning, re-prompt, do not scan an unrelated
+  parent folder automatically.
+- Test segmentation with arbitrary source folder names and one `*H3NUCA*`
+  image; verify no dependency on `DAPI`, `NUCA`, or `RegisteredImages`.
+- Test a direct recursive image glob and confirm a selected 2-D TIFF is not
+  copied into `_stardist_channel_inputs` before inference.
+- Test zero and multiple nuclear-image matches; both must be visible in
+  preflight output and must not silently create a job.
+- Test sibling output selection, manifest contents, and a batch where one job
+  fails while a later job still runs.
+- Test two different source folders both named `RegisteredImages`; confirm the
+  manifest records distinct canonical source paths.  Manifest consumption by
+  feature extraction is a later test.
+- Regression-test the present single-folder StarDist path, existing tabular
+  browse fallback, and legacy `image_conventions` segmentation-pair fallback.
+
+## Deferred Decisions
+
+- H3NUCA + HEM fusion policy: max, min, weighted blend, or model-specific
+  multichannel input.  This belongs in shared segmentation input preparation,
+  not a StarDist-only branch.
+- Reusing one loaded StarDist model across a large batch.  The present
+  subprocess-per-scene isolation is safer but expensive; change it only after
+  the source/output contract is verified.
+- Registration glob adoption and registration-to-segmentation manifest handoff.
+- Manifest-first feature-extraction and viewer lookup for multi-source batches.
+- A user-facing panel for selector combinations and engine settings.

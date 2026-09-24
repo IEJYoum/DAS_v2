@@ -1088,10 +1088,10 @@ def combineObs(df,obs,dfxy):
         mode = "combine_all"
         for col in nobs:
             if col not in obs:
-                obs[col] = nobs[col]
+                obs[col] = nobs.loc[binds, col]
                 added_cols.append(col)
             else:
-                obs[col] = obs[col].combine_first(nobs[col])
+                obs[col] = obs[col].combine_first(nobs.loc[binds, col])
                 filled_existing_cols.append(col)
                 
     else:

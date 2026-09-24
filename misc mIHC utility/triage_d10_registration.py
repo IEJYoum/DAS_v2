@@ -55,7 +55,7 @@ ROOT = ACTIVE_CONFIG["root"]
 CHECK = ROOT / "Registration_Check"
 TRASH = CHECK / "trash"
 NONREG_XLSX = TRASH / "d10_nonreg_triage.xlsx"
-SELECTION_XLSX = TRASH / "triage_selection.xlsx"
+SELECTION_CSV = TRASH / "triage_selection.csv"
 IMAGE_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 BLACK_FRACTION_THRESHOLD = 0.01
 # "any" uses the original black-pixel rule. "nonrectangular" ignores solid
@@ -240,6 +240,14 @@ def show_candidates(candidates, images):
     return sheet_paths
 
 
+def write_candidate_list(candidates):
+    TRASH.mkdir(parents=True, exist_ok=True)
+    list_path = TRASH / f"triage_candidates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    list_path.write_text("\n".join(row["name"] for row in candidates) + "\n", encoding="utf-8")
+    print("candidate filename list:", list_path)
+    return list_path
+
+
 def choose_trash_names(candidates, by_name, images):
     show_candidates(candidates, images)
     while True:
@@ -354,16 +362,20 @@ def write_nonreg_xlsx():
     print("nonreg workbook:", NONREG_XLSX)
 
 
-def write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed_paths):
+def write_selection_xlsx(candidates, selected_names, reasons, by_name, match_counts, renamed_paths):
     TRASH.mkdir(parents=True, exist_ok=True)
     rows = []
-    for name in sorted(selected_names):
+    candidate_names = {row["name"] for row in candidates}
+    report_names = sorted(candidate_names | set(selected_names))
+    selected_set = set(selected_names)
+    for name in report_names:
         row = by_name[name]
         rows.append({
             "name": name,
             "slide": row["slide"],
             "roi": row["roi"],
             "reason": reasons.get(name, ""),
+            "approved_for_trash": name in selected_set,
             "black_pixels": row["black_pixels"],
             "total_pixels": row["total_pixels"],
             "black_fraction": row["black_fraction"],
@@ -372,8 +384,8 @@ def write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed
             "thumbnail_path_after": str(renamed_paths.get(name, row["path"])),
             "matched_fullres_file_count": match_counts.get(name, 0),
         })
-    pd.DataFrame(rows).to_excel(SELECTION_XLSX, index=False)
-    print("selection workbook:", SELECTION_XLSX)
+    pd.DataFrame(rows).to_csv(SELECTION_CSV, index=False)
+    print("selection CSV:", SELECTION_CSV)
 
 
 def write_log(
@@ -436,7 +448,7 @@ def main():
     print("output folder:", TRASH)
     if ACTIVE_CONFIG.get("write_nonreg_workbook", True):
         print("nonreg workbook will be saved to:", NONREG_XLSX)
-    print("selection workbook will be saved to:", SELECTION_XLSX)
+    print("selection CSV will be saved to:", SELECTION_CSV)
     print("candidate PNGs will be saved in:", TRASH)
     print("debug logs will be saved in:", TRASH)
     print("known moved failure image files already in trash:", known_failures_before)
@@ -444,6 +456,7 @@ def main():
     if ACTIVE_CONFIG.get("write_nonreg_workbook", True):
         write_nonreg_xlsx()
     stats, candidates, images, known_prefixed = scan_check_folder()
+    write_candidate_list(candidates)
     print("scanned files:", len(stats))
     print("black-pixel candidates:", len(candidates))
     by_name = {row["name"]: row for row in stats}
@@ -451,7 +464,7 @@ def main():
     match_counts = {}
     renamed_paths = {}
     if len(selected_names) == 0:
-        write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed_paths)
+        write_selection_xlsx(candidates, selected_names, reasons, by_name, match_counts, renamed_paths)
         print("trash list is empty, nothing to move")
         return
     moved_lines = []
@@ -471,7 +484,7 @@ def main():
             row["path"] = new_path
         else:
             renamed_lines.append(f"SKIP_NO_FULLRES_MATCH\t{row['path']}")
-    write_selection_xlsx(selected_names, reasons, by_name, match_counts, renamed_paths)
+    write_selection_xlsx(candidates, selected_names, reasons, by_name, match_counts, renamed_paths)
     write_log(
         stats,
         candidates,

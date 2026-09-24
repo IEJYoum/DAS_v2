@@ -1014,6 +1014,4 @@ def _is_technical_line(text: str) -> bool:
     ):
         if token in low:
             return True
-    if "shape" in low and "menu" not in low:
-        return True
     return False

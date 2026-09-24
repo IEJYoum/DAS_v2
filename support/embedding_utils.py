@@ -73,8 +73,8 @@ def check_umap_available(log_fn: Callable[..., Any] | None = print) -> bool:
     if UMAP_IMPORT_ATTEMPTED:
         return UMAP_CLASS is not None
 
-    UMAP_IMPORT_ATTEMPTED = True
     if str(os.environ.get(UMAP_SKIP_ENV, "")).strip().lower() in {"1", "true", "yes", "y"}:
+        UMAP_IMPORT_ATTEMPTED = True
         UMAP_IMPORT_SKIPPED = True
         _log(log_fn, "[DAS setup] skipping optional UMAP import because " + UMAP_SKIP_ENV + " is set.")
         return False
@@ -83,12 +83,21 @@ def check_umap_available(log_fn: Callable[..., Any] | None = print) -> bool:
     _log(log_fn, "[DAS setup] checking optional UMAP import...")
     try:
         from umap import UMAP
+    except KeyboardInterrupt:
+        # Do not cache an import interrupted by the user; the next attempt can retry it.
+        UMAP_CLASS = None
+        UMAP_IMPORT_ERROR = None
+        UMAP_IMPORT_ATTEMPTED = False
+        UMAP_IMPORT_SKIPPED = False
+        raise
     except Exception as exc:
+        UMAP_IMPORT_ATTEMPTED = True
         UMAP_IMPORT_ERROR = exc
         _log(log_fn, "[DAS setup] UMAP unavailable: " + type(exc).__name__ + ": " + str(exc))
         _log(log_fn, "[DAS setup] PCA and t-SNE can still run.")
         return False
 
+    UMAP_IMPORT_ATTEMPTED = True
     UMAP_CLASS = UMAP
     _log(log_fn, "[DAS setup] UMAP available after " + _elapsed(start) + ".")
     return True

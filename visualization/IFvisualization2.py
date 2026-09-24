@@ -983,6 +983,9 @@ def autoClean(DFs,com=['n'],cat=''): #duplicated in IFA4, IFV2 except it takes d
     old_cols = df.shape[1]
     if len(com) == 0:
         return([],[])
+    if not df.isnull().values.any():
+        print('visualization autoclean skipped: no missing values')
+        return([df,obs,dfxy],[])
     cho = 1 #drop 0:cells   1:columns(bioms)
     ch = 90 #"max missing % threshold integer (0 to drop all cells with missing values, 100 to keep all
     # Sweep one percentage point at a time through the zero-missingness pass.
@@ -2731,12 +2734,15 @@ def barplot(dfs,com=[],cat='',showPercentageText=True):
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     mpl.style.use('default')
     if len(com) == 0:
-        ch,uch = obMenu(obs,'column to sort x axis by')
-        binCol = obs.columns[ch]
+        binCol = getCats(obs,'columns to sort x axis by')
         dend_sort = logInput('sort bars by dendrogram? (y): ')
         return([],[binCol,dend_sort])
     print('showing spatial')
     binCol = com[1]
+    if type(binCol) == list:
+        for bcol in binCol:
+            barplot(dfs,[0,bcol,com[2]],cat,showPercentageText)
+        return(9,9)
     dend_sort = str(com[2]).strip().lower() == 'y' if len(com) > 2 else False
     if binCol not in obs.columns:
         print('skipping',binCol,'for',cat)
