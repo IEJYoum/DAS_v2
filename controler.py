@@ -1522,6 +1522,8 @@ def _run_stardist_segmentation(state: SessionState) -> None:
             default_input=default_input,
             default_output=default_output,
             project_root=state.data_folder,
+            input_fn=io.iget,
+            print_fn=io.iprint,
         )
     finally:
         builtins.input = old_input

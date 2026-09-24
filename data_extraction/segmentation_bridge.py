@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 
 DAS_ROOT = Path(__file__).resolve().parents[1]
@@ -19,16 +20,12 @@ MISC_SEG_DIR = DAS_ROOT / "misc mIHC utility"
 DEFAULT_MODELS_DIR = Path(r"C:\Users\youm\Desktop\src\IFA_v1\data_extraction\segmentation_models")
 
 sys.path.insert(0, str(DAS_ROOT / "support"))
-from shared_utils import checkChange as _shared_check_change, load_project_config_values, save_project_config_updates
+from shared_utils import checkChange, load_project_config_values, save_project_config_updates
+from ingest_sources import expand_source_spec, has_glob_magic, join_source_specs, split_source_specs
 try:
     import image_sources
 except Exception:
     image_sources = None
-
-
-def checkChange(current_value, label="value"):
-    """Wrapper that routes through the current builtins.input (GUI or CLI)."""
-    return _shared_check_change(current_value, label, input_fn=input)
 
 
 TIFF_SUFFIXES = {".tif", ".tiff"}
@@ -89,14 +86,99 @@ def _scene_label_for_folder(folder: Path, root: Path) -> str:
     return "_".join(parts)
 
 
-def _print_ambiguous_folders(ambiguous_folders: list[tuple[Path, list[Path]]]) -> None:
+def _ask_text(input_fn: Callable[..., str], prompt: str, *, default: str = "") -> str:
+    try:
+        answer = input_fn(prompt, default=default)
+    except TypeError:
+        answer = input_fn(prompt)
+        if answer == "" and default != "":
+            answer = default
+    return str(answer).strip()
+
+
+def _prompt_source_specs(default_spec: str, *, input_fn: Callable[..., str], print_fn: Callable[..., None]) -> list[str]:
+    """Collect one or more source specs; each must resolve before it is kept."""
+
+    first = str(checkChange(default_spec, "image source path, folder, or glob", input_fn=input_fn)).strip()
+    while True:
+        first_specs = split_source_specs(first)
+        if first_specs and all(expand_source_spec(spec, want="either") for spec in first_specs):
+            break
+        print_fn("No file or folder matched:", first)
+        first = _ask_text(input_fn, "image source path, folder, or glob:")
+
+    specs = list(first_specs)
+    while True:
+        extra = _ask_text(input_fn, "additional image source path, folder, or glob (blank when done):")
+        if extra == "":
+            return specs
+        extra_specs = split_source_specs(extra)
+        if extra_specs and all(expand_source_spec(spec, want="either") for spec in extra_specs):
+            specs.extend(extra_specs)
+            continue
+        print_fn("No file or folder matched:", extra)
+
+
+def _scene_jobs_from_source_spec(
+    spec: str,
+    *,
+    dapi_contains: str,
+    dapi_excludes: list[str],
+    print_fn: Callable[..., None],
+) -> list[Path]:
+    """Use exact glob matches, while retaining recursive discovery for a literal parent."""
+
+    candidates = expand_source_spec(spec, want="either")
+    exact_matches = has_glob_magic(spec)
+    jobs: list[Path] = []
+    for input_path in candidates:
+        if input_path.is_file():
+            if input_path.suffix.lower() in TIFF_SUFFIXES:
+                jobs.append(input_path)
+            else:
+                print_fn("Skipping non-TIFF image source:", input_path)
+            continue
+        if not input_path.is_dir():
+            continue
+        if exact_matches:
+            matches = _matching_files(input_path, dapi_contains, dapi_excludes)
+            if len(matches) == 1:
+                jobs.append(input_path)
+            elif len(matches) > 1:
+                _print_ambiguous_folders([(input_path, matches)], print_fn=print_fn)
+            else:
+                print_fn("No matching nuclear TIFF in selected folder:", input_path)
+            continue
+        valid_folders, ambiguous_folders = _find_valid_stardist_folders(input_path, dapi_contains, dapi_excludes)
+        _print_ambiguous_folders(ambiguous_folders, print_fn=print_fn)
+        jobs.extend(valid_folders)
+    return jobs
+
+
+def _source_specs_are_direct_tiffs(specs: list[str]) -> bool:
+    paths = [path for spec in specs for path in expand_source_spec(spec, want="either")]
+    return bool(paths) and all(path.is_file() and path.suffix.lower() in TIFF_SUFFIXES for path in paths)
+
+
+def _unique_scene_label(default_name: str, used: set[str]) -> str:
+    base = _safe_name(default_name)
+    label = base
+    number = 2
+    while label.lower() in used:
+        label = base + "_" + str(number)
+        number += 1
+    used.add(label.lower())
+    return label
+
+
+def _print_ambiguous_folders(ambiguous_folders: list[tuple[Path, list[Path]]], *, print_fn: Callable[..., None] = print) -> None:
     if not ambiguous_folders:
         return
-    print("Skipped folders with multiple matching DAPI/nuclear TIFFs:")
+    print_fn("Skipped folders with multiple matching DAPI/nuclear TIFFs:")
     for folder, matches in ambiguous_folders:
-        print(folder)
+        print_fn(folder)
         for path in matches:
-            print("  ", path.name)
+            print_fn("  ", path.name)
 
 
 def _safe_name(text: str) -> str:
@@ -284,77 +366,79 @@ def run_stardist_interactive(
     default_input: Path | None = None,
     default_output: Path | None = None,
     project_root: Path | None = None,
+    input_fn: Callable[..., str] = input,
+    print_fn: Callable[..., None] = print,
 ) -> Path | None:
-    print("StarDist segmentation wrapper")
-    print("Expected input: a scene folder or parent folder containing scene folders.")
-    print("Training remains standalone for now.")
+    """Prompt through injected I/O, then run the existing StarDist child process."""
+
+    print_fn("StarDist segmentation wrapper")
+    print_fn("Expected input: image paths, folders, or globs. Training remains standalone for now.")
 
     cfg = load_project_config_values(project_root) if project_root else {}
     def _cfg_default(key, fallback):
         saved = cfg.get(key, "").strip()
         return saved if saved else str(fallback or "")
 
-    input_text = str(checkChange(_cfg_default("seg_input_folder", default_input), "image folder")).strip()
-    if input_text == "":
-        print("image folder is required")
-        return None
-    input_path = Path(input_text).expanduser().resolve()
-    if not input_path.is_dir() and not (input_path.is_file() and input_path.suffix.lower() in TIFF_SUFFIXES):
-        print("folder or TIFF not found:", input_path)
-        return None
-    output_text = str(checkChange(_cfg_default("seg_output_root", default_output), "segmentation output root")).strip()
+    source_default = _cfg_default("seg_input_sources", _cfg_default("seg_input_folder", default_input))
+    source_specs = _prompt_source_specs(source_default, input_fn=input_fn, print_fn=print_fn)
+    output_text = str(checkChange(_cfg_default("seg_output_root", default_output), "segmentation output root", input_fn=input_fn)).strip()
     if output_text == "":
-        print("segmentation output root is required")
+        print_fn("segmentation output root is required")
         return None
     output_root = Path(output_text).expanduser().resolve()
-    dapi_contains = str(checkChange(_cfg_default("seg_dapi_contains", "NUCA"), "DAPI/nuclear filename contains")).strip()
+    dapi_default = _cfg_default("seg_dapi_contains", "NUCA")
+    if _source_specs_are_direct_tiffs(source_specs):
+        dapi_contains = dapi_default
+        print_fn("Direct TIFF source(s) selected; using saved nuclear selector:", dapi_contains)
+    else:
+        dapi_contains = str(checkChange(dapi_default, "DAPI/nuclear filename contains", input_fn=input_fn)).strip()
     if dapi_contains == "":
-        print("DAPI/nuclear filename key string is required")
+        print_fn("DAPI/nuclear filename key string is required")
         return None
     dapi_excludes = ["label", "labeled", "seg", "mask"]
-    scene_jobs = []
-    if input_path.is_file():
-        scene_default = input_path.stem.replace(".ome", "") or "scene"
-        scene_name = str(checkChange(_cfg_default("seg_scene_name", scene_default), "scene/output label")).strip()
-        if scene_name == "":
-            scene_name = scene_default
-        try:
-            stage_folder = _materialize_stardist_input_image(input_path, output_root, dapi_contains, scene_name)
-        except Exception as exc:
-            print("Could not prepare multichannel TIFF for StarDist:", exc)
-            return None
-        scene_jobs.append((stage_folder, scene_name))
+    source_paths: list[Path] = []
+    for spec in source_specs:
+        source_paths.extend(
+            _scene_jobs_from_source_spec(
+                spec,
+                dapi_contains=dapi_contains,
+                dapi_excludes=dapi_excludes,
+                print_fn=print_fn,
+            )
+        )
+    unique_sources: dict[str, Path] = {str(path.resolve()).lower(): path.resolve() for path in source_paths}
+    source_paths = [unique_sources[key] for key in sorted(unique_sources)]
+    if not source_paths:
+        print_fn("No scene folders or TIFFs contained exactly one nuclear image matching", repr(dapi_contains))
+        return None
+
+    scene_jobs: list[tuple[Path, str]] = []
+    if len(source_paths) == 1:
+        source_path = source_paths[0]
+        scene_default = source_path.stem.replace(".ome", "") if source_path.is_file() else (source_path.name or "scene")
+        scene_name = str(checkChange(_cfg_default("seg_scene_name", scene_default), "scene/output label", input_fn=input_fn)).strip()
+        scene_jobs.append((source_path, scene_name or scene_default))
     else:
-        input_folder = input_path
-        valid_folders, ambiguous_folders = _find_valid_stardist_folders(input_folder, dapi_contains, dapi_excludes)
-        if ambiguous_folders:
-            _print_ambiguous_folders(ambiguous_folders)
-        if not valid_folders:
-            print("No scene folders contained exactly one DAPI/nuclear TIFF matching", repr(dapi_contains))
-            return None
-        if len(valid_folders) == 1:
-            scene_name = str(checkChange(_cfg_default("seg_scene_name", valid_folders[0].name or "scene"), "scene/output label")).strip()
-            if scene_name == "":
-                scene_name = valid_folders[0].name or "scene"
-            scene_jobs.append((valid_folders[0], scene_name))
-        else:
-            print("Found", len(valid_folders), "scene folders. Batch mode will use folder names as scene labels.")
-            for folder in valid_folders:
-                scene_jobs.append((folder, _scene_label_for_folder(folder, input_folder)))
+        print_fn("Found", len(source_paths), "segmentation sources. Batch mode will use source names as scene labels.")
+        used_scene_names: set[str] = set()
+        for source_path in source_paths:
+            default_name = source_path.stem.replace(".ome", "") if source_path.is_file() else (source_path.name or "scene")
+            scene_jobs.append((source_path, _unique_scene_label(default_name, used_scene_names)))
 
     if project_root:
         config_updates = {
-            "seg_input_folder": str(input_path),
+            "seg_input_sources": join_source_specs(source_specs),
+            "seg_input_folder": source_specs[0] if len(source_specs) == 1 else "",
             "seg_output_root": str(output_root),
             "seg_dapi_contains": dapi_contains,
             "seg_scene_name": scene_jobs[0][1] if len(scene_jobs) == 1 else "",
         }
         save_project_config_updates(project_root, config_updates)
 
-    for idx, (folder, scene_name) in enumerate(scene_jobs, start=1):
-        print("StarDist scene", str(idx) + "/" + str(len(scene_jobs)) + ":", scene_name)
-        print("StarDist scene folder:", folder)
-        if not _run_stardist_subprocess(folder, output_root, dapi_contains, scene_name):
+    for idx, (source_path, scene_name) in enumerate(scene_jobs, start=1):
+        print_fn("StarDist scene", str(idx) + "/" + str(len(scene_jobs)) + ":", scene_name)
+        print_fn("StarDist source:", source_path)
+        if not _run_stardist_subprocess_for_input(source_path, output_root, dapi_contains, scene_name):
             return None
 
     return output_root

@@ -20,6 +20,7 @@ _IFA5 = None
 _STAIN = None
 _IO_ADAPTER = None
 _FEATURE_EXTRACT = None
+_INGEST_SOURCES = None
 
 
 def import_module_from_path(path: str | Path, *, module_name: Optional[str] = None):
@@ -75,6 +76,26 @@ def load_io_adapter():
     try:
         _IO_ADAPTER = importlib.import_module("io_adapter")
         return _IO_ADAPTER
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(str(helper_dir))
+            except ValueError:
+                pass
+
+
+def load_ingest_sources():
+    global _INGEST_SOURCES
+    if _INGEST_SOURCES is not None:
+        return _INGEST_SOURCES
+    helper_dir = (Path(__file__).resolve().parents[1] / "support").resolve()
+    inserted = False
+    if str(helper_dir) not in sys.path:
+        sys.path.insert(0, str(helper_dir))
+        inserted = True
+    try:
+        _INGEST_SOURCES = importlib.import_module("ingest_sources")
+        return _INGEST_SOURCES
     finally:
         if inserted:
             try:
@@ -471,17 +492,27 @@ def _suggest_seg_root(images_root: str) -> str:
     return ""
 
 
-def _ensure_dir(legacy, current_value: str, label: str):
+def _ensure_source_dir(legacy, current_value: str, label: str):
+    """Resolve one selected directory through the shared path/glob expander."""
+
     pfun = getattr(legacy, "print", print)
+    sources = load_ingest_sources()
     value = str(current_value or "").strip()
     while True:
-        if value != "" and os.path.isdir(value):
+        if value != "" and (os.path.isdir(value) or sources.has_glob_magic(value)):
             value = _choose_root_folder(legacy, value, label=label)
         else:
-            value = str(legacy.logInput(label + ": ")).strip()
-        if os.path.isdir(value):
-            return os.path.normpath(value)
-        pfun("invalid folder:", value)
+            value = str(legacy.logInput(label + " path, folder, or glob: ")).strip()
+        matches = sources.expand_source_spec(value, want="directories")
+        if len(matches) == 1:
+            return os.path.normpath(str(matches[0]))
+        if len(matches) == 0:
+            pfun("no folder matched:", value)
+        else:
+            pfun("multiple folders matched; choose one source or refine the glob:")
+            for path in matches:
+                pfun(" ", path)
+        value = ""
 
 
 def _ensure_project_output_dir(legacy, current_value: str, label: str):
@@ -874,14 +905,14 @@ def run_with_legacy(legacy, df=9, obs=9, dfxy=9, project_defaults: Optional[dict
     if use_last and "images_root" in lastrun_config:
         images_root = images_default
     else:
-        images_root = _ensure_dir(legacy, images_default, "registeredimages folder")
+        images_root = _ensure_source_dir(legacy, images_default, "registeredimages folder")
     seed_path = images_root
 
     seg_default = os.path.normpath(str(prompt_defaults.get("segmentation_root") or _suggest_seg_root(images_root))) if str(prompt_defaults.get("segmentation_root") or _suggest_seg_root(images_root)).strip() != "" else ""
     if use_last and ("seg_root" in lastrun_config or "segmentation_root" in lastrun_config):
         seg_root = seg_default or None
     else:
-        seg_root = _ensure_dir(legacy, seg_default, "segmentation folder")
+        seg_root = _ensure_source_dir(legacy, seg_default, "segmentation folder")
 
     if use_last and "core_include_token" in lastrun_config:
         core_include_token = str(prompt_defaults.get("core_include_token", "") or "").strip()

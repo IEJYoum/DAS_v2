@@ -1635,6 +1635,7 @@ def _applyGatingConfig(obs,path):
     gate_df = pd.read_csv(path)
     obs["Celltype: Gating"] = "unclassified"
     obs["Subtype: Gating"] = "unclassified"
+    funcCols = {}
     for _,row in gate_df.iterrows():
         included = str(row.get("Include_Label","")).strip()
         if included not in ("1","1.0"):
@@ -1651,8 +1652,16 @@ def _applyGatingConfig(obs,path):
         valid = True
         for tok in tokens:
             marker,sign = tok[:-1],tok[-1]
-            func_col = marker+"_func"
-            if func_col not in obs.columns:
+            if marker not in funcCols:
+                func_col = None
+                for col in obs.columns:
+                    parts = [part.lower() for part in str(col).split("_")]
+                    if marker.lower() in parts and "func" in parts:
+                        func_col = col
+                        break
+                funcCols[marker] = func_col
+            func_col = funcCols[marker]
+            if func_col is None:
                 print("WARNING: gating marker not found in thresholded data:",marker,"(class:",cls,")")
                 valid = False
                 break
@@ -1663,6 +1672,19 @@ def _applyGatingConfig(obs,path):
         obs.loc[mask,"Subtype: Gating"] = cls
         obs.loc[mask,"Celltype: Gating"] = parent
         print(cls,":",int(mask.sum()),"cells")
+    return(obs)
+
+
+def _applyArtifactGate(obs,gate):
+    funcCols = [col for col in obs.columns if str(col).endswith("_func")]
+    if len(funcCols) == 0:
+        print("WARNING: no thresholded marker columns found for artifact gate")
+        return(obs)
+    posFrac = (obs.loc[:,funcCols].astype(str) == "+").sum(axis=1)/len(funcCols)
+    key = posFrac > gate
+    obs.loc[key,"Celltype: Gating"] = "NA"
+    obs.loc[key,"Subtype: Gating"] = "artifact"
+    print("artifact gate",gate,"using",len(funcCols),"markers:",int(key.sum()),"cells")
     return(obs)
 
 
@@ -1679,15 +1701,24 @@ def samType(dfs,com=[],cat=''):
             if thresh_path is None:
                 thresh_path = logInput('manual thresholds csv path: ')
                 _create_resources_shortcut(thresh_path,("threshold",),"manual_thresholds")
-        return([], [gate_path,thresh_path])
+        try:
+            artifact_gate = float(logInput('artifact gate: fraction of positive markers required (default .8): '))
+        except:
+            artifact_gate = .8
+        return([], [gate_path,thresh_path,artifact_gate])
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     gate_path,thresh_path = com[1],com[2]
+    try:
+        artifact_gate = float(com[3])
+    except:
+        artifact_gate = .8
     result = cm.applyManualThresholdsCSV(df,obs,thresh_path,subtract=False)
     if result is None:
         print('samType failed: could not apply manual thresholds from',thresh_path)
         return(dfs,[])
     df,obs = result
     obs = _applyGatingConfig(obs,gate_path)
+    obs = _applyArtifactGate(obs,artifact_gate)
     return([df,obs,dfxy],[])
 
 

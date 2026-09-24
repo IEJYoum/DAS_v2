@@ -7,7 +7,6 @@ passed in as a fallback for a glob that matches no files; it is not modified.
 
 from __future__ import annotations
 
-import glob as globlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -20,6 +19,8 @@ from image_conventions import (
     normalize_convention_key,
     tabular_coordinate_pair_candidates,
 )
+from ingest_sources import expand_source_spec as expand_generic_source_spec
+from ingest_sources import join_source_specs, split_source_specs
 
 
 CSV_SUFFIX = ".csv"
@@ -116,40 +117,65 @@ def discover_sources(
     default_source_spec: Optional[str] = None,
     browse_fn: Optional[Callable[[], object]] = None,
 ) -> tuple[list[Path], str]:
-    """Resolve one CSV path, folder, or glob pattern and return its saved spec."""
+    """Resolve one or more CSV paths, folders, or glob patterns."""
 
     root = Path(initial_folder).expanduser()
     default_spec = str(default_source_spec or "").strip() or str(root / "*.csv")
-    spec = _ask(
-        input_fn,
-        f"CSV source path, folder, or glob [{default_spec}]:",
-        default=default_spec,
-        options=[
-            ("use", "Use default", "Use the shown saved CSV path, folder, or glob."),
-            ("browse", "Browse", "Open the legacy folder navigator."),
-        ],
-    )
-    if spec.lower() == "use":
-        spec = default_spec
-    resolved_spec = ""
-    if spec.lower() == "browse":
-        paths = _expand_browse_result(browse_fn, print_fn)
-    else:
-        paths = _expand_source_spec(spec)
-        if paths:
-            resolved_spec = spec
-        if _has_glob_magic(spec) and not paths:
-            print_fn("No CSV files matched the glob. Opening the legacy navigator.")
-            paths = _expand_browse_result(browse_fn, print_fn)
+    paths: list[Path] = []
+    saved_specs: list[str] = []
+    first = True
+    while not paths:
+        prompt = f"CSV source path, folder, or glob [{default_spec}]:" if first else "CSV source path, folder, or glob (or browse):"
+        spec = _ask(
+            input_fn,
+            prompt,
+            default=default_spec if first else "",
+            options=[
+                ("use", "Use default", "Use the shown saved CSV path, folder, or glob."),
+                ("browse", "Browse", "Open the legacy folder navigator."),
+            ] if first else [("browse", "Browse", "Open the legacy folder navigator.")],
+        )
+        first = False
+        if spec.lower() == "use":
+            spec = default_spec
+        if spec.lower() == "browse":
+            paths.extend(_expand_browse_result(browse_fn, print_fn))
+            break
+        values = split_source_specs(spec)
+        expanded = _expand_source_specs(values)
+        if not expanded:
+            print_fn("No CSV files matched: " + str(spec))
+            continue
+        paths.extend(expanded)
+        saved_specs.extend(values)
 
-    paths = _exclude_complete_triplets(paths, print_fn=print_fn)
+    while paths:
+        extra = _ask(
+            input_fn,
+            "additional CSV source path, folder, or glob (blank when done):",
+            default="",
+        )
+        if extra == "":
+            break
+        if extra.lower() == "browse":
+            paths.extend(_expand_browse_result(browse_fn, print_fn))
+            continue
+        values = split_source_specs(extra)
+        expanded = _expand_source_specs(values)
+        if not expanded:
+            print_fn("No CSV files matched: " + str(extra))
+            continue
+        paths.extend(expanded)
+        saved_specs.extend(values)
+
+    paths = _exclude_complete_triplets(_dedupe_paths(paths), print_fn=print_fn)
     if paths:
         print_fn(f"Resolved {len(paths)} CSV source file(s):")
         for path in paths[:12]:
             print_fn("  " + str(path))
         if len(paths) > 12:
             print_fn(f"  ... {len(paths) - 12} additional file(s)")
-    return paths, resolved_spec
+    return paths, join_source_specs(saved_specs)
 
 
 def read_sources(paths: Sequence[Path], *, print_fn: Callable[..., None]) -> list[SourceTable]:
@@ -312,24 +338,36 @@ def partition_triplet(
 
 
 def _expand_source_spec(spec: object) -> list[Path]:
-    text = str(spec or "").strip().strip('"')
-    if text == "":
-        return []
-    if _has_glob_magic(text):
-        candidates = [Path(value) for value in globlib.glob(text, recursive=True)]
-    else:
-        path = Path(text).expanduser()
-        if path.is_dir():
-            candidates = list(path.glob("*.csv"))
-        elif path.is_file():
-            candidates = [path]
-        else:
-            candidates = []
+    candidates = expand_generic_source_spec(spec, want="either")
+    if len(candidates) == 1 and candidates[0].is_dir() and not any(char in str(spec or "") for char in "*?["):
+        candidates = sorted(candidates[0].glob("*.csv"), key=lambda path: str(path).lower())
+    return _csv_files_only(candidates)
+
+
+def _expand_source_specs(specs: Sequence[object]) -> list[Path]:
+    paths: list[Path] = []
+    for spec in specs:
+        paths.extend(_expand_source_spec(spec))
+    return _dedupe_paths(paths)
+
+
+def _csv_files_only(candidates: Sequence[Path]) -> list[Path]:
     unique: dict[str, Path] = {}
     for path in candidates:
         if path.is_file() and path.suffix.lower() == CSV_SUFFIX:
             resolved = path.resolve()
             unique[str(resolved).lower()] = resolved
+    return sorted(unique.values(), key=lambda path: str(path).lower())
+
+
+def _dedupe_paths(paths: Sequence[Path]) -> list[Path]:
+    unique: dict[str, Path] = {}
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        unique[str(resolved).lower()] = resolved
     return sorted(unique.values(), key=lambda path: str(path).lower())
 
 
@@ -647,11 +685,6 @@ def _resolve_columns_by_key(frame: pd.DataFrame, keys: Sequence[str]) -> Optiona
             by_key[normalized] = str(column)
     resolved = tuple(by_key.get(normalize_convention_key(key), "") for key in keys)
     return resolved if all(resolved) else None
-
-
-def _has_glob_magic(text: object) -> bool:
-    value = str(text or "")
-    return "*" in value or "?" in value or ("[" in value and "]" in value)
 
 
 def _unique_column_name(existing: Sequence[object], preferred: str) -> str:

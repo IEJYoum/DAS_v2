@@ -960,11 +960,25 @@ def applyManualThresholdsCSV(df,obs,path,subtract=False):
     #called without prompting (e.g. by samType for gating). Returns (df,obs) with
     #<marker>_func +/- columns set, or None if the csv/obs don't match that format.
     thresh = pd.read_csv(path,float_precision='round_trip')
-    if "Markers" not in thresh.columns:
-        return(None)
     if "slide_scene" not in obs.columns:
         print("WARNING: obs has no slide_scene column; cannot match ROI-specific thresholds")
         return(None)
+    if "Markers" not in thresh.columns:
+        scenes = set(obs["slide_scene"].astype(str).unique())
+        index_col = None
+        for pos in [0,1]:
+            if pos >= thresh.shape[1]:
+                continue
+            vals = set(thresh.iloc[:,pos].dropna().astype(str))
+            stripped_vals = set([val.split("_",1)[1] for val in vals if "_" in val])
+            if len(vals.intersection(scenes)) > 0 or len(stripped_vals.intersection(scenes)) > 0:
+                index_col = thresh.columns[pos]
+                break
+        if index_col is None:
+            print("WARNING: could not find threshold ROI labels in csv columns 0 or 1")
+            return(None)
+        print("using threshold ROI labels from:",index_col)
+        thresh = thresh.set_index(index_col).transpose().reset_index().rename(columns={"index":"Markers"})
     thresh = thresh.set_index("Markers")
     if "Cells" in thresh.index:
         thresh = thresh.drop(index="Cells")
@@ -990,21 +1004,28 @@ def applyManualThresholdsCSV(df,obs,path,subtract=False):
         print("WARNING: threshold slide_scene labels not found in obs:", missingObs)
     if missingThresh:
         print("WARNING: obs slide_scene labels with no threshold column:", missingThresh)
-    funcs = pd.DataFrame("-",index=obs.index,
-                         columns=[biom+"_func" for biom in thresh.index if biom in df.columns])
+    markerCols = {}
     for biom in thresh.index:
-        if biom not in df.columns:
+        for col in df.columns:
+            if str(biom).lower() in [part.lower() for part in str(col).split("_")]:
+                markerCols[biom] = col
+                break
+    funcs = pd.DataFrame("-",index=obs.index,
+                         columns=[biom+"_func" for biom in markerCols])
+    for biom in thresh.index:
+        if biom not in markerCols:
             print("WARNING: threshold marker not found in df:", biom)
             continue
+        col = markerCols[biom]
         biomThresh = thresh.loc[biom]
         cellThresh = cellScenes.map(biomThresh)
         sceneKey = cellThresh.notna()
-        key = sceneKey & (df[biom] >= cellThresh)
+        key = sceneKey & (df[col] >= cellThresh)
         funcs.loc[key,biom+"_func"] = "+"
         print(biom,key.sum(),"positive cells")
         if subtract:
-            df.loc[sceneKey,biom] -= cellThresh.loc[sceneKey]
-            df.loc[sceneKey & (df[biom]<0),biom] = 0
+            df.loc[sceneKey,col] -= cellThresh.loc[sceneKey]
+            df.loc[sceneKey & (df[col]<0),col] = 0
     obs[funcs.columns] = funcs
     return(df,obs)
 
