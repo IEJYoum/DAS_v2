@@ -1,0 +1,818 @@
+VIEWER REWORK PLAN v3
+=====================
+
+Purpose
+-------
+
+Replace the current patchwork viewer engine with one strict, inspectable build
+path while preserving the useful input adapters, project prompts, browser UI,
+ROI/threshold editors, mailbox workflow, figure controls, and reusable assets.
+
+The first implementation target is the normal DAS path:
+
+  current df/obs/dfxy
+    -> existing project config and prompts
+    -> exact slide_scene manifest
+    -> one fresh run plan
+    -> one writer
+    -> one ready viewer
+
+Do not make a temporary viewer and read it back. Do not use viewer_data.json as
+an input to another run. Do not add classes or a second viewer runtime.
+
+The current scripts are backed up by the user. This pass may remove obsolete
+internal compatibility machinery aggressively. Existing generated HTML files
+must not be modified or deleted.
+
+
+Hierarchy Of Truth
+------------------
+
+These sources are useful, but they are not peers.
+
+1. Current DAS triplet
+
+   - obs["slide_scene"] is the authoritative spatial identity in standard DAS
+     mode.
+   - df, obs, and dfxy indexes must be unique and exactly aligned.
+   - Current obs annotations, not a previous viewer, define grouping, subsets,
+     ROI rows, and overlays.
+
+2. Existing project config
+
+   - Stores user choices such as figure roots, segmentation roots, viewer
+     output root, and asset source inputs.
+   - Keep the current project-config files, inheritance, prompts, GUI transport,
+     and shared path parsing.
+   - Config says where to look. It does not override triplet identity.
+
+3. Ephemeral scene_manifest
+
+   - Constructed once for the current run.
+   - Keyed only by complete slide_scene values.
+   - Contains resolved channels, exact segmentation TIFF, display label, and
+     any layout hint.
+   - This is the only spatial object accepted by the engine.
+
+4. Asset registry and overlay cache
+
+   - Performance aids only.
+   - Reuse requires an exact slide_scene and a valid input signature.
+   - Missing, stale, incompatible, or ambiguous cache entries are ignored and
+     regenerated. They never alter current scenes or annotations.
+
+5. Run outputs
+
+   - viewer_data.json, sidecars, and HTML are outputs only.
+   - They are never consulted to decide what a new run contains.
+
+Standalone adapters sit before item 1. They may construct a triplet and a
+slide_scene manifest, but the fallback must be explicit and loud. The core
+engine itself never infers identity.
+
+
+Canonical Dicts
+---------------
+
+Use four ordinary dictionaries. Do not introduce dataclasses or stateful
+builder objects.
+
+project_context
+  Existing resolved user/config values. Keep current key names where possible.
+
+scene_manifest
+  {
+    "BTK153ROI01": {
+      "slide_scene": "BTK153ROI01",
+      "display_label": "BTK153 ROI01",
+      "channel_sources": [...],
+      "segmentation_tif": ".../label_BTK153_ROI01.tif" or "",
+      "source_paths": [...],
+      "layout_hint": {}
+    }
+  }
+
+run_plan
+  Current-run facts computed from the triplet and manifest: included scenes,
+  core tile specifications, groupings, views, subset definitions, ROI payload
+  specifications, threshold payload, figure sources/associations, and output
+  naming. It contains no state copied from an old viewer.
+
+build_report
+  {
+    "status": "building" | "ready" | "failed",
+    "scenes": {...},
+    "features": {
+      "core_images": {...},
+      "roi": {...},
+      "threshold": {...},
+      "subset_overlays": {...},
+      "figures": {...}
+    },
+    "warnings": [...],
+    "errors": [...]
+  }
+
+Each major function accepts a dict and returns a dict. Avoid ambient globals.
+
+
+One Public Engine Handoff
+-------------------------
+
+Add one engine-facing function in visualization/call_visu_html_7.py:
+
+  build_viewer_run(
+      df,
+      obs,
+      dfxy,
+      scene_manifest,
+      project_context,
+      roi_mailbox=None,
+      threshold_store=None,
+      run_options=None,
+  )
+
+Behavior:
+
+1. Validate the triplet and scene manifest without writing.
+2. Build and print a complete preflight/run_plan.
+3. Stop before expensive work if required inputs are invalid.
+4. Ask only about known optional degradation, such as unresolved masks or
+   skipping figures.
+5. Call one writer in visu_html_functions7.py.
+6. Return a result dict containing exact html_path, viewer_data_path,
+   build_report_path, run_dir, and status.
+
+cvh.main() remains a thin Metro/CLI-compatible wrapper. It resolves existing
+prompts and adapters, calls build_viewer_run(), updates the existing meta sink,
+and returns the original df/obs/dfxy tuple.
+
+
+Required, Optional, And Cacheable Work
+--------------------------------------
+
+Required for a valid run:
+
+- aligned df/obs/dfxy
+- nonblank exact obs.slide_scene in standard DAS mode
+- one accepted image/channel set per included scene
+- writable run directory
+- core viewer_data.json and viewer HTML
+
+Feature-required, but not fatal to the core viewer:
+
+- ROI rows and ROI runtime for ROI controls
+- threshold rows/store and threshold runtime for threshold controls
+- subset overlays for overlay display
+
+If one feature fails, record the failure and disable that feature. Do not
+pretend it is available and do not discard the core viewer.
+
+Optional:
+
+- figures
+- segmentation boundaries when the user accepts centroid fallback
+- layout hints and display refinements
+
+Cacheable:
+
+- normalized channel PNGs
+- copied portable figures
+- subset overlays
+- extracted cell boundaries
+- asset registry entries
+
+
+Standard DAS Entry Changes
+--------------------------
+
+File: IFA.py
+
+UPDATE htmlViewer()
+
+- Keep preflight, current-project lookup, project prompts, mailbox startup,
+  browser opening, and df/obs/dfxy return behavior.
+- Remove the has_reusable_viewer_assets() -> run_manual_asset_creation() ->
+  temporary viewer branch.
+- Call cvh.main() once. cvh.main() resolves a scene manifest from current
+  config/source inputs or validated cached assets.
+- Use the exact result paths returned through the existing meta sink. Do not
+  scan for the latest run.
+
+REMOVE _remove_transient_manual_viewer_run() if it has no remaining caller.
+
+File: controler.py
+
+KEEP _run_legacy_html() unchanged except for any import/name adjustment forced
+by IFA.py. Controller should continue entering through IFA.htmlViewer().
+
+
+call_visu_html_7.py: Keep The Input Perimeter
+---------------------------------------------
+
+Keep these families substantially intact. Small signature changes are allowed
+to feed the new engine, but do not redesign their user-facing behavior.
+
+- _cvh_meta_sink(), _set_cvh_meta(), cvh_input(), cvh_check_change()
+- path/config OS normalization and reporting
+- prompt_project_viewer_context()
+- prompt_segmentation_roots() and saved segmentation-root handling
+- prompt_filepaths(), expand_input_line(), and saved viewer_asset_inputs
+- shared image_conventions parsing/resolution
+- figure-root discovery and matching functions
+- project figure/subset folder conventions
+- prompt_per_slide_scene_viewers()
+- natural_sort_key(), safe_tag(), and simple display-label helpers
+
+Do not add a second config file or rename hook-sensitive prompts merely to fit
+the new engine.
+
+
+call_visu_html_7.py: Remove Seed/Previous-Run Machinery
+-------------------------------------------------------
+
+DELETE these functions after the standard entrypoint is switched:
+
+- discover_default_manual_filepaths
+- seed_viewer_root
+- should_reuse_default_seed_viewer
+- reuse_seed_viewer_run
+- seed_viewer_compatible_with_obs
+- discover_latest_seed_viewer
+- prompt_seed_viewer_path
+- build_identity_manifest_from_seed_viewer
+- build_segmentation_map_from_seed_viewer
+- viewer_slide_scene_values
+- build_seed_grouping_patch
+- trim_seed_viewer_to_obs
+- missing_obs_slide_scenes
+- covered_obs_slide_scenes
+- _build_and_write_project_viewer
+- run_context_mode
+
+REPLACE discover_latest_run_html() with direct use of the writer result. Delete
+it if no other caller remains.
+
+DELETE the temporary-viewer role from run_manual_asset_creation(). The current
+sole standard caller in IFA.py goes away. If a direct manual public wrapper is
+still desired, reduce it to:
+
+  file inputs -> scene_manifest -> build_viewer_run()
+
+It must not write a seed and then invoke the engine again.
+
+DELETE has_reusable_viewer_assets(). Asset availability becomes one field in
+preflight, not a branch that selects a different runtime.
+
+
+call_visu_html_7.py: Replace Asset Resolution
+---------------------------------------------
+
+REPLACE build_core_tiles_from_asset_registry() with:
+
+  resolve_cached_scene_assets(required_scenes, registry, viewer_root)
+
+Rules:
+
+- Only exact slide_scene matches.
+- Validate every referenced file.
+- When source files are available, validate source signature as well.
+- Return records and warnings; do not silently omit malformed entries.
+- Do not parse filenames or ROI numbers here.
+
+UPDATE build_core_tiles_from_convention_roots() and rename it to:
+
+  resolve_scene_manifest_from_conventions(required_scenes, source_roots)
+
+Keep the shared convention resolvers. Return manifest records rather than
+render tiles. Parsing remains adapter-side.
+
+UPDATE viewer_convention_root_candidates() only enough to include the existing
+saved asset inputs directly. Preserve current project config behavior.
+
+UPDATE build_manual_asset_catalog() into an adapter with this endpoint:
+
+  build_scene_manifest_from_asset_paths(filepaths, required_scenes)
+
+Initially reuse build_templates(), make_template(),
+build_direct_viewer_buckets(), and the shared parser. Do not rewrite working
+file-convention logic during the engine pass. Once stable, collapse these
+wrappers only where the reduction is literal and obvious.
+
+UPDATE validate_slide_scene_manifest() to validate the final canonical shape:
+
+- key equals record.slide_scene
+- requested DAS scenes are exact matches
+- no source path belongs to two scenes
+- channels and segmentation files exist when declared
+- duplicate scene records fail before rendering
+
+
+call_visu_html_7.py: Make Standard Identity Strict
+--------------------------------------------------
+
+UPDATE preflight_project_viewer_obs() into validate_standard_triplet(). It must
+check all three tables, not obs alone:
+
+- DataFrame types
+- nonempty, unique, equal indexes
+- exact slide_scene column present in obs
+- nonblank values
+
+DELETE engine use of fallback core inference. After all callers are converted,
+delete:
+
+- infer_core_series_from_obs
+- core_series_candidate_priority
+- parse_core_series
+
+If a non-DAS adapter lacks slide_scene, it must construct the column before
+calling build_viewer_run(). No allow_guess flag belongs in the engine.
+
+UPDATE these functions to use obs.slide_scene directly and fail clearly when
+it is absent:
+
+- precompute_subset_option_source
+- prepare_overlay_context
+- build_project_core_positions
+- derive_groupings_from_obs
+
+Keep filter_tables_to_slide_scenes(), but call it only after a user explicitly
+accepts a partial scene set. Print included and excluded complete scene names.
+
+
+call_visu_html_7.py: Replace Project Catalog Assembly
+-----------------------------------------------------
+
+DELETE:
+
+- assemble_project_catalog
+- build_project_catalog_from_base_viewer
+- build_project_subset_artifacts
+- build_project_figure_artifacts in its current combined form
+
+ADD:
+
+  build_run_plan(df, obs, dfxy, scene_manifest, project_context,
+                 roi_mailbox=None, threshold_store=None, run_options=None)
+
+This function constructs a fresh dict. It never starts from or deep-copies
+viewer_data.
+
+Use the existing small grouping functions inside it:
+
+- derive_groupings_from_obs
+- add_default_full_dataset_grouping
+- prune_and_sort_groupings
+- build_view_sets
+- choose_default_view
+- build_subset_options_by_view
+
+UPDATE build_catalog_from_identity_manifest() and build_core_tile_specs() into
+one direct helper:
+
+  build_core_tile_specs_from_manifest(scene_manifest)
+
+It must not infer grouping, read config, inspect caches, or write files.
+
+REMOVE make_missing_tile() if strict preflight leaves no caller. Missing image
+scenes should be reported before the plan is accepted, not represented as a
+plausibly active empty tile.
+
+
+call_visu_html_7.py: ROI, Threshold, Segmentation, And Overlays
+--------------------------------------------------------------
+
+REPLACE build_roi_data_for_seed() with:
+
+  build_roi_payload_plan(df, obs, dfxy, scene_manifest,
+                         subset_columns, threshold_store=None)
+
+It builds rows keyed by exact slide_scene and contains no output paths. Keep
+the current useful payload-size work: one scene at a time, sidecar rows, only
+needed annotation columns, expression markers when available, and index-based
+cell identity.
+
+UPDATE build_threshold_store_payload() to consume exact scene positions and
+the ROI payload plan. Keep mailbox/writer behavior and study-threshold fields.
+
+UPDATE preflight_segmentation_map() to accept scene_manifest only. It should be
+a trivial extraction of exact segmentation_tif values plus unresolved scenes.
+
+DELETE folder/path searching from render-time code:
+
+- _find_seg_file
+- _find_seg_file_multi
+- render_segmentation_subset_overlay
+- resolve_segmentation_root (singular wrapper, currently unused)
+- ensure_project_segmentation_root (currently unused)
+- build_subset_overlay_for_core (currently unused)
+
+Keep multi-root prompting and convention parsing upstream. Renderers receive
+one exact segmentation path or an empty string.
+
+REPLACE build_subset_overlay_specs() with two parts:
+
+  build_subset_overlay_plan(...)
+    Pure mapping of scene/subset -> selected row positions or segmentation IDs.
+
+  materialize_subset_overlays(...)
+    Writer-side rendering with explicit paths and build-report outcomes.
+
+Fix cache identity. A reusable overlay key must include:
+
+- complete slide_scene
+- subset column and value
+- segmentation file signature, not just its path
+- hash of selected row indexes/segmentation IDs
+- coordinate signature for centroid overlays
+- canvas dimensions and renderer version
+
+_validate_cached_overlay() may still check dimensions, but dimensions alone
+must never establish semantic validity.
+
+Cell-boundary sidecar names must include the segmentation signature. Remove
+relative paths calculated against the fictional viewer_runs/_tmp directory;
+calculate them from the actual run_dir supplied by the writer.
+
+
+call_visu_html_7.py: Figures
+--------------------------------
+
+Preserve the existing figure roots, folder matching, filename search text,
+view matching, subset matching, and GUI filters.
+
+REPLACE dedupe_figure_entries_by_path(). Path-only dedupe currently confuses
+asset identity with display applicability.
+
+Have figure discovery return two simple structures:
+
+  figure_sources = {
+    "<figure_id>": {
+      "source_path": "...",
+      "filename": "...",
+      "family": "...",
+      "subfamily": "...",
+      "search_text": "..."
+    }
+  }
+
+  figure_links = [
+    {
+      "figure_id": "...",
+      "view_id": "..." or "",
+      "subset_id": "..." or ""
+    }
+  ]
+
+One source file is staged at most once. It may retain multiple legitimate
+view/subset links without duplicating the file record.
+
+UPDATE discover_view_figure_specs_cached() and
+build_figure_entries_from_specs() only at their output boundary. Do not rewrite
+the working matching rules in the same pass.
+
+Figure discovery and preflight report the number of unique files and links
+before staging. No figures selected or no figure folder must remain a valid
+core-viewer run.
+
+
+visu_html_functions7.py: One Explicit Writer
+---------------------------------------------
+
+Keep the existing HTML/JavaScript viewer, ROI runtime, threshold runtime, and
+sidecar loading protocol unless a small field adjustment is required by the
+new result/status dictionaries.
+
+REPLACE build_catalog() with:
+
+  write_viewer_plan(run_plan, out_root)
+
+It is the sole materializer. threshold_standalone_fcs.py and cvh both call the
+same upstream build_viewer_run(), so the standalone should not normally call
+the writer directly.
+
+REMOVE mutable path globals ROOTDIR, OUTDIR, and ASSETSDIR from catalog mode.
+
+REPLACE prepare_run_context() with:
+
+  prepare_run_paths(out_root, run_name_hint)
+
+Return a plain paths dict containing root_dir, run_dir, pool_dir,
+registry_path, and sidecar directories. Pass it explicitly to writer helpers.
+
+UPDATE signatures:
+
+- rel_from_out(abs_path) -> rel_from_run(abs_path, run_dir)
+- ensure_source_asset(..., paths)
+- ensure_channel_asset(..., paths)
+- ensure_composite_asset(..., paths)
+- ensure_figure_asset(..., paths)
+
+REPLACE the generic build_render_tile_from_spec() split with:
+
+- materialize_core_tiles(run_plan, registry, paths, report)
+- materialize_figures(run_plan, registry, paths, report)
+
+Core images are required. Figures are optional. They must not share one error
+policy or one generic tile-building branch.
+
+UPDATE materialize_roi_data_for_run() and
+materialize_figure_entries_for_run() to return both the viewer payload and
+their report entries. Sidecar writes use actual run paths.
+
+REPLACE write_viewer_run() with a commit-oriented order:
+
+1. Create the run directory with no ready marker.
+2. Materialize required core channel assets.
+3. Materialize ROI/threshold/subset features independently.
+4. Stage each unique figure once; skip/report failures immediately.
+5. Construct viewer_data from the current run_plan and successful outputs.
+6. Atomically write viewer_data.json and required HTML/runtime files.
+7. Atomically save only validated registry updates.
+8. Write build_report.json.
+9. Write a small READY marker last.
+
+Latest-run discovery must consider only runs with READY plus the required HTML
+and viewer_data.json. Failed/incomplete run directories remain inspectable but
+are never reused.
+
+
+visu_html_functions7.py: Remove Old Writer Paths
+------------------------------------------------
+
+DELETE after the new writer passes focused tests:
+
+- build_viewer_from_seed
+- merge_viewer_data
+- merge_dict_of_lists
+- merge_tile_key
+- tile_is_better
+- tile_signature
+- merge_nested_dict
+- merge_groupings
+- merge_view_sets
+- collect_referenced_asset_rels
+- prune_unreferenced_assets
+- make_rgb_from_tiffs (currently unused)
+
+DELETE build_legacy() and its legacy-grid-only helpers if repo-wide search still
+shows no external caller after cvh is switched:
+
+- copy_asset
+- make_base_image
+- the old grid renderer inside build_legacy
+
+Keep build() only as a temporary compatibility alias for dict catalogs during
+the migration. Remove it when all tracked callers use build_viewer_run() or
+write_viewer_plan(). Do not retain two functioning engines.
+
+Do not delete old asset-pool files during this rework. Existing generated HTML
+may reference them. Ignore incompatible registry entries and append validated
+new entries; cleanup is a separate explicit operation.
+
+
+I/O Failure Policy
+------------------
+
+Figures:
+
+- no 90-minute retries
+- FileNotFoundError, PermissionError, EPERM, EACCES, invalid image, or invalid
+  destination: skip immediately and record source path plus error
+- at most a short bounded retry for explicitly transient network errors
+- one failed figure never prevents READY
+
+Required core writes:
+
+- use atomic temp-file replacement
+- short bounded retry for transient network errors
+- permissions/path-policy errors fail the run immediately with the exact path
+- no catch-all conversion to "asset not found"
+
+Update support/filesystem_utils.py only by adding an optional retry predicate
+or explicit attempt limit. Preserve default behavior for unrelated callers.
+The viewer must pass its stricter policy explicitly.
+
+
+Standalone FCS Adapter
+----------------------
+
+File: misc mIHC utility/threshold_standalone_fcs.py
+
+KEEP:
+
+- source-directory validation
+- CellProfiler/Processed/ROI discovery
+- marker and label TIFF discovery
+- threshold CSV import
+- triplet construction from object CSV or label images
+- index-alignment validation
+- label-overlap validation
+- triplet project export
+- per-slide/combined CLI behavior
+- debug report
+
+Its fallback is valid because it is an explicit standalone adapter. When no
+object CSV supplies identity, construct:
+
+  slide_scene = slide_name + normalized ROI folder
+
+Print a loud line such as:
+
+  Standalone identity fallback: <slide>/<ROI folder> -> <slide_scene>
+
+The resulting obs must contain slide_scene before entering the shared engine.
+
+REMOVE imports of internal viewer implementation helpers:
+
+- add_default_full_dataset_grouping
+- build_roi_data_for_seed
+- build_view_sets
+- choose_default_view
+- derive_groupings_from_obs
+- prune_and_sort_groupings
+- build_catalog
+
+DELETE:
+
+- build_minimal_view_fields
+- build_catalog_for_datasets
+- build_catalog_for_dataset
+- build_viewer
+
+ADD one small adapter function:
+
+  build_fcs_scene_manifest(datasets)
+
+UPDATE build_viewer_from_datasets():
+
+1. Discover/construct datasets.
+2. Build and combine aligned triplets.
+3. Write the DAS-readable triplet.
+4. Build threshold_store.
+5. Build the FCS scene manifest.
+6. Call cvh.build_viewer_run() once with explicit standalone context/options.
+7. Write the debug report from the returned build result.
+
+The standalone file owns FCS fallback identity and threshold import. The
+shared engine owns grouping, ROI payloads, rendering, sidecars, and HTML.
+
+
+Browser Contract
+----------------
+
+Preserve:
+
+- viewer_data embedded in the main HTML
+- figure_entries.js sidecar loading
+- one ROI payload sidecar per scene
+- ROI and threshold editor tabs
+- localStorage metadata handoff to editor tabs
+- HTTP mailbox writer plus existing download fallback
+- relative _asset_pool paths
+
+Add only a small feature_status/build-report summary to viewer_data. Existing
+button availability should derive from successfully materialized payloads.
+Where the UI currently shows a live button for a failed feature, disable it
+and show the recorded reason.
+
+figure_entries.js should carry the compact figure_sources + figure_links
+payload rather than flattening every association back into duplicate entries.
+Update the one sidecar loader/filter boundary in the browser to consume that
+shape. Keep the filename and dynamic-script loading mechanism unchanged.
+
+
+Implementation Order
+--------------------
+
+Pass 0: Characterize contracts
+
+- Add focused tests for current viewer_data fields consumed by browser JS.
+- Add the required failure reproduction: figure EPERM must finish promptly and
+  produce a core viewer.
+- Add a two-slide duplicate-ROI fixture.
+- Do not run a large real viewer.
+
+Pass 1: Strict DAS plan
+
+- Add validate_standard_triplet(), canonical scene_manifest validation,
+  build_core_tile_specs_from_manifest(), and build_run_plan().
+- Keep existing input/config resolvers and feed their output into the manifest.
+- Verify the plan only; no writer switch yet.
+
+Pass 2: Replace writer
+
+- Add explicit paths dict and write_viewer_plan().
+- Remove global path dependence from catalog mode.
+- Add READY/build_report behavior and independent feature outcomes.
+- Switch standard DAS/IFA to the new builder.
+
+At this point, run a tiny synthetic DAS viewer and inspect:
+
+- exact scenes
+- images
+- ROI payloads/buttons
+- threshold payloads/buttons
+- segmentation map
+- subset controls/overlays
+- figures and skipped-figure report
+- HTML and sidecar paths
+
+Pass 3: Standalone adapter
+
+- Convert threshold_standalone_fcs.py to build_fcs_scene_manifest() plus one
+  build_viewer_run() call.
+- Test one ROI and two slides sharing ROI01.
+
+Pass 4: Delete old engine
+
+- Remove every seed/reconstruction/merge function listed above.
+- Remove dead imports and wrappers.
+- Confirm repo-wide search has no tracked caller before each public-looking
+  deletion.
+- Do not preserve an old branch behind a flag.
+
+Pass 5: One real DAS run
+
+- Use a small current project first.
+- Only after it passes, run one representative larger project.
+- Large-run testing is for scale, not first-line correctness.
+
+
+Focused Tests
+-------------
+
+Required tests:
+
+1. Standard DAS without obs.slide_scene stops before creating a run directory.
+2. Misaligned triplet stops and names the mismatched table/index.
+3. Two slides sharing ROI01 resolve different images and masks.
+4. Current annotations create current subset options and ROI rows even when an
+   older viewer_data.json exists nearby.
+5. Old viewer_data.json is never opened during a new build.
+6. Stale overlay cache with changed selected cells is regenerated.
+7. Missing/EPERM/invalid figures are reported and core viewer reaches READY.
+8. Multiple figure links survive one-source staging.
+9. Failed required channel write leaves no READY marker.
+10. Latest-run lookup ignores incomplete runs.
+11. No figure folder still produces a complete viewer.
+12. ROI sidecars load under file:// and mailbox download fallback remains.
+13. Standalone FCS constructs slide_scene loudly when needed and calls the same
+    engine.
+14. Existing old Nuclei_ threshold headers still import through the adapter.
+15. python -m unittest discover -s tests -v remains green.
+
+
+Deletion And Size Targets
+-------------------------
+
+Do not satisfy the size target by moving unchanged patchwork into another
+module.
+
+Target for call_visu_html_7.py:
+
+- retain prompts/config/adapters/discovery and one orchestration path
+- remove seed reconstruction, duplicate project assembly, render-time identity
+  inference, and duplicate fallback searches
+- reduce from roughly 4,900 source lines to 2,300 or fewer
+
+Target for visu_html_functions7.py Python engine:
+
+- retain one writer plus the existing browser templates
+- reduce pre-HTML Python orchestration from roughly 1,800 lines to 900 or fewer
+- embedded HTML/JavaScript is not counted toward this target and should not be
+  rewritten merely to reduce line count
+
+Target for threshold_standalone_fcs.py:
+
+- keep its useful adapter logic
+- remove private grouping/catalog/ROI assembly
+- one import/handoff into the shared viewer engine
+
+Expected net result:
+
+- at least 25-35 obsolete Python functions removed
+- no seed viewer reconstruction path
+- no prior-run state merge path
+- no engine identity inference
+- no optional figure on the required critical path
+- no hidden global output directory state
+- one standard DAS engine and one subordinate standalone adapter
+
+
+Stop Conditions During Implementation
+-------------------------------------
+
+Stop and reassess rather than patch around any of these:
+
+- a standard DAS run reaches the engine without obs.slide_scene
+- an adapter cannot produce one exact manifest record per scene
+- browser JS requires a field that has no clear current-run owner
+- an optional feature must mutate core scene identity
+- cache reuse cannot be validated without consulting previous viewer_data
+- a proposed compatibility path would create a second build engine
+
+The desired end state is not "all failures hidden." It is that a failed gear
+has one visible seam, optional features fail independently, and current data
+always controls the run.

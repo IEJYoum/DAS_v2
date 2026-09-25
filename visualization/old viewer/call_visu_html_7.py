@@ -1,0 +1,4903 @@
+﻿"""
+call_visu_html_7:
+- slide_scene-keyed viewer asset ingestion
+- IFanalysisPackage5-compatible main(df, obs, dfxy) signature
+"""
+
+import glob
+import hashlib
+import json
+import os
+import re
+import copy
+import sys
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+from PIL import Image, ImageDraw
+
+try:
+    import tifffile
+except Exception:
+    tifffile = None
+try:
+    from skimage import segmentation as skseg
+except Exception:
+    skseg = None
+
+try:
+    from . import visu_html_functions7 as vhf
+except Exception:
+    import visu_html_functions7 as vhf
+try:
+    from . import if_progress as ifprog
+except Exception:
+    import if_progress as ifprog
+try:
+    from . import subset_project_utils as spu
+except Exception:
+    import subset_project_utils as spu
+
+_NEW_DAS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "support"))
+if _NEW_DAS_DIR not in sys.path:
+    sys.path.append(_NEW_DAS_DIR)
+try:
+    import io_adapter as das_io
+except Exception:
+    das_io = None
+try:
+    from image_conventions import list_sam_viewer_asset_paths as convention_list_sam_viewer_asset_paths
+    from image_conventions import parse_viewer_asset_record
+    from image_conventions import resolve_sam_viewer_assets as convention_resolve_sam_viewer_assets
+    from image_conventions import viewer_display_label as convention_viewer_display_label
+    from image_conventions import viewer_marker_label_from_path as convention_marker_label_from_path
+except Exception:
+    convention_list_sam_viewer_asset_paths = None
+    parse_viewer_asset_record = None
+    convention_resolve_sam_viewer_assets = None
+    convention_viewer_display_label = None
+    convention_marker_label_from_path = None
+try:
+    import image_sources
+except Exception:
+    image_sources = None
+try:
+    from ingest_sources import expand_source_spec as expand_generic_source_spec
+    from ingest_sources import has_glob_magic
+except Exception:
+    expand_generic_source_spec = None
+
+    def has_glob_magic(value):
+        text = str(value or "")
+        return "*" in text or "?" in text or ("[" in text and "]" in text)
+from shared_utils import (
+    load_project_config_values,
+    save_project_config_updates,
+)
+
+
+DEFAULT_OUT_ROOT = os.path.join("HTMLs", "visu_html7")
+SUPPORTED_EXTS = {
+    ".tif", ".tiff", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"
+}
+SUPPORTED_FIGURE_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"
+}
+PROJECT_LEVEL_FIGURE_FAMILY_TOKENS = {
+    "annotationheatmaps",
+    "barplot",
+    "boxplots",
+    "bubbleplots",
+    "clusterheatmap",
+    "clusteringevaluation",
+    "cooccurrence",
+    "correlationmatrix",
+    "differentialabundance",
+    "embeddings",
+    "errorbarplots",
+    "heatmaps",
+    "histogram",
+    "neighborhoodenrichment",
+    "quantileplots",
+    "scatterplots",
+    "spatial",
+    "spatialexpression",
+    "thresholdsweep",
+    "volcanoplots",
+}
+
+TMA_RE = re.compile(r"(?i)(ptma\d+)")
+MISSING_LABELS = set(["", "nan", "none", "null", "na", "n/a"])
+PROJECT_CONFIG_FILE = "project_config.txt"
+PROJECT_CONFIG_POSIX_FILE = "project_config_posix.txt"
+DEFAULT_SUBSET_ID = "all_cells"
+MAX_SUBSET_OPTION_VALUES = 64
+ROI_RUNTIME_NAME = "roi_editor_runtime.html"
+THRESH_RUNTIME_NAME = "thresh_editor_runtime.html"
+ASSET_REGISTRY_NAME = "asset_pool_registry.json"
+SEG_SUFFIX = "Ecad_nuc30_cell30_matched_exp5_CellSegmentationBasins.tif"
+SEG_SUFFIX_CANDIDATES = [
+    "Ecad_nuc30_cell30_matched_exp5_CellSegmentationBasins.tif",
+    "nuc30_cell30_matched_exp5_CellSegmentationBasins.tif",
+    "Ecad_nuc30_cell30_matched_CellSegmentationBasins.tif",
+    "nuc30_cell30_matched_CellSegmentationBasins.tif",
+    "cell30_CellSegmentationBasins.tif",
+]
+
+
+def _cvh_meta_sink():
+    sink = globals().get("_new_das_meta")
+    return sink if isinstance(sink, dict) else {}
+
+
+def _set_cvh_meta(**kwargs):
+    sink = globals().get("_new_das_meta")
+    if not isinstance(sink, dict):
+        sink = {}
+        globals()["_new_das_meta"] = sink
+    for key in kwargs:
+        sink[str(key)] = kwargs[key]
+
+
+def _optional_bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    low = str(value).strip().lower()
+    if low in ["y", "yes", "true", "1"]:
+        return True
+    if low in ["n", "no", "false", "0", ""]:
+        return False
+    return None
+
+
+def _is_foreign_path(text):
+    """True when *text* looks like it belongs to a different OS."""
+    text = str(text or "").strip().replace("\\", "/")
+    if text == "":
+        return False
+    if os.name != "nt":
+        # On Linux: drive letters and UNC paths are foreign
+        if re.match(r"^[A-Za-z]:/", text):
+            return True
+        # UNC-style //server/share (but not //mnt typo — that gets normalized)
+        if re.match(r"^//[A-Za-z]", text) and not text.startswith("//mnt"):
+            return True
+    else:
+        # On Windows: bare /mnt/ or /home/ are foreign
+        if text.startswith("/mnt/") or text.startswith("/home/"):
+            return True
+    return False
+
+
+def _strip_garbled_prefix(text):
+    """Strip a cwd prefix that os.path.abspath prepended to a foreign path.
+
+    e.g. /home/lab/youm/DAS_v2/Z:/Foo -> Z:/Foo  (then _is_foreign_path catches it)
+    """
+    text = str(text or "").strip()
+    if os.name == "nt":
+        return text
+    text = text.replace("\\", "/")
+    m = re.search(r"[A-Za-z]:/", text)
+    if m and m.start() > 0:
+        return text[m.start():]
+    return text
+
+
+def normalize_stored_path(path):
+    """Normalize a path from config or user input.
+
+    Returns the cleaned absolute path if it looks native to this OS.
+    Returns "" if the path looks foreign (e.g. Windows path on Linux).
+    """
+    raw = strip_quotes(str(path or "").strip())
+    if raw == "":
+        return ""
+    if os.name == "nt":
+        if _is_foreign_path(raw):
+            return ""
+        return os.path.abspath(os.path.normpath(raw))
+
+    cleaned = _strip_garbled_prefix(raw).replace("\\", "/")
+    if "\\" in raw and re.search(r"/{2,}[^/]+/", cleaned):
+        return ""
+    if _is_foreign_path(cleaned):
+        return ""
+    if cleaned.startswith("//mnt/"):
+        cleaned = cleaned[1:]
+    return os.path.abspath(os.path.normpath(cleaned))
+
+
+def project_config_filename():
+    return PROJECT_CONFIG_FILE if os.name == "nt" else PROJECT_CONFIG_POSIX_FILE
+
+
+def other_project_config_filename():
+    return PROJECT_CONFIG_POSIX_FILE if os.name == "nt" else PROJECT_CONFIG_FILE
+
+
+def project_config_os_label(filename):
+    return "Windows" if str(filename) == PROJECT_CONFIG_FILE else "Linux/Mac"
+
+
+_reported_other_os_project_configs = set()
+
+
+def report_other_os_project_config(folder):
+    current = normalize_stored_path(folder)
+    if current == "":
+        return
+    current_file = project_config_filename()
+    other_file = other_project_config_filename()
+    key = current + "|" + current_file
+    if key in _reported_other_os_project_configs:
+        return
+    _reported_other_os_project_configs.add(key)
+    current_path = os.path.join(current, current_file)
+    other_path = os.path.join(current, other_file)
+    if (not os.path.isfile(current_path)) and os.path.isfile(other_path):
+        print(
+            "Project was configured on",
+            project_config_os_label(other_file),
+            "but not",
+            project_config_os_label(current_file) + ".",
+            "Please configure paths for this system.",
+        )
+
+
+def prompt_per_slide_scene_viewers(obs):
+    if not isinstance(obs, pd.DataFrame) or "slide_scene" not in obs.columns:
+        return None
+    unique_scenes = sorted(
+        obs["slide_scene"].dropna().astype(str).unique().tolist(),
+        key=natural_sort_key,
+    )
+    if len(unique_scenes) <= 1:
+        return None
+    raw = str(
+        cvh_input(
+            "Build individual viewer per slide_scene? (" + str(len(unique_scenes)) + " found) (y/n) [n]: ",
+            default="n",
+            prompt_meta={
+                "options": [
+                    {
+                        "value": "n",
+                        "label": "Combined viewer",
+                        "description": "Build one viewer containing all matched slide_scene values.",
+                    },
+                    {
+                        "value": "y",
+                        "label": "Individual viewers",
+                        "description": "Build one viewer output folder per slide_scene value.",
+                    },
+                ]
+            },
+        )
+    ).strip().lower()
+    return raw in ["y", "yes"]
+
+
+def normalize_viewer_context(context):
+    if not isinstance(context, dict):
+        return None
+    data_folder = str(context.get("data_folder", "") or context.get("build_folder", "")).strip()
+    build_folder = str(context.get("build_folder", "") or data_folder).strip()
+    figure_folder = str(context.get("figure_folder", "")).strip()
+    viewer_root = str(context.get("viewer_root", "")).strip()
+    dataset_stem = str(context.get("dataset_stem", "")).strip()
+    seed_path = str(context.get("seed_viewer_path", "")).strip()
+    segmentation_roots = _normalize_path_list(list(context.get("segmentation_roots", [])), keep_missing=True)
+    single_seg = str(context.get("segmentation_root", "")).strip()
+    if len(segmentation_roots) == 0 and single_seg != "":
+        segmentation_roots = _normalize_path_list([single_seg], keep_missing=True)
+    out = {
+        "data_folder": normalize_stored_path(data_folder) if data_folder != "" else "",
+        "build_folder": normalize_stored_path(build_folder) if build_folder != "" else "",
+        "dataset_stem": dataset_stem,
+        "figure_folder": normalize_stored_path(figure_folder) if figure_folder != "" else "",
+        "segmentation_root": segmentation_roots[0] if len(segmentation_roots) > 0 else "",
+        "segmentation_roots": segmentation_roots,
+        "viewer_root": normalize_stored_path(viewer_root) if viewer_root != "" else "",
+        "seed_viewer_path": normalize_stored_path(seed_path) if seed_path != "" else "",
+    }
+    per_slide_scene_viewers = _optional_bool(context.get("per_slide_scene_viewers", None))
+    if per_slide_scene_viewers is not None:
+        out["per_slide_scene_viewers"] = per_slide_scene_viewers
+    use_existing_seed_viewer = _optional_bool(context.get("use_existing_seed_viewer", None))
+    if use_existing_seed_viewer is not None:
+        out["use_existing_seed_viewer"] = use_existing_seed_viewer
+    seed_viewer_just_built = _optional_bool(context.get("seed_viewer_just_built", None))
+    if seed_viewer_just_built is not None:
+        out["seed_viewer_just_built"] = seed_viewer_just_built
+    if out["dataset_stem"] == "" and out["data_folder"] != "":
+        out["dataset_stem"] = os.path.basename(out["data_folder"])
+    return out
+
+
+def preflight_project_viewer_obs(obs):
+    """Reject loaded triplets that cannot be mapped safely to viewer assets."""
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return True
+    if "slide_scene" not in obs.columns:
+        candidates = [str(column) for column in obs.columns if str(column).lower().startswith("slide_scene")]
+        print("HTML viewer requires an obs column named 'slide_scene'.")
+        if len(candidates) > 0:
+            print("Possible renamed slide_scene column(s):", ", ".join(candidates))
+        return False
+    values = _clean_obs_values(obs["slide_scene"]).dropna()
+    if values.shape[0] == 0:
+        print("HTML viewer requires nonblank values in obs['slide_scene'].")
+        return False
+    return True
+
+
+def main(df=9, obs=9, dfxy=9, *args, **kwargs):
+    if not preflight_project_viewer_obs(obs):
+        print("Viewer preflight failed. No viewer assets or HTML were written.")
+        return (df, obs, dfxy)
+    meta = _cvh_meta_sink()
+    viewer_context = normalize_viewer_context(kwargs.get("viewer_context", None))
+    roi_mailbox = kwargs.get("roi_mailbox", None)
+    resolved = None
+    if viewer_context is not None:
+        resolved = viewer_context
+        context_ok = isinstance(obs, pd.DataFrame) and obs.shape[0] > 0 and (
+            str(resolved.get("data_folder", "")).strip() != "" or str(resolved.get("figure_folder", "")).strip() != ""
+        )
+    else:
+        context_ok = isinstance(obs, pd.DataFrame) and obs.shape[0] > 0 and (
+            str(meta.get("data_folder", "")).strip() != "" or str(meta.get("figure_folder", "")).strip() != ""
+        )
+    if context_ok:
+        if resolved is None:
+            resolved = prompt_project_viewer_context(meta, obs=obs)
+        if resolved is not None:
+            out = run_context_mode(df, obs, dfxy, resolved=resolved, roi_mailbox=roi_mailbox)
+            if out is not None:
+                return out
+            if viewer_context is not None:
+                print("HTML viewer could not build a project-aware run from the current project. No viewer was written.")
+                return (df, obs, dfxy)
+    print("Project viewer context is not available or no reusable assets were found; using manual asset mode.")
+    print("In manual mode, project-aware grouping, subset menus, and segmentation prompting will be limited.")
+
+    out_root = ""
+    if isinstance(resolved, dict):
+        out_root = str(resolved.get("viewer_root", "")).strip()
+    if out_root == "":
+        out_root = prompt_output_root(find_default_out_root(meta))
+    else:
+        print("Manual mode: using viewer assets/output folder:", out_root)
+    default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
+    project_folder = str(resolved.get("data_folder", "") if isinstance(resolved, dict) else meta.get("data_folder", "")).strip()
+    saved_inputs = load_inherited_viewer_asset_inputs(project_folder)
+    filepaths, input_lines = prompt_filepaths(
+        default_items=default_files,
+        default_label=default_seed,
+        default_input_lines=saved_inputs,
+        return_input_lines=True,
+    )
+    if len(filepaths) == 0:
+        print("No filepaths provided. Returning.")
+        return (df, obs, dfxy)
+    save_viewer_asset_inputs(project_folder, input_lines)
+
+    if should_reuse_default_seed_viewer(filepaths, default_files, default_seed, out_root):
+        seed_viewer = load_json_file(default_seed, default={})
+        if isinstance(seed_viewer, dict) and len(seed_viewer) > 0:
+            print("Manual mode: reusing latest seed viewer directly.")
+            reuse_seed_viewer_run(seed_viewer, default_seed, out_root)
+            _set_cvh_meta(
+                cvh_mode="manual_seed_reuse",
+                cvh_out_root=os.path.abspath(out_root),
+                cvh_seed_viewer=os.path.abspath(default_seed),
+                cvh_selection_view_count=len(list(seed_viewer.get("view_sets", []))) if isinstance(seed_viewer.get("view_sets", []), list) else 0,
+            )
+            print("Done.")
+            return (df, obs, dfxy)
+
+    catalog = build_manual_asset_catalog(filepaths, obs)
+    if catalog is None:
+        return (df, obs, dfxy)
+    _set_cvh_meta(
+        cvh_mode="manual",
+        cvh_out_root=os.path.abspath(out_root),
+        cvh_seed_viewer="",
+        cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
+    )
+    vhf.build(catalog, out_root)
+    print("Done.")
+    return (df, obs, dfxy)
+
+
+def run_manual_asset_creation(out_root, obs, project_folder=""):
+    out_root = str(out_root or "").strip()
+    if out_root == "":
+        out_root = prompt_output_root(DEFAULT_OUT_ROOT)
+    else:
+        print("Manual asset creation: using viewer assets/output folder:", out_root)
+
+    default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
+    saved_inputs = load_inherited_viewer_asset_inputs(project_folder)
+    filepaths, input_lines = prompt_filepaths(
+        default_items=default_files,
+        default_label=default_seed,
+        default_input_lines=saved_inputs,
+        return_input_lines=True,
+    )
+    if len(filepaths) == 0:
+        print("No filepaths provided. Returning without creating viewer assets.")
+        return ""
+    save_viewer_asset_inputs(project_folder, input_lines)
+
+    if should_reuse_default_seed_viewer(filepaths, default_files, default_seed, out_root):
+        seed_viewer = load_json_file(default_seed, default={})
+        if isinstance(seed_viewer, dict) and len(seed_viewer) > 0:
+            print("Manual asset creation: reusing latest seed viewer directly.")
+            reuse_seed_viewer_run(seed_viewer, default_seed, out_root)
+            _set_cvh_meta(
+                cvh_mode="manual_seed_reuse",
+                cvh_out_root=os.path.abspath(out_root),
+                cvh_seed_viewer=os.path.abspath(default_seed),
+                cvh_selection_view_count=len(list(seed_viewer.get("view_sets", []))) if isinstance(seed_viewer.get("view_sets", []), list) else 0,
+            )
+            print("Done.")
+            return os.path.abspath(default_seed)
+
+    catalog = build_manual_asset_catalog(filepaths, obs)
+    if catalog is None:
+        return ""
+    _set_cvh_meta(
+        cvh_mode="manual",
+        cvh_out_root=os.path.abspath(out_root),
+        cvh_seed_viewer="",
+        cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
+    )
+    vhf.build(catalog, out_root)
+    print("Done.")
+    latest = discover_latest_seed_viewer(out_root)
+    return os.path.abspath(latest) if str(latest).strip() != "" else ""
+
+
+def asset_registry_path(out_root):
+    root = str(out_root or "").strip()
+    if root == "":
+        return ""
+    return os.path.join(root, vhf.POOL_DIRNAME, ASSET_REGISTRY_NAME)
+
+
+def load_asset_registry(out_root):
+    reg_path = asset_registry_path(out_root)
+    if reg_path == "" or (not os.path.isfile(reg_path)):
+        return {}
+    reg = load_json_file(reg_path, default={})
+    return reg if isinstance(reg, dict) else {}
+
+
+def build_core_tiles_from_asset_registry(out_root):
+    registry = load_asset_registry(out_root)
+    assets = registry.get("assets", {}) if isinstance(registry, dict) else {}
+    if not isinstance(assets, dict) or len(assets) == 0:
+        return {}
+
+    by_scene = {}
+    for key in assets:
+        item = assets.get(key, {})
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind", "")).strip().lower() != "channel":
+            continue
+        tiff_path = str(item.get("tiff", "")).strip()
+        channel_source = item.get("channel_source")
+        if tiff_path == "" and not isinstance(channel_source, dict):
+            continue
+        slide_scene = normalize_slide_scene(item.get("slide_scene", ""))
+        if slide_scene == "":
+            continue
+        if slide_scene not in by_scene:
+            by_scene[slide_scene] = {"tiffs": [], "channel_sources": []}
+        if isinstance(channel_source, dict):
+            append_unique(by_scene[slide_scene]["channel_sources"], channel_source)
+        elif tiff_path != "":
+            append_unique(by_scene[slide_scene]["tiffs"], tiff_path)
+
+    core_tiles = {}
+    scene_names = sorted(list(by_scene.keys()), key=natural_sort_key)
+    i = 0
+    while i < len(scene_names):
+        slide_scene = str(scene_names[i])
+        scene_payload = by_scene.get(slide_scene, {})
+        tiffs = list(scene_payload.get("tiffs", []))
+        channel_sources = list(scene_payload.get("channel_sources", []))
+        tiffs = sorted(tiffs, key=lambda p: natural_sort_key(marker_label_from_path(p)))
+        channel_sources = sorted(channel_sources, key=lambda p: natural_sort_key(marker_label_from_path(p)))
+        channel_items = list(channel_sources) + list(tiffs)
+        source_paths = list(tiffs)
+        for source in channel_sources:
+            append_unique(source_paths, source_path_text(source))
+        if len(channel_items) > 0:
+            core_tiles[slide_scene] = [{
+                "tile_kind": "composite",
+                "core": slide_scene,
+                "slide_scene": slide_scene,
+                "label": display_label_from_slide_scene(slide_scene) or slide_scene,
+                "display_label": display_label_from_slide_scene(slide_scene) or slide_scene,
+                "asset_type_id": "composite:tiff_stack",
+                "asset_type_label": "Composite (channel-selectable)",
+                "tiff_paths": list(tiffs),
+                "channel_sources": list(channel_sources),
+                "overlay_paths": [],
+                "figure_path": None,
+                "source_paths": list(source_paths),
+                "all_markers": marker_labels_from_paths(channel_items),
+            }]
+        i += 1
+    return core_tiles
+
+
+def build_core_tiles_from_convention_roots(roots, obs):
+    """Build viewer core tiles from convention-resolved source folders."""
+    if not callable(convention_resolve_sam_viewer_assets):
+        return {}
+    scenes = _obs_slide_scene_values(obs)
+    if len(scenes) == 0:
+        return {}
+
+    clean_roots = []
+    for root in list(roots or []):
+        path = normalize_stored_path(root)
+        if path != "" and os.path.isdir(path) and path not in clean_roots:
+            clean_roots.append(path)
+
+    core_tiles = {}
+    root_by_scene = {}
+    for slide_scene in scenes:
+        for root in clean_roots:
+            try:
+                assets = convention_resolve_sam_viewer_assets(root, slide_scene)
+            except Exception:
+                assets = None
+            if assets is None or len(list(getattr(assets, "tiff_paths", []) or [])) == 0:
+                continue
+            tiffs = list(getattr(assets, "tiff_paths", []) or [])
+            segmentation_tif = str(getattr(assets, "segmentation_tif", "") or "").strip()
+            source_paths = list(tiffs)
+            if segmentation_tif != "":
+                append_unique(source_paths, segmentation_tif)
+            display_label = str(getattr(assets, "display_label", "") or "").strip() or display_label_from_slide_scene(slide_scene) or slide_scene
+            core_tiles[slide_scene] = [{
+                "tile_kind": "composite",
+                "core": slide_scene,
+                "slide_scene": slide_scene,
+                "label": display_label,
+                "display_label": display_label,
+                "asset_type_id": "composite:tiff_stack",
+                "asset_type_label": "Composite (channel-selectable)",
+                "tiff_paths": list(tiffs),
+                "channel_sources": [],
+                "overlay_paths": [],
+                "figure_path": None,
+                "source_paths": list(source_paths),
+                "segmentation_tif": segmentation_tif,
+                "all_markers": marker_labels_from_paths(tiffs),
+            }]
+            root_by_scene[slide_scene] = root
+            break
+
+    if len(core_tiles) > 0:
+        missing = [scene for scene in scenes if scene not in core_tiles]
+        print(
+            "Project viewer: convention asset resolver found",
+            len(core_tiles),
+            "of",
+            len(scenes),
+            "current slide_scene value(s).",
+        )
+        roots_used = sorted(list(set(root_by_scene.values())), key=natural_sort_key)
+        if len(roots_used) > 0:
+            print("Convention asset root(s):", "; ".join(roots_used[:3]))
+        if len(missing) > 0:
+            print("Convention assets missing slide_scene value(s):", _scene_list_text(missing))
+    return core_tiles
+
+
+def viewer_convention_root_candidates(meta, out_root, segmentation_roots):
+    roots = []
+    raw = [
+        out_root,
+        meta.get("viewer_root", "") if isinstance(meta, dict) else "",
+        meta.get("data_folder", "") if isinstance(meta, dict) else "",
+        meta.get("build_folder", "") if isinstance(meta, dict) else "",
+    ]
+    for root in list(segmentation_roots or []):
+        raw.append(root)
+    for root in raw:
+        path = normalize_stored_path(root)
+        if path != "" and path not in roots:
+            roots.append(path)
+    return roots
+
+
+def has_reusable_viewer_assets(out_root, obs=None):
+    seed_path = discover_latest_seed_viewer(out_root, obs=obs)
+    if seed_path not in [None, ""] and os.path.isfile(seed_path):
+        return True
+    core_tiles = build_core_tiles_from_asset_registry(out_root)
+    if obs is not None and len(core_tiles) > 0:
+        return seed_viewer_compatible_with_obs({"core_tiles": core_tiles}, obs)
+    return len(core_tiles) > 0
+
+
+def prompt_filepaths(default_items=None, default_label="", default_input_lines=None, return_input_lines=False):
+    saved_inputs = [str(item).strip() for item in list(default_input_lines or []) if str(item).strip() != ""]
+    print("Submit an asset source folder, file, or glob (e.g. C:/path/*.tiff).")
+    print("A Sam/FCS Slides folder is accepted directly.")
+    print("Press Enter on empty line to finish.")
+    if len(saved_inputs) > 0:
+        print("Press Enter immediately to reuse saved asset input(s):", " || ".join(saved_inputs))
+    elif isinstance(default_items, list) and len(default_items) > 0:
+        label = str(default_label or "latest seed viewer").strip()
+        print("Press Enter immediately to reuse defaults from:", label)
+
+    out = []
+    input_lines = []
+    while True:
+        line = input("path: ").strip()
+        if line == "":
+            if len(out) == 0 and len(saved_inputs) > 0:
+                input_lines = list(saved_inputs)
+                i = 0
+                while i < len(saved_inputs):
+                    out.extend(expand_input_line(saved_inputs[i]))
+                    i += 1
+                print("  using saved input(s) ->", len(dedupe_keep_order(out)), "file(s)")
+            elif len(out) == 0 and isinstance(default_items, list) and len(default_items) > 0:
+                print("  using defaults ->", len(default_items), "file(s)")
+                out = [os.path.normpath(str(x)) for x in default_items]
+            break
+        line = strip_quotes(line)
+        if line == "":
+            continue
+
+        exp = expand_input_line(line)
+        if len(exp) == 0:
+            print("  no matches:", line)
+            continue
+
+        input_lines.append(line)
+        print("  expanded ->", len(exp), "file(s)")
+        i = 0
+        while i < len(exp):
+            out.append(exp[i])
+            i += 1
+
+    out = dedupe_keep_order(out)
+    if return_input_lines:
+        return out, input_lines
+    return out
+
+
+def discover_default_manual_filepaths(out_root, obs=None):
+    seed_path = discover_latest_seed_viewer(out_root, obs=obs)
+    if seed_path in [None, ""] or (not os.path.isfile(seed_path)):
+        return [], ""
+    seed_viewer = load_json_file(seed_path, default={})
+    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
+    if not isinstance(core_tiles, dict):
+        return [], ""
+    out = []
+    for core in core_tiles:
+        tiles = list(core_tiles.get(core, []))
+        i = 0
+        while i < len(tiles):
+            src_paths = list(tiles[i].get("source_paths", []))
+            j = 0
+            while j < len(src_paths):
+                fp = os.path.normpath(str(src_paths[j]))
+                if os.path.isfile(fp) and is_supported_asset_file(fp):
+                    out.append(fp)
+                j += 1
+            i += 1
+    return dedupe_keep_order(out), os.path.abspath(seed_path)
+
+
+def seed_viewer_root(seed_path):
+    try:
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(seed_path))))
+    except Exception:
+        return ""
+
+
+def should_reuse_default_seed_viewer(filepaths, default_items, default_seed, out_root):
+    if not isinstance(default_items, list) or len(default_items) == 0:
+        return False
+    if default_seed in [None, ""] or (not os.path.isfile(default_seed)):
+        return False
+    lhs = [os.path.abspath(os.path.normpath(str(x))) for x in list(filepaths or [])]
+    rhs = [os.path.abspath(os.path.normpath(str(x))) for x in list(default_items or [])]
+    if lhs != rhs:
+        return False
+    seed_root = seed_viewer_root(default_seed)
+    if seed_root == "":
+        return False
+    return os.path.abspath(os.path.normpath(out_root)) == os.path.abspath(os.path.normpath(seed_root))
+
+
+def reuse_seed_viewer_run(seed_viewer, seed_path, out_root):
+    run_name_hint = str(seed_viewer.get("dataset_label", "") or seed_viewer.get("viewer_filename_base", "")).strip() if isinstance(seed_viewer, dict) else ""
+    registry, run_dir, registry_path = vhf.prepare_run_context(outdir=out_root, run_name_hint=run_name_hint)
+    viewer_data = json.loads(json.dumps(seed_viewer))
+    viewer_data["generated_at"] = datetime.utcnow().isoformat() + "Z"
+    if str(viewer_data.get("seed_viewer_path", "")).strip() == "":
+        viewer_data["seed_viewer_path"] = os.path.abspath(seed_path)
+    if str(viewer_data.get("seed_viewer_label", "")).strip() == "":
+        viewer_data["seed_viewer_label"] = os.path.basename(os.path.dirname(os.path.abspath(seed_path)))
+    vhf.write_viewer_run(run_dir, registry_path, registry, viewer_data)
+    return viewer_data
+
+
+def prompt_output_root(default_root=None):
+    if default_root is None or str(default_root).strip() == "":
+        default_root = DEFAULT_OUT_ROOT
+    default_root = normalize_stored_path(default_root)
+    while True:
+        s = input("Output root folder [" + str(default_root) + "]: ").strip()
+        if s == "":
+            s = str(default_root)
+        s = strip_quotes(s)
+        s = normalize_stored_path(s)
+        if s == "":
+            print("Path is not usable on this system. Please enter a native path.")
+            continue
+        try:
+            os.makedirs(s, exist_ok=True)
+            return s
+        except Exception as exc:
+            print("Could not create output folder:", exc)
+
+
+def load_json_file(path, default=None):
+    if default is None:
+        default = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def find_default_out_root(meta):
+    roots = []
+    configured = str(meta.get("viewer_root", "")).strip()
+    if configured != "":
+        roots.append(configured)
+    data_folder = str(meta.get("data_folder", "")).strip()
+    if data_folder != "":
+        inherited = load_inherited_project_value(data_folder, "viewer_root")
+        if inherited != "":
+            roots.append(inherited)
+        current = normalize_stored_path(data_folder)
+        while True:
+            roots.append(os.path.join(current, "HTMLs", "visu_html7"))
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    roots.append(DEFAULT_OUT_ROOT)
+    i = 0
+    while i < len(roots):
+        candidate = os.path.normpath(roots[i])
+        if os.path.isdir(candidate):
+            return candidate
+        i += 1
+    return os.path.normpath(str(roots[0]))
+
+
+def prompt_project_viewer_context(meta, obs=None):
+    data_folder = str(meta.get("data_folder", "") or meta.get("build_folder", "")).strip()
+    if data_folder == "":
+        return None
+    data_folder = normalize_stored_path(data_folder)
+    if data_folder == "":
+        return None
+    report_other_os_project_config(data_folder)
+    print("HTML viewer setup.")
+    print("For each saved setting, press Enter or choose Use to keep the current value, or choose change to replace it.")
+
+    figure_current = str(meta.get("figure_folder", "")).strip()
+    if figure_current == "":
+        figure_current = load_inherited_project_value(data_folder, "figure_folder")
+
+    segmentation_current = resolve_segmentation_roots(dict(meta, data_folder=data_folder))
+
+    viewer_current = str(meta.get("viewer_root", "")).strip()
+    if viewer_current == "":
+        viewer_current = load_inherited_project_value(data_folder, "viewer_root")
+
+    figure_folder = prompt_required_project_path(
+        figure_current,
+        "figures folder",
+        create=False,
+        allow_blank=True,
+        must_exist=True,
+        hint=resolve_project_figure_folder(data_folder),
+    )
+    segmentation_roots = prompt_segmentation_roots(
+        dict(meta, data_folder=data_folder),
+        current_roots=segmentation_current,
+    )
+    viewer_root = prompt_required_project_path(
+        viewer_current,
+        "viewer assets/output folder",
+        create=True,
+        hint=find_default_out_root(dict(meta, data_folder=data_folder)),
+    )
+
+    try:
+        save_project_config(
+            data_folder,
+            {
+                "figure_folder": figure_folder,
+                "viewer_root": viewer_root,
+            },
+        )
+        save_project_segmentation_roots(data_folder, segmentation_roots)
+    except Exception as exc:
+        print("Could not save viewer project settings:", exc)
+
+    seed_path = discover_latest_seed_viewer(viewer_root, obs=obs)
+    use_existing_seed_viewer = None
+    if seed_path == "":
+        any_seed = discover_latest_seed_viewer(viewer_root)
+        if any_seed != "":
+            print("No compatible reusable viewer_data.json found under:", viewer_root)
+        else:
+            print("No reusable viewer assets found under:", viewer_root)
+    else:
+        seed_name = os.path.basename(str(seed_path).strip())
+        raw = strip_quotes(
+            cvh_input(
+                "Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ",
+                default="y",
+                prompt_meta={
+                    "options": [
+                        {
+                            "value": "y",
+                            "label": "Use assets",
+                            "description": "Reuse the existing viewer asset map and write a fresh project-aware viewer run.",
+                        },
+                        {
+                            "value": "n",
+                            "label": "Skip assets",
+                            "description": "Try to rebuild from the asset registry instead.",
+                        },
+                    ]
+                },
+            ).strip()
+        ).lower()
+        use_existing_seed_viewer = raw in ["", "y", "yes", "use"]
+
+    # Ask before any asset discovery/building so long viewer work needs no input.
+    per_slide_scene_viewers = prompt_per_slide_scene_viewers(obs)
+
+    updated_meta = dict(meta)
+    updated_meta["data_folder"] = data_folder
+    updated_meta["build_folder"] = str(meta.get("build_folder", "") or data_folder)
+    updated_meta["dataset_stem"] = str(meta.get("dataset_stem", "") or os.path.basename(data_folder))
+    updated_meta["figure_folder"] = figure_folder
+    updated_meta["segmentation_root"] = segmentation_roots[0] if len(segmentation_roots) > 0 else ""
+    updated_meta["segmentation_roots"] = segmentation_roots
+    updated_meta["viewer_root"] = viewer_root
+    _set_cvh_meta(**updated_meta)
+    return {
+        "data_folder": data_folder,
+        "build_folder": updated_meta["build_folder"],
+        "dataset_stem": updated_meta["dataset_stem"],
+        "figure_folder": figure_folder,
+        "segmentation_root": segmentation_roots[0] if len(segmentation_roots) > 0 else "",
+        "segmentation_roots": segmentation_roots,
+        "viewer_root": viewer_root,
+        "seed_viewer_path": seed_path,
+        "use_existing_seed_viewer": use_existing_seed_viewer,
+        "per_slide_scene_viewers": per_slide_scene_viewers,
+    }
+
+
+def seed_viewer_compatible_with_obs(seed_viewer, obs):
+    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
+    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
+        return False
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return True
+    if len(missing_obs_slide_scenes(seed_viewer, obs)) > 0:
+        return False
+    trimmed = trim_seed_viewer_to_obs(seed_viewer, obs)
+    trimmed_tiles = trimmed.get("core_tiles", {}) if isinstance(trimmed, dict) else {}
+    return isinstance(trimmed_tiles, dict) and len(trimmed_tiles) > 0
+
+
+def discover_latest_seed_viewer(out_root, obs=None):
+    runs_dir = os.path.join(out_root, vhf.RUNS_DIRNAME)
+    if not os.path.isdir(runs_dir):
+        return ""
+    names = []
+    try:
+        names = os.listdir(runs_dir)
+    except Exception:
+        names = []
+    dirs = []
+    i = 0
+    while i < len(names):
+        full = os.path.join(runs_dir, names[i])
+        if os.path.isdir(full):
+            dirs.append(full)
+        i += 1
+    dirs = sorted(
+        dirs,
+        key=lambda p: (
+            os.path.getmtime(p) if os.path.exists(p) else 0,
+            os.path.basename(p).lower(),
+        ),
+        reverse=True,
+    )
+    i = len(dirs) - 1
+    i = 0
+    while i < len(dirs):
+        candidate = os.path.join(dirs[i], vhf.VIEWER_DATA_FN)
+        if os.path.isfile(candidate):
+            if obs is not None:
+                seed_viewer = load_json_file(candidate, default={})
+                if not seed_viewer_compatible_with_obs(seed_viewer, obs):
+                    i += 1
+                    continue
+            return candidate
+        i += 1
+    return ""
+
+
+def discover_latest_run_html(out_root):
+    latest_json = discover_latest_seed_viewer(out_root)
+    if latest_json == "" or (not os.path.isfile(latest_json)):
+        return ""
+    run_dir = os.path.dirname(os.path.abspath(latest_json))
+    names = []
+    try:
+        names = os.listdir(run_dir)
+    except Exception:
+        names = []
+    htmls = []
+    i = 0
+    while i < len(names):
+        name = str(names[i])
+        low = name.lower()
+        if low.endswith(".html") and low not in [ROI_RUNTIME_NAME.lower(), THRESH_RUNTIME_NAME.lower()]:
+            htmls.append(name)
+        i += 1
+    htmls = sorted(htmls, key=natural_sort_key)
+    return os.path.join(run_dir, htmls[0]) if len(htmls) > 0 else ""
+
+
+def prompt_seed_viewer_path(default_path=""):
+    prompt = "Seed viewer_data.json"
+    if default_path:
+        prompt += " [" + str(default_path) + "]"
+    prompt += ": "
+    raw = strip_quotes(input(prompt).strip())
+    if raw == "":
+        raw = str(default_path)
+    return os.path.normpath(raw) if raw else ""
+
+
+def strip_quotes(s):
+    s = str(s).strip()
+    if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+        return s[1:-1].strip()
+    return s
+
+
+def expand_input_line(line):
+    s = os.path.normpath(line)
+    out = []
+
+    if has_glob_magic(line):
+        if callable(expand_generic_source_spec):
+            try:
+                matches = expand_generic_source_spec(line, want="files")
+            except Exception:
+                matches = []
+        else:
+            try:
+                matches = [Path(path) for path in glob.glob(line, recursive=True)]
+            except Exception:
+                matches = []
+        for match in matches:
+            p = os.path.normpath(str(match))
+            if os.path.isfile(p) and is_supported_asset_file(p):
+                out.append(p)
+        return dedupe_keep_order(out)
+
+    if os.path.isdir(s):
+        return list_supported_files_one_level(s)
+
+    if os.path.isfile(s) and is_supported_asset_file(s):
+        return [s]
+
+    return []
+
+
+def list_supported_files_one_level(folder):
+    out = []
+    try:
+        names = os.listdir(folder)
+    except Exception:
+        names = []
+
+    i = 0
+    while i < len(names):
+        fp = os.path.normpath(os.path.join(folder, names[i]))
+        if os.path.isfile(fp) and is_supported_asset_file(fp):
+            out.append(fp)
+        i += 1
+    if os.path.basename(os.path.normpath(str(folder))).lower().startswith("registeredimages"):
+        try:
+            child_names = os.listdir(folder)
+        except Exception:
+            child_names = []
+        i = 0
+        while i < len(child_names):
+            child = os.path.normpath(os.path.join(folder, child_names[i]))
+            if os.path.isdir(child):
+                try:
+                    nested = os.listdir(child)
+                except Exception:
+                    nested = []
+                j = 0
+                while j < len(nested):
+                    fp = os.path.normpath(os.path.join(child, nested[j]))
+                    if os.path.isfile(fp) and is_supported_asset_file(fp):
+                        out.append(fp)
+                    j += 1
+            i += 1
+    if callable(convention_list_sam_viewer_asset_paths):
+        try:
+            for fp in convention_list_sam_viewer_asset_paths(folder):
+                if os.path.isfile(fp) and is_supported_asset_file(fp):
+                    out.append(os.path.normpath(fp))
+        except Exception:
+            pass
+    return dedupe_keep_order(out)
+
+
+def is_supported_asset_file(fp):
+    ext = os.path.splitext(fp)[1].lower()
+    return ext in SUPPORTED_EXTS
+
+
+def is_ome_tiff_path(fp):
+    low = str(fp).strip().lower()
+    return low.endswith(".ome.tif") or low.endswith(".ome.tiff")
+
+
+def is_channel_source_spec(value):
+    if image_sources is None:
+        return False
+    source_cls = getattr(image_sources, "ChannelSource", None)
+    return isinstance(value, dict) or (source_cls is not None and isinstance(value, source_cls))
+
+
+def source_path_text(source):
+    if is_channel_source_spec(source):
+        try:
+            return str(image_sources.coerce_channel_source(source).path)
+        except Exception:
+            pass
+    return str(source)
+
+
+def split_tiff_channel_sources(tiffs):
+    single_tiffs = []
+    channel_sources = []
+    for fp in list(tiffs or []):
+        if image_sources is None or not is_ome_tiff_path(fp):
+            append_unique(single_tiffs, fp)
+            continue
+        try:
+            sources = image_sources.iter_channel_sources(fp)
+        except Exception as exc:
+            print("Could not inspect OME TIFF for viewer channels:", fp, exc)
+            append_unique(single_tiffs, fp)
+            continue
+        if len(sources) <= 1:
+            append_unique(single_tiffs, fp)
+            continue
+        for source in sources:
+            append_unique(channel_sources, image_sources.channel_source_to_json(source))
+    return single_tiffs, channel_sources
+
+
+def dedupe_keep_order(arr):
+    seen = set()
+    out = []
+    i = 0
+    while i < len(arr):
+        x = os.path.normpath(arr[i])
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+        i += 1
+    return out
+
+
+def _sanitize_subset_token(text):
+    return spu.sanitize_subset_token(text)
+
+
+def _subset_project_matches(folder, group, values, mode="include"):
+    return spu.subset_definition_matches_config(
+        load_project_config(folder),
+        group,
+        values,
+        mode=mode,
+        sort_key=natural_sort_key,
+    )
+
+
+def _find_matching_subset_child(parent_folder, group, value, mode="include"):
+    base = os.path.abspath(os.path.normpath(str(parent_folder)))
+    if not os.path.isdir(base):
+        return ""
+    try:
+        children = sorted(
+            [os.path.join(base, name) for name in os.listdir(base)],
+            key=natural_sort_key,
+        )
+    except Exception:
+        children = []
+    i = 0
+    while i < len(children):
+        child = os.path.abspath(os.path.normpath(children[i]))
+        if os.path.isdir(child) and _subset_project_matches(child, group, [value], mode=mode):
+            return child
+        i += 1
+    return ""
+
+
+def repeat_value_folder_name(value):
+    return _sanitize_subset_token(value)
+
+
+def _canonical_figure_match_token(text):
+    text = _sanitize_subset_token(text).lower()
+    text = re.sub(r"[^a-z0-9]+", "", text)
+    return text
+
+
+def _is_all_data_view(view):
+    if not isinstance(view, dict):
+        return False
+    return _canonical_figure_match_token(view.get("group", "")) == "alldata"
+
+
+def _project_level_figure_root_prefix(name):
+    text = str(name or "").strip()
+    token = _canonical_figure_match_token(text)
+    if token in PROJECT_LEVEL_FIGURE_FAMILY_TOKENS:
+        return text
+    return ""
+
+
+def candidate_all_data_family_figure_roots(figure_folder):
+    if figure_folder in [None, ""]:
+        return []
+    root = os.path.abspath(os.path.normpath(str(figure_folder)))
+    if not os.path.isdir(root):
+        return []
+    try:
+        names = sorted(os.listdir(root), key=natural_sort_key)
+    except Exception:
+        names = []
+    out = []
+    i = 0
+    while i < len(names):
+        name = str(names[i]).strip()
+        child = os.path.abspath(os.path.normpath(os.path.join(root, name)))
+        root_prefix = _project_level_figure_root_prefix(name)
+        if name != "" and os.path.isdir(child) and root_prefix != "":
+            out.append(
+                {
+                    "path": child,
+                    "label": "current figures " + tail_path_label(child, depth=2),
+                    "rank": 10,
+                    "root_prefix": root_prefix,
+                }
+            )
+        i += 1
+    return out
+
+
+def candidate_descendant_figure_roots(figure_folder, selection_stack, max_depth=6, cache=None):
+    if figure_folder in [None, ""] or len(selection_stack) == 0:
+        return []
+    root = os.path.abspath(os.path.normpath(str(figure_folder)))
+    if not os.path.isdir(root):
+        return []
+    target_tokens = set()
+    i = 0
+    while i < len(selection_stack):
+        target = _canonical_figure_match_token(selection_stack[i].get("value", ""))
+        if target != "":
+            target_tokens.add(target)
+        i += 1
+    if len(target_tokens) == 0:
+        return []
+
+    cache_key = (root, int(max_depth))
+    descendants = None
+    if isinstance(cache, dict):
+        descendants = cache.get(cache_key)
+    if descendants is None:
+        descendants = []
+        for dirpath, dirnames, _filenames in os.walk(root):
+            rel = os.path.relpath(dirpath, root)
+            depth = 0 if rel in [".", ""] else len([p for p in rel.split(os.sep) if p not in ["", "."]])
+            if depth > int(max_depth):
+                dirnames[:] = []
+                continue
+            if depth > 0:
+                base = os.path.basename(dirpath)
+                token = _canonical_figure_match_token(base)
+                descendants.append((token, os.path.abspath(os.path.normpath(dirpath)), depth))
+            if depth >= int(max_depth):
+                dirnames[:] = []
+        if isinstance(cache, dict):
+            cache[cache_key] = descendants
+
+    out = []
+    seen = set()
+    for token, abs_path, depth in descendants:
+        if token in target_tokens and abs_path not in seen:
+            seen.add(abs_path)
+            out.append(
+                {
+                    "path": abs_path,
+                    "label": "figures " + tail_path_label(abs_path, depth=4),
+                    "rank": 20 + depth,
+                }
+            )
+    return out
+
+
+def load_project_config(folder):
+    config = {}
+    if os.name != "nt":
+        # Keep OS-neutral subset/project metadata visible on Linux even when it
+        # was written by older Windows-oriented tools. POSIX path keys override.
+        config.update(load_project_config_values(folder, filename=PROJECT_CONFIG_FILE))
+    config.update(load_project_config_values(folder, filename=project_config_filename()))
+    return config
+
+
+def load_inherited_project_value(folder, key):
+    current = normalize_stored_path(folder)
+    value = ""
+    while current != "":
+        config = load_project_config(current)
+        value = str(config.get(str(key), "")).strip()
+        if value != "":
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    if str(key).strip().lower() in [
+        "figure_folder",
+        "viewer_root",
+        "segmentation_root",
+        "roi_mailbox_dir",
+        "data_folder",
+        "build_folder",
+    ]:
+        return normalize_stored_path(value) if str(value).strip() != "" else ""
+    return value
+
+
+def load_inherited_viewer_asset_inputs(folder):
+    return _parse_saved_path_list(load_inherited_project_value(folder, "viewer_asset_inputs"))
+
+
+def save_viewer_asset_inputs(folder, input_lines):
+    folder = normalize_stored_path(folder)
+    values = [str(item).strip() for item in list(input_lines or []) if str(item).strip() != ""]
+    if folder == "" or len(values) == 0:
+        return
+    try:
+        save_project_config(folder, {"viewer_asset_inputs": "||".join(values)})
+    except Exception as exc:
+        print("Could not save viewer asset input(s):", exc)
+
+
+def _parse_saved_path_list(text):
+    raw = str(text or "").strip()
+    if raw == "":
+        return []
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip() != ""]
+        except Exception:
+            pass
+    if "||" in raw:
+        return [part.strip() for part in raw.split("||") if part.strip() != ""]
+    lines = [part.strip() for part in raw.splitlines() if part.strip() != ""]
+    if len(lines) > 1:
+        return lines
+    return [raw]
+
+
+def _normalize_path_list(values, *, keep_missing=False):
+    if isinstance(values, str):
+        items = [values]
+    else:
+        items = list(values or [])
+    out = []
+    seen = set()
+    i = 0
+    while i < len(items):
+        raw = str(items[i]).strip()
+        if raw == "":
+            i += 1
+            continue
+        candidate = normalize_stored_path(raw)
+        if candidate == "":
+            i += 1
+            continue
+        if (keep_missing or os.path.isdir(candidate) or os.path.isfile(candidate)) and candidate not in seen:
+            seen.add(candidate)
+            out.append(candidate)
+        i += 1
+    return out
+
+
+def _expand_viewer_segmentation_glob(raw):
+    """Resolve a viewer glob to existing segmentation roots.
+
+    The viewer maps each slide_scene against roots, not against a global list
+    of mask files.  Globbed files therefore contribute their parent folders.
+    Literal files keep the legacy single-scene behavior in the prompt below.
+    """
+    if not callable(expand_generic_source_spec):
+        return []
+    try:
+        matches = expand_generic_source_spec(raw, want="either")
+    except Exception:
+        return []
+    roots = []
+    for match in matches:
+        candidate = match if match.is_dir() else match.parent
+        path = normalize_stored_path(candidate)
+        if path != "" and os.path.isdir(path) and path not in roots:
+            roots.append(path)
+    return roots
+
+
+def load_inherited_project_segmentation_roots(folder):
+    current = normalize_stored_path(folder)
+    if current == "":
+        return []
+    while True:
+        config = load_project_config(current)
+        multi = _normalize_path_list(_parse_saved_path_list(config.get("segmentation_roots_json", "")))
+        if len(multi) > 0:
+            return multi
+        single = str(config.get("segmentation_root", "")).strip()
+        if single != "":
+            return _normalize_path_list([single])
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return []
+
+
+def save_project_config(folder, updates):
+    save_project_config_updates(
+        folder,
+        updates,
+        filename=project_config_filename(),
+        sort_key=natural_sort_key,
+    )
+
+
+def cvh_input(prompt, default=None, prompt_meta=None):
+    if das_io is not None:
+        return str(das_io.iget(prompt, default=default, prompt_meta=prompt_meta))
+    raw = input(prompt)
+    if raw == "" and default is not None:
+        return str(default)
+    return str(raw)
+
+
+def cvh_check_change(current_value, label, *, hint="", allow_blank=False):
+    current_value = str(current_value or "").strip()
+    shown = current_value if current_value != "" else "[unset]"
+    prompt_lines = [
+        str(label) + ":",
+        shown,
+        "Press Enter or choose Use to keep the current value. Choose change to enter a replacement.",
+    ]
+    hint = str(hint or "").strip()
+    if hint != "":
+        prompt_lines.append("Hint if changing: " + hint)
+    if allow_blank:
+        prompt_lines.append("To clear this value, choose change and submit a blank entry.")
+    choice = strip_quotes(
+        cvh_input(
+            "\n".join(prompt_lines),
+            prompt_meta={
+                "options": [
+                    {
+                        "value": "use",
+                        "label": "Use current value",
+                        "description": "Keep the value shown above.",
+                    },
+                    {
+                        "value": "change",
+                        "label": "Change value",
+                        "description": "Enter a replacement path.",
+                    },
+                ]
+            },
+        ).strip()
+    )
+    low = choice.lower()
+    if low in ["", "use", "n", "no"]:
+        return current_value
+    if low in ["change", "y", "yes"]:
+        replacement_prompt = "new " + str(label)
+        extras = []
+        if hint != "":
+            extras.append("hint: " + hint)
+        if allow_blank:
+            extras.append("blank clears")
+        if len(extras) > 0:
+            replacement_prompt += " [" + "; ".join(extras) + "]"
+        replacement_prompt += ": "
+        return strip_quotes(cvh_input(replacement_prompt).strip())
+    return strip_quotes(choice)
+
+
+def save_project_segmentation_roots(folder, roots):
+    clean = _normalize_path_list(list(roots or []), keep_missing=True)
+    updates = {
+        "segmentation_root": clean[0] if len(clean) > 0 else "",
+        "segmentation_roots_json": json.dumps(clean) if len(clean) > 0 else "",
+    }
+    save_project_config(folder, updates)
+
+
+def prompt_required_project_path(current_value, label, *, create=False, allow_blank=False, must_exist=False, hint=""):
+    current_value = str(current_value or "").strip()
+    hint = str(hint or "").strip()
+    while True:
+        if current_value != "":
+            selected = cvh_check_change(current_value, label, hint=hint, allow_blank=allow_blank).strip()
+        else:
+            prompt = label
+            extras = []
+            if hint != "":
+                extras.append("hint: " + hint)
+            if allow_blank:
+                extras.append("blank = skip")
+            if len(extras) > 0:
+                prompt += " [" + "; ".join(extras) + "]"
+            prompt += ": "
+            selected = strip_quotes(cvh_input(prompt).strip())
+        if selected == "":
+            if allow_blank:
+                return ""
+            print(label, "is required.")
+            current_value = ""
+            continue
+        selected = normalize_stored_path(selected)
+        if selected == "":
+            print("Path is not usable on this system. Please enter a native path.")
+            current_value = ""
+            continue
+        if create:
+            try:
+                os.makedirs(selected, exist_ok=True)
+            except Exception as exc:
+                print("Could not create folder:", exc)
+                current_value = selected
+                continue
+            return selected
+        if must_exist and (not os.path.isdir(selected)) and (not os.path.isfile(selected)):
+            print("Path not found:", selected)
+            current_value = selected
+            continue
+        return selected
+
+
+def resolve_project_figure_folder(project_folder):
+    configured = load_inherited_project_value(project_folder, "figure_folder")
+    if configured != "":
+        return normalize_stored_path(configured)
+    return normalize_stored_path(os.path.join(str(project_folder), "temp"))
+
+
+def ancestor_paths(path):
+    if path in [None, ""]:
+        return []
+    current = os.path.abspath(os.path.normpath(str(path)))
+    out = []
+    seen = set()
+    while current not in seen:
+        seen.add(current)
+        out.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return out
+
+
+def tail_path_label(path, depth=3):
+    parts = [p for p in os.path.normpath(str(path)).split(os.sep) if p not in ["", "."]]
+    if len(parts) == 0:
+        return str(path)
+    return "/".join(parts[-depth:])
+
+
+def make_selection_stack(view, subset_option=None):
+    stack = []
+    group = str(view.get("group", "")).strip()
+    value = str(view.get("value", "")).strip()
+    if group.lower() != "all" and value != "":
+        stack.append({"group": group, "value": value})
+    if isinstance(subset_option, dict):
+        subset_group = str(subset_option.get("column", "")).strip()
+        subset_value = str(subset_option.get("value", "")).strip()
+        if subset_group != "" and subset_value != "":
+            stack.append({"group": subset_group, "value": subset_value})
+    return stack
+
+
+def candidate_repeat_figure_roots(figure_folder, selection_stack):
+    if figure_folder in [None, ""]:
+        return []
+    if len(selection_stack) == 0:
+        return [
+            {
+                "path": os.path.abspath(os.path.normpath(str(figure_folder))),
+                "label": "current figures",
+                "rank": 0,
+            }
+        ]
+    values = []
+    i = 0
+    while i < len(selection_stack):
+        values.append(repeat_value_folder_name(selection_stack[i]["value"]))
+        i += 1
+    candidates = []
+    seen = set()
+    bases = ancestor_paths(figure_folder)
+    i = 0
+    while i < len(bases):
+        candidate = bases[i]
+        j = 0
+        while j < len(values):
+            candidate = os.path.join(candidate, values[j])
+            j += 1
+        add_root_candidate(candidates, seen, candidate, "figures " + tail_path_label(candidate), i)
+        i += 1
+    return candidates
+
+
+def candidate_selection_project_folders(data_folder, selection_stack):
+    if data_folder in [None, ""]:
+        return []
+    if len(selection_stack) == 0:
+        current = os.path.abspath(os.path.normpath(str(data_folder)))
+        return [current] if os.path.isdir(current) else []
+    out = []
+    seen = set()
+    bases = ancestor_paths(data_folder)
+    i = 0
+    while i < len(bases):
+        current = os.path.abspath(os.path.normpath(str(bases[i])))
+        j = 0
+        if _subset_project_matches(
+            current,
+            selection_stack[0]["group"],
+            [selection_stack[0]["value"]],
+            mode="include",
+        ):
+            j = 1
+        while j < len(selection_stack):
+            current = _find_matching_subset_child(
+                current,
+                selection_stack[j]["group"],
+                selection_stack[j]["value"],
+                mode="include",
+            )
+            if current == "":
+                break
+            j += 1
+        if j == len(selection_stack) and current != "" and current not in seen and os.path.isdir(current):
+            seen.add(current)
+            out.append(current)
+        i += 1
+    return out
+
+
+def build_templates(filepaths):
+    out = []
+    i = 0
+    while i < len(filepaths):
+        t = make_template(filepaths[i])
+        out.append(t)
+        i += 1
+    return out
+
+
+def build_direct_viewer_buckets(templates):
+    by_core = {}
+    for t in list(templates or []):
+        slide_scene = normalize_slide_scene(t.get("slide_scene", ""))
+        if slide_scene == "":
+            continue
+        if slide_scene not in by_core:
+            by_core[slide_scene] = empty_bucket()
+            record = t.get("viewer_record", {})
+            if isinstance(record, dict):
+                by_core[slide_scene]["slide_scene"] = slide_scene
+                by_core[slide_scene]["display_label"] = str(record.get("display_label", "") or display_label_from_slide_scene(slide_scene))
+                by_core[slide_scene]["viewer_convention"] = str(record.get("convention", ""))
+        kind = str(t.get("kind", "other"))
+        if kind == "segmentation_tiff":
+            by_core[slide_scene]["segmentation_tif"] = str(t.get("sample_path", ""))
+        else:
+            add_path_to_bucket_by_kind(by_core[slide_scene], str(t.get("sample_path", "")), kind)
+    return by_core
+
+
+def _scene_list_text(values, limit=6):
+    values = list(values or [])
+    text = ", ".join([str(value) for value in values[:limit]])
+    if len(values) > limit:
+        text += ", ..."
+    return text
+
+
+def build_manual_asset_catalog(filepaths, obs):
+    """Build a catalog from asset paths with explicit slide_scene identities."""
+    templates = build_templates(filepaths)
+    by_scene = build_direct_viewer_buckets(templates)
+    unresolved = [
+        str(template.get("sample_path", ""))
+        for template in templates
+        if normalize_slide_scene(template.get("slide_scene", "")) == ""
+    ]
+    print(
+        "Viewer asset discovery:",
+        len(templates),
+        "file(s) ->",
+        len(by_scene),
+        "parsed slide_scene value(s).",
+    )
+    if len(unresolved) > 0:
+        print(
+            "Skipped",
+            len(unresolved),
+            "file(s) without a slide_scene identity:",
+            _scene_list_text([os.path.basename(path) for path in unresolved]),
+        )
+    if len(by_scene) == 0:
+        print("No supplied viewer assets could be mapped to slide_scene. Nothing was written.")
+        return None
+
+    active_scenes = _obs_slide_scene_values(obs)
+    selected = by_scene
+    if len(active_scenes) > 0:
+        active_set = set(active_scenes)
+        selected = {scene: bucket for scene, bucket in by_scene.items() if scene in active_set}
+        skipped_scenes = sorted([scene for scene in by_scene if scene not in active_set], key=natural_sort_key)
+        missing_scenes = sorted([scene for scene in active_scenes if scene not in by_scene], key=natural_sort_key)
+        print(
+            "Viewer asset match:",
+            len(selected),
+            "of",
+            len(active_scenes),
+            "current slide_scene value(s) have supplied assets.",
+        )
+        if len(skipped_scenes) > 0:
+            print(
+                "Skipped asset slide_scene value(s) not in current obs:",
+                len(skipped_scenes),
+                "::",
+                _scene_list_text(skipped_scenes),
+            )
+        if len(missing_scenes) > 0:
+            print(
+                "Current slide_scene value(s) without supplied assets:",
+                len(missing_scenes),
+                "::",
+                _scene_list_text(missing_scenes),
+            )
+        if len(selected) == 0:
+            print("No supplied viewer assets match the current obs slide_scene values. Nothing was written.")
+            return None
+
+    manifest = build_identity_manifest_from_direct_buckets(selected)
+    return build_catalog_from_identity_manifest(manifest, obs)
+
+
+def make_template(fp):
+    ap = os.path.abspath(os.path.normpath(fp))
+    kind = classify_path_kind(ap)
+    viewer_record = None
+    if callable(parse_viewer_asset_record):
+        try:
+            viewer_record = parse_viewer_asset_record(ap)
+        except Exception:
+            viewer_record = None
+
+    out = {
+        "sample_path": ap,
+        "kind": kind,
+        "scene": None,
+        "mode": "none"
+    }
+    if viewer_record is not None:
+        out["viewer_record"] = {
+            "convention": str(viewer_record.convention),
+            "slide_scene": str(viewer_record.slide_scene),
+            "display_label": str(viewer_record.display_label),
+            "marker": str(viewer_record.marker),
+        }
+        out["viewer_convention"] = str(viewer_record.convention)
+        out["slide_scene"] = str(viewer_record.slide_scene)
+        return out
+    return out
+
+
+def classify_path_kind(fp):
+    ext = os.path.splitext(fp)[1].lower()
+    if ext in [".tif", ".tiff"]:
+        bn = os.path.basename(fp).lower()
+        if bn.startswith("label_") or bn.startswith("tiff_") or "cellsegmentationbasins" in bn:
+            return "segmentation_tiff"
+        return "tiff"
+    if ext == ".png":
+        if png_has_alpha(fp):
+            return "transparent_png"
+        return "opaque_png"
+    return "other"
+
+
+def png_has_alpha(fp):
+    try:
+        with Image.open(fp) as im:
+            if "A" in im.getbands():
+                return True
+            if im.mode == "P" and "transparency" in im.info:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def marker_label_from_path(fp):
+    if is_channel_source_spec(fp):
+        try:
+            source = image_sources.coerce_channel_source(fp)
+            for label in (source.marker, source.channel_name):
+                text = str(label).strip()
+                if text != "":
+                    return text
+        except Exception:
+            pass
+    if callable(convention_marker_label_from_path):
+        try:
+            marker = str(convention_marker_label_from_path(fp)).strip()
+            if marker != "":
+                return marker
+        except Exception:
+            pass
+    name = os.path.splitext(os.path.basename(source_path_text(fp)))[0]
+    # Strip ROI token at end if present (e.g. _ROI06)
+    name = re.sub(r"(?i)_?ROI0*\d{1,3}$", "", name)
+    # Strip _c0 / _ch0 channel suffixes
+    name = re.sub(r"(?i)_c\d+$", "", name)
+    name = re.sub(r"(?i)_ch\d+$", "", name)
+    # For CxxRx_MARKER format (e.g. ..._C01R1_B220), extract just the marker
+    parts = name.split("_")
+    if len(parts) >= 2 and re.match(r"(?i)^C\d+R\d+$", parts[-2]):
+        name = parts[-1]
+    # Clean numeric suffixes like CD11C-001 → CD11C
+    name = re.sub(r"-0+\d*$", "", name)
+    name = name.strip()
+    if name == "":
+        name = "channel"
+    return name
+
+
+def empty_bucket():
+    return {
+        "tiffs": [],
+        "channel_sources": [],
+        "transparent_pngs": [],
+        "opaque_pngs": [],
+        "other_files": []
+    }
+
+
+def append_unique(lst, value):
+    if value not in lst:
+        lst.append(value)
+
+
+def add_path_to_bucket_by_kind(bucket, fp, kind):
+    if kind == "tiff":
+        append_unique(bucket["tiffs"], fp)
+    elif kind == "transparent_png":
+        append_unique(bucket["transparent_pngs"], fp)
+    elif kind == "opaque_png":
+        append_unique(bucket["opaque_pngs"], fp)
+    else:
+        append_unique(bucket["other_files"], fp)
+
+
+def natural_sort_key(text):
+    s = str(text)
+    convert = lambda c: int(c) if c.isdigit() else c.lower()
+    return [convert(c) for c in re.split(r"([0-9]+)", s)]
+
+
+def normalize_slide_scene(value):
+    text = str(value or "").strip()
+    if text.lower() in MISSING_LABELS:
+        return ""
+    return text
+
+
+def display_label_from_slide_scene(slide_scene):
+    text = normalize_slide_scene(slide_scene)
+    if text == "":
+        return ""
+    if callable(convention_viewer_display_label):
+        try:
+            label = str(convention_viewer_display_label(text)).strip()
+            if label != "":
+                return label
+        except Exception:
+            pass
+    m = re.match(r"(?i)^(.+?)[_-]?ROI0*(\d{1,3})$", text)
+    if m is not None:
+        return str(m.group(1)).strip("_- ") + " ROI" + str(int(m.group(2)))
+    m = re.match(r"(?i)^(.+?)[_-]?scene[_-]?([A-Za-z])0*(\d{1,3})$", text)
+    if m is not None:
+        return str(m.group(1)).strip("_- ") + " " + m.group(2).upper() + str(int(m.group(3)))
+    return text.replace("_", " ")
+
+
+def _bucket_paths(bucket):
+    paths = []
+    if not isinstance(bucket, dict):
+        return paths
+    for key in ["tiffs", "transparent_pngs", "opaque_pngs", "other_files", "overlay_paths", "source_paths"]:
+        for fp in list(bucket.get(key, []) or []):
+            append_unique(paths, str(fp))
+    for source in list(bucket.get("channel_sources", []) or []):
+        if is_channel_source_spec(source):
+            append_unique(paths, source_path_text(source))
+    return paths
+
+
+def _first_segmentation_tif(paths):
+    candidates = []
+    for fp in list(paths or []):
+        low = str(fp).lower()
+        if not low.endswith((".tif", ".tiff")):
+            continue
+        name = os.path.basename(low)
+        if name.startswith("label_") or "cellsegmentation" in name or "segmentation" in name:
+            candidates.append(str(fp))
+    return candidates[0] if len(candidates) > 0 else ""
+
+
+def _obs_slide_scene_values(obs):
+    if not isinstance(obs, pd.DataFrame) or "slide_scene" not in obs.columns:
+        return []
+    vals = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()
+    vals = [normalize_slide_scene(v) for v in vals]
+    return sorted(list(set([v for v in vals if v != ""])), key=natural_sort_key)
+
+
+def build_identity_manifest_from_direct_buckets(by_scene):
+    manifest = {}
+    if not isinstance(by_scene, dict):
+        return manifest
+    for key in by_scene:
+        slide_scene = normalize_slide_scene(key)
+        if slide_scene == "":
+            raise ValueError("Viewer asset bucket has no slide_scene identity: " + str(key))
+        if slide_scene in manifest:
+            raise ValueError("Duplicate viewer asset bucket for slide_scene: " + slide_scene)
+        bucket = dict(by_scene.get(key, {}) or {})
+        bucket["slide_scene"] = slide_scene
+        if str(bucket.get("display_label", "")).strip() == "":
+            bucket["display_label"] = display_label_from_slide_scene(slide_scene)
+        if str(bucket.get("segmentation_tif", "")).strip() == "":
+            bucket["segmentation_tif"] = _first_segmentation_tif(_bucket_paths(bucket))
+        manifest[slide_scene] = bucket
+    validate_slide_scene_manifest(manifest)
+    return manifest
+
+
+def build_identity_manifest_from_seed_viewer(seed_viewer):
+    manifest = {}
+    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
+    if not isinstance(core_tiles, dict):
+        return manifest
+    for core in core_tiles:
+        slide_scene = ""
+        tiffs = []
+        channel_sources = []
+        overlays = []
+        figs = []
+        sources = []
+        tiles = list(core_tiles.get(core, []) or [])
+        for tile in tiles:
+            if not isinstance(tile, dict):
+                continue
+            if slide_scene == "":
+                slide_scene = normalize_slide_scene(tile.get("slide_scene", "")) or normalize_slide_scene(core)
+            for fp in list(tile.get("tiff_paths", []) or []):
+                append_unique(tiffs, str(fp))
+                append_unique(sources, str(fp))
+            for source in list(tile.get("channel_sources", []) or []):
+                if is_channel_source_spec(source):
+                    append_unique(channel_sources, source)
+                    append_unique(sources, source_path_text(source))
+            for fp in list(tile.get("overlay_paths", []) or []):
+                append_unique(overlays, str(fp))
+                append_unique(sources, str(fp))
+            for fp in list(tile.get("source_paths", []) or []):
+                append_unique(sources, str(fp))
+            fig = str(tile.get("figure_path", "") or "").strip()
+            if fig != "":
+                append_unique(figs, fig)
+                append_unique(sources, fig)
+        if slide_scene == "":
+            for fp in sources:
+                slide_scene = extract_slide_scene_from_path(fp)
+                if slide_scene != "":
+                    break
+        if slide_scene == "":
+            continue
+        if slide_scene in manifest:
+            raise ValueError("Duplicate seed viewer tile set for slide_scene: " + slide_scene)
+        manifest[slide_scene] = {
+            "slide_scene": slide_scene,
+            "display_label": display_label_from_slide_scene(slide_scene),
+            "tiffs": tiffs,
+            "channel_sources": channel_sources,
+            "transparent_pngs": overlays,
+            "opaque_pngs": figs,
+            "other_files": [],
+            "source_paths": sources,
+            "segmentation_tif": _first_segmentation_tif(sources + overlays),
+        }
+    validate_slide_scene_manifest(manifest)
+    return manifest
+
+
+def validate_slide_scene_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise ValueError("slide_scene manifest is not a dict")
+    seen = set()
+    for slide_scene in manifest:
+        key = normalize_slide_scene(slide_scene)
+        if key == "":
+            raise ValueError("slide_scene manifest contains a blank key")
+        if key in seen:
+            raise ValueError("slide_scene manifest contains duplicate key: " + key)
+        seen.add(key)
+        rec = manifest.get(slide_scene, {})
+        if isinstance(rec, dict):
+            rec["slide_scene"] = key
+    return True
+
+
+def build_segmentation_map_from_manifest(manifest):
+    out = {}
+    if not isinstance(manifest, dict):
+        return out
+    for slide_scene in manifest:
+        rec = manifest.get(slide_scene, {})
+        seg = str(rec.get("segmentation_tif", "") if isinstance(rec, dict) else "").strip()
+        if seg != "" and os.path.isfile(seg):
+            out[normalize_slide_scene(slide_scene)] = seg
+    return out
+
+
+def build_segmentation_map_from_seed_viewer(seed_viewer, meta=None):
+    manifest = build_identity_manifest_from_seed_viewer(seed_viewer)
+    out = build_segmentation_map_from_manifest(manifest)
+    roots = resolve_segmentation_roots(meta if isinstance(meta, dict) else {})
+    if len(roots) > 0:
+        for slide_scene in manifest:
+            key = normalize_slide_scene(slide_scene)
+            if key == "" or key in out:
+                continue
+            seg = _find_seg_file_multi(roots, key)
+            if seg is not None:
+                out[key] = seg
+    return out
+
+
+def viewer_slide_scene_values(seed_viewer):
+    manifest = build_identity_manifest_from_seed_viewer(seed_viewer)
+    vals = [normalize_slide_scene(v) for v in manifest.keys()]
+    return sorted(list(set([v for v in vals if v != ""])), key=natural_sort_key)
+
+
+def infer_figure_type(fp):
+    low = os.path.normpath(fp).lower().replace("\\", "/")
+    bn = os.path.basename(low)
+
+    if "scatter" in low:
+        return "scatterplot", "Scatterplot"
+    if "heatmap" in low or ("heat" in low and ".png" in low):
+        return "heatmap", "Heatmap"
+    if "spatial" in low:
+        return "spatial", "Spatial"
+    if "prediction" in low or "predictions" in low:
+        return "predictions", "Predictions"
+    if "celltype" in low:
+        return "celltype", "Celltype"
+    if "barplot" in low:
+        return "barplot", "Barplot"
+
+    stem = os.path.splitext(bn)[0]
+    tok = re.split(r"[^a-z0-9]+", stem)
+    tok = [t for t in tok if t != ""]
+    if len(tok) > 0:
+        return tok[0], tok[0]
+    ext = os.path.splitext(bn)[1].lower().replace(".", "")
+    if ext == "":
+        ext = "file"
+    return ext, ext.upper()
+
+
+def build_family_label(parts):
+    if len(parts) == 0:
+        return "Figures"
+    out = []
+    i = 0
+    while i < len(parts) and i < 2:
+        out.append(str(parts[i]))
+        i += 1
+    return " / ".join(out)
+
+
+def scan_figure_root(root):
+    out = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        i = 0
+        while i < len(filenames):
+            name = filenames[i]
+            fp = os.path.join(dirpath, name)
+            ext = os.path.splitext(name)[1].lower()
+            if ext in SUPPORTED_FIGURE_EXTS:
+                rel_path = os.path.relpath(fp, root).replace("\\", "/")
+                rel_parts = rel_path.split("/")
+                family_parts = rel_parts[:-1]
+                family_label = build_family_label(family_parts)
+                asset_type_id = "figure:" + vhf.safe_tag("/".join(family_parts[:2]) if len(family_parts) > 0 else "figures", 80)
+                size = -1
+                try:
+                    size = int(os.path.getsize(fp))
+                except Exception:
+                    pass
+                out.append(
+                    {
+                        "abs_path": os.path.abspath(fp),
+                        "rel_path": rel_path,
+                        "basename": os.path.basename(fp),
+                        "filename": os.path.splitext(os.path.basename(fp))[0],
+                        "family_parts": family_parts,
+                        "family_label": family_label,
+                        "asset_type_id": asset_type_id,
+                        "asset_type_label": "Figure " + family_label,
+                        "size": size,
+                    }
+                )
+            i += 1
+    out = sorted(out, key=lambda item: natural_sort_key(item["rel_path"]))
+    return out
+
+
+def add_root_candidate(candidates, seen, path, label, rank, root_prefix=""):
+    if path in [None, ""]:
+        return
+    abs_path = os.path.abspath(os.path.normpath(path))
+    if (not os.path.isdir(abs_path)) or abs_path in seen:
+        return
+    seen.add(abs_path)
+    candidates.append(
+        {
+            "path": abs_path,
+            "label": str(label),
+            "rank": int(rank),
+            "root_prefix": str(root_prefix or "").strip(),
+        }
+    )
+
+
+def resolve_view_figure_roots(group, value, meta):
+    return resolve_selection_figure_roots({"group": group, "value": value}, meta)
+
+
+def resolve_selection_figure_roots(view, meta, subset_option=None, descendant_cache=None):
+    candidates = []
+    seen = set()
+    figure_folder = str(meta.get("figure_folder", "")).strip()
+    data_folder = str(meta.get("data_folder", "")).strip()
+    selection_stack = make_selection_stack(view, subset_option)
+    if figure_folder != "":
+        figure_roots = candidate_repeat_figure_roots(figure_folder, selection_stack)
+        i = 0
+        while i < len(figure_roots):
+            root_info = figure_roots[i]
+            add_root_candidate(candidates, seen, root_info["path"], root_info["label"], root_info["rank"])
+            i += 1
+        if _is_all_data_view(view):
+            family_roots = candidate_all_data_family_figure_roots(figure_folder)
+            i = 0
+            while i < len(family_roots):
+                root_info = family_roots[i]
+                add_root_candidate(
+                    candidates,
+                    seen,
+                    root_info["path"],
+                    root_info["label"],
+                    root_info["rank"],
+                    root_prefix=root_info.get("root_prefix", ""),
+                )
+                i += 1
+        descendant_roots = candidate_descendant_figure_roots(
+            figure_folder,
+            selection_stack,
+            cache=descendant_cache,
+        )
+        i = 0
+        while i < len(descendant_roots):
+            root_info = descendant_roots[i]
+            add_root_candidate(candidates, seen, root_info["path"], root_info["label"], root_info["rank"])
+            i += 1
+    if data_folder != "":
+        project_folders = candidate_selection_project_folders(data_folder, selection_stack)
+        i = 0
+        while i < len(project_folders):
+            add_root_candidate(
+                candidates,
+                seen,
+                resolve_project_figure_folder(project_folders[i]),
+                "project " + tail_path_label(project_folders[i]),
+                100 + i,
+            )
+            i += 1
+    return candidates
+
+
+def dedupe_discovered_figures(entries):
+    kept = []
+    by_key = {}
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        logical_key = entry["rel_path"].lower()
+        existing = by_key.get(logical_key)
+        if existing is None:
+            by_key[logical_key] = [entry]
+            kept.append(entry)
+        else:
+            existing.append(entry)
+        i += 1
+
+    out = []
+    i = 0
+    while i < len(kept):
+        entry = kept[i]
+        group = by_key.get(entry["rel_path"].lower(), [entry])
+        if len(group) == 1:
+            out.append(entry)
+            i += 1
+            continue
+        same_size = True
+        size0 = group[0].get("size", -1)
+        j = 1
+        while j < len(group):
+            if group[j].get("size", -1) != size0:
+                same_size = False
+                break
+            j += 1
+        if same_size:
+            chosen = sorted(group, key=lambda item: (item["rank"], natural_sort_key(item["source_root_label"])))[0]
+            out.append(chosen)
+        else:
+            j = 0
+            while j < len(group):
+                tagged = dict(group[j])
+                tagged["label"] = tagged["filename"] + " [" + tagged["source_root_label"] + "]"
+                out.append(tagged)
+                j += 1
+        i += 1
+    out = sorted(out, key=lambda item: (natural_sort_key(item["asset_type_label"]), natural_sort_key(item["label"])))
+    return out
+
+
+def discover_view_figure_specs(view, meta, scan_cache, subset_option=None, descendant_cache=None):
+    roots = resolve_selection_figure_roots(
+        view,
+        meta,
+        subset_option=subset_option,
+        descendant_cache=descendant_cache,
+    )
+    found = []
+    i = 0
+    while i < len(roots):
+        root_info = roots[i]
+        root_path = root_info["path"]
+        if root_path not in scan_cache:
+            scan_cache[root_path] = scan_figure_root(root_path)
+        scanned = scan_cache[root_path]
+        j = 0
+        while j < len(scanned):
+            item = dict(scanned[j])
+            root_prefix = str(root_info.get("root_prefix", "")).strip()
+            if root_prefix != "":
+                family_parts = [root_prefix] + list(item.get("family_parts") or [])
+                item["rel_path"] = root_prefix.replace("\\", "/").strip("/") + "/" + str(item["rel_path"]).replace("\\", "/").lstrip("/")
+                item["family_parts"] = family_parts
+                item["family_label"] = build_family_label(family_parts)
+                item["asset_type_id"] = "figure:" + vhf.safe_tag("/".join(family_parts[:2]) if len(family_parts) > 0 else "figures", 80)
+                item["asset_type_label"] = "Figure " + item["family_label"]
+            item["source_root_label"] = root_info["label"]
+            item["rank"] = root_info["rank"]
+            if "label" not in item:
+                item["label"] = item["filename"]
+            found.append(item)
+            j += 1
+        i += 1
+    deduped = dedupe_discovered_figures(found)
+    specs = []
+    i = 0
+    while i < len(deduped):
+        item = deduped[i]
+        specs.append(
+            {
+                "tile_kind": "figure",
+                "core": "",
+                "label": item.get("label", item["filename"]),
+                "asset_type_id": item["asset_type_id"],
+                "asset_type_label": item["asset_type_label"],
+                "figure_path": item["abs_path"],
+                "filename": item["filename"],
+                "figure_family": item["family_parts"][0] if len(item["family_parts"]) > 0 else "",
+                "figure_subfamily": item["family_parts"][1] if len(item["family_parts"]) > 1 else "",
+                "source_root_label": item.get("source_root_label", ""),
+                "source_paths": [item["abs_path"]],
+            }
+        )
+        i += 1
+    return specs
+
+
+def _figure_root_signature(roots):
+    out = []
+    i = 0
+    while i < len(roots):
+        root_info = roots[i]
+        out.append((str(root_info.get("path", "")), str(root_info.get("label", "")), int(root_info.get("rank", 0))))
+        i += 1
+    return tuple(out)
+
+
+def discover_view_figure_specs_cached(view, meta, scan_cache, spec_cache, subset_option=None, descendant_cache=None):
+    roots = resolve_selection_figure_roots(
+        view,
+        meta,
+        subset_option=subset_option,
+        descendant_cache=descendant_cache,
+    )
+    sig = _figure_root_signature(roots)
+    if isinstance(spec_cache, dict) and sig in spec_cache:
+        return [dict(item) for item in list(spec_cache[sig])]
+    specs = discover_view_figure_specs(
+        view,
+        meta,
+        scan_cache,
+        subset_option=subset_option,
+        descendant_cache=descendant_cache,
+    )
+    if isinstance(spec_cache, dict):
+        spec_cache[sig] = [dict(item) for item in list(specs)]
+    return specs
+
+
+def _make_subset_option_id(column, value):
+    raw = str(column).strip() + "||" + str(value).strip()
+    return "subset__" + safe_tag(column, 48) + "__" + safe_tag(value, 72) + "__" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
+
+def precompute_subset_option_source(obs, core_positions=None):
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return {}
+    obs_source = obs
+    if not isinstance(core_positions, dict) or len(core_positions) == 0:
+        core_series = infer_core_series_from_obs(obs)
+        if core_series is None:
+            return {}
+        valid_mask = core_series.notna()
+        if not bool(valid_mask.any()):
+            return {}
+        core_values = core_series.loc[valid_mask].astype(str)
+        core_positions = {}
+        core_array = core_values.to_numpy()
+        unique_cores = sorted(list(set(core_values.tolist())), key=natural_sort_key)
+        i = 0
+        while i < len(unique_cores):
+            core = str(unique_cores[i])
+            core_positions[core] = np.flatnonzero(core_array == core)
+            i += 1
+        obs_source = obs.loc[valid_mask, :]
+    _group_pairs, subset_source = classify_obs_columns_by_core_positions(obs_source, core_positions)
+    return subset_source
+
+
+def build_view_subset_options(view, subset_source):
+    if not isinstance(subset_source, dict) or len(subset_source) == 0:
+        return {}
+    cores = list(view.get("core_names", []))
+    if len(cores) == 0:
+        return {}
+    out = {}
+    for cname in subset_source:
+        info = subset_source[cname]
+        values_by_core = info.get("values_by_core", {})
+        union_values = []
+        seen_values = set()
+        has_mixed_core = False
+        i = 0
+        while i < len(cores):
+            core = str(cores[i])
+            vals = list(values_by_core.get(core, []))
+            if len(vals) > 1:
+                has_mixed_core = True
+            j = 0
+            while j < len(vals):
+                value = str(vals[j])
+                if value not in seen_values:
+                    seen_values.add(value)
+                    union_values.append(value)
+                j += 1
+            i += 1
+        union_values = sorted(union_values, key=natural_sort_key)
+        if len(union_values) < 2 or (not has_mixed_core):
+            continue
+        group_items = []
+        i = 0
+        while i < len(union_values):
+            value = str(union_values[i])
+            group_items.append(
+                {
+                    "id": _make_subset_option_id(cname, value),
+                    "label": value,
+                    "column": cname,
+                    "value": value,
+                }
+            )
+            i += 1
+        if len(group_items) > 0:
+            out[cname] = group_items
+    return out
+
+
+def build_subset_options_by_view(view_sets, obs, core_positions=None, return_source=False):
+    subset_source = precompute_subset_option_source(obs, core_positions=core_positions)
+    if len(subset_source) == 0:
+        return ({}, subset_source) if return_source else {}
+    out = {}
+    i = 0
+    while i < len(view_sets):
+        view = view_sets[i]
+        options = build_view_subset_options(view, subset_source)
+        if isinstance(options, dict) and len(options) > 0:
+            out[str(view.get("id", ""))] = options
+        i += 1
+    return (out, subset_source) if return_source else out
+
+
+def report_project_subset_debug(view_sets, obs, core_positions, subset_source, subset_options):
+    try:
+        core_counts = {str(c): len(core_positions.get(c, [])) for c in core_positions}
+        hit_cores = [c for c in sorted(core_counts, key=natural_sort_key) if core_counts[c] > 0]
+        view_cores = []
+        for view in list(view_sets or []):
+            for core in list(view.get("core_names", [])):
+                core = str(core)
+                if core not in view_cores:
+                    view_cores.append(core)
+        source_cores = []
+        for cname in subset_source:
+            values_by_core = subset_source.get(cname, {}).get("values_by_core", {})
+            for core in values_by_core:
+                core = str(core)
+                if core not in source_cores:
+                    source_cores.append(core)
+        option_counts = {}
+        for view_id in subset_options:
+            n = 0
+            for group in subset_options.get(view_id, {}):
+                n += len(list(subset_options.get(view_id, {}).get(group, [])))
+            option_counts[str(view_id)] = n
+        print("Subset debug: obs rows", int(obs.shape[0]) if isinstance(obs, pd.DataFrame) else 0)
+        print("Subset debug: matched cores", len(hit_cores), "of", len(core_counts))
+        print("Subset debug: view cores:", ", ".join(view_cores[:8]) if len(view_cores) > 0 else "[none]")
+        print("Subset debug: position cores:", ", ".join([c + "=" + str(core_counts[c]) for c in hit_cores[:8]]) if len(hit_cores) > 0 else "[none]")
+        print("Subset debug: subset-source cores:", ", ".join(sorted(source_cores, key=natural_sort_key)[:8]) if len(source_cores) > 0 else "[none]")
+        print("Subset debug: candidate subset columns:", ", ".join(sorted(list(subset_source.keys()), key=natural_sort_key)[:12]) if len(subset_source) > 0 else "[none]")
+        print("Subset debug: per-view option counts:", option_counts if len(option_counts) > 0 else "{}")
+    except Exception as exc:
+        print("Subset debug: report failed:", exc)
+
+
+def derive_dataset_label(meta, obs):
+    parts = []
+    stem = str(meta.get("dataset_stem", "")).strip()
+    if stem != "":
+        parts.append(stem)
+    data_folder = str(meta.get("data_folder", "")).strip()
+    if data_folder != "":
+        folder_name = os.path.basename(os.path.abspath(os.path.normpath(data_folder)))
+        if folder_name != "" and folder_name not in parts:
+            parts.append(folder_name)
+    if len(parts) == 0:
+        parts.append("dataset")
+    return "__".join(parts[:2])
+
+
+def derive_viewer_filename_base(dataset_label):
+    return safe_tag(str(dataset_label), 96) + "__viewer"
+
+
+def _find_seg_file(segpath, slide_scene, suffix=SEG_SUFFIX, depth=0, max_depth=2):
+    if segpath and os.path.isfile(segpath):
+        # A single supplied TIFF belongs to one scene, never every scene.
+        # Convention-specific direct files are handled before this generic
+        # fallback in _find_seg_file_multi.
+        prefix = str(slide_scene).strip().lower() + "_"
+        if prefix != "_" and os.path.basename(str(segpath)).lower().startswith(prefix):
+            return segpath
+        return None
+    if segpath and os.path.isdir(segpath):
+        prefix = str(slide_scene) + "_"
+        names = []
+        try:
+            names = os.listdir(segpath)
+        except Exception:
+            names = []
+        suffixes = []
+        if suffix not in [None, ""]:
+            suffixes.append(str(suffix))
+        i = 0
+        while i < len(SEG_SUFFIX_CANDIDATES):
+            cand = str(SEG_SUFFIX_CANDIDATES[i])
+            if cand not in suffixes:
+                suffixes.append(cand)
+            i += 1
+        i = 0
+        while i < len(suffixes):
+            hits = []
+            j = 0
+            while j < len(names):
+                fn = str(names[j])
+                if fn.startswith(prefix) and fn.endswith(suffixes[i]):
+                    hits.append(fn)
+                j += 1
+            if len(hits) == 1:
+                return os.path.join(segpath, hits[0])
+            if len(hits) > 1:
+                hits.sort(key=len)
+                return os.path.join(segpath, hits[0])
+            i += 1
+        fallback = []
+        i = 0
+        while i < len(names):
+            fn = str(names[i])
+            if fn.startswith(prefix) and fn.endswith("CellSegmentationBasins.tif"):
+                fallback.append(fn)
+            i += 1
+        if len(fallback) > 0:
+            fallback = sorted(
+                fallback,
+                key=lambda fn: (
+                    0 if "matched_exp5" in fn else 1 if "matched" in fn else 2,
+                    len(fn),
+                    natural_sort_key(fn),
+                ),
+            )
+            return os.path.join(segpath, fallback[0])
+        subdirs = []
+        i = 0
+        while i < len(names):
+            candidate = os.path.join(segpath, str(names[i]))
+            if os.path.isdir(candidate):
+                subdirs.append(candidate)
+            i += 1
+        if int(depth) < int(max_depth):
+            i = 0
+            while i < len(subdirs):
+                found = _find_seg_file(subdirs[i], slide_scene, suffix=suffix, depth=depth + 1, max_depth=max_depth)
+                if found is not None:
+                    return found
+                i += 1
+    return None
+
+
+def _find_seg_file_multi(segpaths, slide_scene, suffix=SEG_SUFFIX):
+    roots = list(segpaths or [])
+    i = 0
+    while i < len(roots):
+        if callable(convention_resolve_sam_viewer_assets):
+            try:
+                assets = convention_resolve_sam_viewer_assets(roots[i], slide_scene)
+                candidate = str(getattr(assets, "segmentation_tif", "") if assets is not None else "").strip()
+                if candidate != "" and os.path.isfile(candidate):
+                    return candidate
+            except Exception:
+                pass
+        # Generic matching may only use the complete slide_scene prefix.
+        # Do not substitute a same-numbered ROI from another slide.
+        found = _find_seg_file(roots[i], slide_scene, suffix=suffix)
+        if found is not None:
+            return found
+        i += 1
+    return None
+
+
+def resolve_segmentation_roots(meta):
+    roots = []
+    raw_list = meta.get("segmentation_roots")
+    if isinstance(raw_list, list):
+        roots = _normalize_path_list(raw_list)
+        if len(roots) > 0:
+            return roots
+    text = str(meta.get("segmentation_roots_json", "")).strip()
+    if text != "":
+        roots = _normalize_path_list(_parse_saved_path_list(text))
+        if len(roots) > 0:
+            return roots
+    text = str(meta.get("segmentation_root", "")).strip()
+    if text != "":
+        roots = _normalize_path_list([text])
+        if len(roots) > 0:
+            return roots
+    data_folder = str(meta.get("data_folder", "")).strip()
+    if data_folder != "":
+        return load_inherited_project_segmentation_roots(data_folder)
+    return []
+
+
+def resolve_segmentation_root(meta):
+    roots = resolve_segmentation_roots(meta)
+    return roots[0] if len(roots) > 0 else ""
+
+
+def prompt_segmentation_roots(meta, current_roots=None):
+    roots = _normalize_path_list(list(current_roots or []))
+    hint = str(meta.get("build_folder", "")).strip() or str(meta.get("data_folder", "")).strip()
+    if len(roots) > 0:
+        shown = "\n".join(["- " + str(root) for root in roots])
+        raw = strip_quotes(
+            cvh_input(
+                "segmentation folders:\n" + shown,
+                prompt_meta={
+                    "options": [
+                        {
+                            "value": "use",
+                            "label": "Use: list shown",
+                            "description": "Keep the current segmentation folders.",
+                        },
+                        {
+                            "value": "y",
+                            "label": "change folders",
+                            "description": "Replace or add segmentation folders or globs.",
+                        },
+                    ]
+                },
+            ).strip()
+        )
+        low = raw.lower()
+        if low in ["", "use", "n", "no"]:
+            return roots
+        pending = []
+        if low not in ["change", "y", "yes"]:
+            pending.append(raw)
+    else:
+        print("Segmentation folders are not configured.")
+        if hint != "":
+            print("Hint:", hint)
+        print("Enter one segmentation folder or glob at a time. Blank finishes the list.")
+        pending = []
+
+    out = []
+    while True:
+        raw = pending.pop(0) if len(pending) > 0 else strip_quotes(
+            cvh_input(
+                "segmentation folder or glob [blank = done]: ",
+                prompt_meta={
+                    "options": [
+                        {
+                            "value": "",
+                            "label": "done",
+                            "description": "Finish the segmentation folder list.",
+                        }
+                    ]
+                },
+            ).strip()
+        )
+        if raw == "":
+            break
+        if has_glob_magic(raw):
+            matches = _expand_viewer_segmentation_glob(raw)
+            if len(matches) == 0:
+                print("Segmentation glob matched no usable folders:", raw)
+                continue
+            for candidate in matches:
+                if candidate not in out:
+                    out.append(candidate)
+            print("Segmentation glob added", len(matches), "folder(s).")
+            continue
+        candidate = normalize_stored_path(raw)
+        if candidate == "":
+            print("Path is not usable on this system. Please enter a native path.")
+            continue
+        if os.path.isdir(candidate) or os.path.isfile(candidate):
+            if candidate not in out:
+                out.append(candidate)
+            continue
+        print("Segmentation path not found:", candidate)
+    return out
+
+
+def ensure_project_segmentation_root(meta):
+    seg_roots = resolve_segmentation_roots(meta)
+    if len(seg_roots) > 0:
+        print("Current segmentation folders:")
+        i = 0
+        while i < len(seg_roots):
+            print(i, ":", seg_roots[i])
+            i += 1
+    selected = prompt_segmentation_roots(meta, current_roots=seg_roots)
+    data_folder = str(meta.get("data_folder", "")).strip()
+    if data_folder != "":
+        try:
+            save_project_segmentation_roots(data_folder, selected)
+        except Exception as exc:
+            print("Could not save segmentation folders to " + project_config_filename() + ":", exc)
+    _set_cvh_meta(
+        segmentation_root=selected[0] if len(selected) > 0 else "",
+        segmentation_roots=selected,
+    )
+    return selected
+
+
+def _clean_obs_values(series):
+    try:
+        vals = series.astype(str).str.strip()
+    except Exception:
+        return pd.Series(dtype="object")
+    low = vals.str.lower()
+    vals = vals.mask(low.isin(MISSING_LABELS))
+    vals = vals.mask(vals == "")
+    return vals
+
+
+def classify_obs_columns_by_core_positions(obs, core_positions):
+    group_pairs = {}
+    subset_source = {}
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return group_pairs, subset_source
+    if not isinstance(core_positions, dict) or len(core_positions) == 0:
+        return group_pairs, subset_source
+    valid_cores = [str(core) for core in core_positions if len(core_positions.get(str(core), [])) > 0]
+    if len(valid_cores) == 0:
+        return group_pairs, subset_source
+
+    cols = list(obs.columns)
+    i = 0
+    while i < len(cols):
+        col = cols[i]
+        cname = str(col).strip()
+        if cname == "":
+            i += 1
+            continue
+        cleaned = _clean_obs_values(obs.loc[:, col])
+        if cleaned.shape[0] == 0:
+            i += 1
+            continue
+
+        values_by_core = {}
+        pair_list = []
+        global_values = set()
+        has_mixed_core = False
+        j = 0
+        while j < len(valid_cores):
+            core = str(valid_cores[j])
+            positions = np.asarray(core_positions.get(core, []), dtype=int)
+            if len(positions) == 0:
+                j += 1
+                continue
+            try:
+                core_vals = cleaned.iloc[positions].dropna()
+            except Exception:
+                j += 1
+                continue
+            uniq_vals = sorted(list(set(core_vals.tolist())), key=natural_sort_key)
+            if len(uniq_vals) == 0:
+                j += 1
+                continue
+            values_by_core[core] = uniq_vals
+            k = 0
+            while k < len(uniq_vals):
+                global_values.add(str(uniq_vals[k]))
+                k += 1
+            if len(uniq_vals) > 1:
+                has_mixed_core = True
+            elif len(uniq_vals) == 1:
+                pair_list.append((core, str(uniq_vals[0])))
+            j += 1
+
+        uniq_vals = sorted(list(global_values), key=natural_sort_key)
+        if len(uniq_vals) < 2:
+            i += 1
+            continue
+        if has_mixed_core:
+            if len(uniq_vals) <= MAX_SUBSET_OPTION_VALUES:
+                subset_source[cname] = {"values_by_core": values_by_core, "all_values": uniq_vals}
+            i += 1
+            continue
+        if len(pair_list) > 0:
+            group_pairs[cname] = pair_list
+        i += 1
+    return group_pairs, subset_source
+
+
+def extract_slide_scene_from_path(path):
+    if callable(parse_viewer_asset_record):
+        try:
+            record = parse_viewer_asset_record(path)
+            if record is not None and normalize_slide_scene(record.slide_scene) != "":
+                return normalize_slide_scene(record.slide_scene)
+        except Exception:
+            pass
+    text = str(path).replace("\\", "/")
+    m = re.search(r"(?i)([^/]+_scene[_-]?[A-Za-z]0*\d{1,3})", text)
+    if m is not None:
+        return str(m.group(1))
+    # ROI convention: extract ROI tag from filename or folder, with slide ID prefix
+    # e.g. .../40393/Processed/ROI01/file.tif → "40393ROI01"
+    segments = text.split("/")
+    roi_tag = ""
+    roi_idx = -1
+    # First try filename
+    fn = segments[-1]
+    roi_m = re.search(r"(?i)(ROI0*\d{1,3})", fn)
+    if roi_m is not None:
+        roi_tag = roi_m.group(1).upper()
+        roi_idx = len(segments) - 1
+    # Fallback: check folder segments for ROI folder
+    if roi_tag == "":
+        for i in range(len(segments) - 1, -1, -1):
+            if re.match(r"(?i)^ROI0*\d{1,3}$", segments[i]):
+                roi_tag = segments[i].upper()
+                roi_idx = i
+                break
+    if roi_tag == "":
+        return ""
+    # Walk up from the ROI location to find a numeric slide ID folder
+    slide_id = ""
+    for i in range(roi_idx - 1, -1, -1):
+        if re.match(r"^\d+$", segments[i]):
+            slide_id = segments[i]
+            break
+    return slide_id + roi_tag
+
+
+def seed_core_tiff_map(seed_viewer):
+    out = {}
+    core_tiles = seed_viewer.get("core_tiles", {})
+    if not isinstance(core_tiles, dict):
+        return out
+    for core in core_tiles:
+        tiles = list(core_tiles.get(core, []))
+        i = 0
+        while i < len(tiles):
+            tile = tiles[i]
+            if str(tile.get("tile_kind", "")) == "composite":
+                paths = []
+                for src in list(tile.get("source_paths", [])):
+                    ext = os.path.splitext(str(src))[1].lower()
+                    if ext in [".tif", ".tiff"]:
+                        paths.append(str(src))
+                if len(paths) > 0:
+                    out[str(core)] = paths
+                    break
+            i += 1
+    return out
+
+
+def choose_xy_columns(dfxy):
+    if not isinstance(dfxy, pd.DataFrame) or dfxy.shape[0] == 0:
+        return None, None
+    preferred = [("DAPI_X", "DAPI_Y"), ("X", "Y"), ("x", "y"), ("Location_Center_X", "Location_Center_Y"), ("centroid-0", "centroid-1")]
+    i = 0
+    while i < len(preferred):
+        xcol, ycol = preferred[i]
+        if xcol in dfxy.columns and ycol in dfxy.columns:
+            return xcol, ycol
+        i += 1
+    numeric = []
+    for col in dfxy.columns:
+        try:
+            pd.to_numeric(dfxy[col], errors="raise")
+            numeric.append(col)
+        except Exception:
+            continue
+    if len(numeric) >= 2:
+        return numeric[0], numeric[1]
+    return None, None
+
+
+def prepare_overlay_context(obs, dfxy, seed_viewer):
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return None
+    slide_scene_series = None
+    if "slide_scene" in obs.columns:
+        slide_scene_series = _clean_obs_values(obs["slide_scene"])
+        if not bool(slide_scene_series.notna().any()):
+            slide_scene_series = None
+    if isinstance(slide_scene_series, pd.Series):
+        core_series = slide_scene_series.astype(str)
+    else:
+        core_series = infer_core_series_from_obs(obs)
+    if core_series is None:
+        return None
+    def _series_to_cell_int(series):
+        ids = []
+        ok = True
+        for raw in series.astype(str).tolist():
+            token = str(raw).split("_")[-1].strip()
+            digits = re.sub(r"(?i)^cell", "", token).strip()
+            try:
+                ids.append(int(digits))
+            except Exception:
+                ok = False
+                break
+        if not ok:
+            return None
+        return pd.Series(ids, index=obs.index)
+
+    xy = dfxy if isinstance(dfxy, pd.DataFrame) else None
+    if xy is not None and (not xy.index.equals(obs.index)):
+        xy = xy.reindex(obs.index)
+    xcol, ycol = choose_xy_columns(xy)
+    cell_int = None
+    if "cellid" in obs.columns:
+        cell_int = _series_to_cell_int(obs["cellid"])
+        if cell_int is not None and len(cell_int) > 1 and cell_int.nunique() <= 1:
+            cell_int = None
+    if cell_int is None and "slide_scene_cellid" in obs.columns:
+        cell_int = _series_to_cell_int(obs["slide_scene_cellid"])
+        if cell_int is not None and len(cell_int) > 1 and cell_int.nunique() <= 1:
+            cell_int = None
+    if cell_int is None:
+        cell_int = _series_to_cell_int(pd.Series(obs.index.astype(str), index=obs.index))
+        if cell_int is not None and len(cell_int) > 1 and cell_int.nunique() <= 1:
+            cell_int = None
+    # Priority 2 fallback: try known integer ID columns directly
+    # TODO: generalize — could validate candidates against actual seg TIFF labels
+    if cell_int is None:
+        for fallback_col in ["ObjectNumber", "Number_Object_Number"]:
+            if fallback_col in obs.columns:
+                try:
+                    candidate = pd.to_numeric(obs[fallback_col], errors="coerce")
+                    if candidate.notna().any() and candidate.nunique() > 1:
+                        cell_int = pd.Series(candidate.values, index=obs.index).astype(int)
+                        break
+                except Exception:
+                    pass
+    if cell_int is not None and "cellid" not in obs.columns:
+        obs = obs.copy()
+        obs["cellid"] = cell_int.astype(int).astype(str)
+    xvals = None
+    yvals = None
+    if isinstance(xy, pd.DataFrame) and xcol in xy.columns and ycol in xy.columns:
+        xvals = pd.to_numeric(xy[xcol], errors="coerce")
+        yvals = pd.to_numeric(xy[ycol], errors="coerce")
+    return {
+        "obs": obs,
+        "core_series": core_series.astype(str),
+        "core_array": core_series.astype(str).to_numpy(),
+        "slide_scene_series": slide_scene_series,
+        "slide_scene_array": slide_scene_series.to_numpy() if isinstance(slide_scene_series, pd.Series) else None,
+        "xy": xy,
+        "xcol": xcol,
+        "ycol": ycol,
+        "xvals": xvals,
+        "yvals": yvals,
+        "cell_int": cell_int,
+        "seed_tiffs": seed_core_tiff_map(seed_viewer),
+    }
+
+
+def build_subset_option_index(subset_options_by_view):
+    out = {}
+    for view_id in subset_options_by_view:
+        payload = subset_options_by_view.get(view_id, {})
+        if isinstance(payload, dict):
+            for subset_group in payload:
+                for item in list(payload.get(subset_group, [])):
+                    sid = str(item.get("id", "")).strip()
+                    if sid != "" and sid not in out:
+                        out[sid] = dict(item)
+        else:
+            for item in list(payload or []):
+                sid = str(item.get("id", "")).strip()
+                if sid != "" and sid not in out:
+                    out[sid] = dict(item)
+    return out
+
+
+def build_project_core_positions(obs, allowed_cores=None):
+    out = {}
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return out
+    core_names = [str(x) for x in list(allowed_cores or [])]
+    if len(core_names) == 0:
+        return out
+    if "slide_scene" in obs.columns:
+        slide_scene_array = _clean_obs_values(obs["slide_scene"]).astype(str).to_numpy()
+        i = 0
+        while i < len(core_names):
+            core = str(core_names[i])
+            out[core] = np.flatnonzero(slide_scene_array == core)
+            i += 1
+        return out
+
+    core_series = infer_core_series_from_obs(obs)
+    if core_series is None:
+        return out
+    core_array = core_series.astype(str).to_numpy()
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        out[core] = np.flatnonzero(core_array == core)
+        i += 1
+    return out
+
+
+def build_core_position_index(core_names, overlay_context):
+    out = {}
+    core_array = overlay_context.get("core_array")
+    slide_scene_array = overlay_context.get("slide_scene_array")
+    if core_array is None and slide_scene_array is None:
+        return out
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        positions = np.array([], dtype=int)
+        if slide_scene_array is not None:
+            positions = np.flatnonzero(slide_scene_array == core)
+        elif core_array is not None:
+            positions = np.flatnonzero(core_array == core)
+        out[core] = positions
+        i += 1
+    return out
+
+
+def overlay_canvas_size(core, overlay_context, core_mask):
+    tiffs = list(overlay_context.get("seed_tiffs", {}).get(str(core), []))
+    i = 0
+    while i < len(tiffs):
+        try:
+            with Image.open(tiffs[i]) as im:
+                return int(im.size[0]), int(im.size[1])
+        except Exception:
+            pass
+        i += 1
+    xy = overlay_context.get("xy")
+    xcol = overlay_context.get("xcol")
+    ycol = overlay_context.get("ycol")
+    if isinstance(xy, pd.DataFrame) and xcol in xy.columns and ycol in xy.columns:
+        x = pd.to_numeric(xy.loc[core_mask, xcol], errors="coerce")
+        y = pd.to_numeric(xy.loc[core_mask, ycol], errors="coerce")
+        if x.notna().any() and y.notna().any():
+            width = int(max(256, np.ceil(x.max()) + 16))
+            height = int(max(256, np.ceil(y.max()) + 16))
+            return width, height
+    return 1024, 1024
+
+
+def _validate_cached_overlay(path, expected_w, expected_h):
+    if not os.path.isfile(path):
+        return False
+    try:
+        expected = (int(expected_w), int(expected_h))
+        with Image.open(path) as im:
+            ok = tuple(im.size) == expected
+    except Exception:
+        ok = False
+    if ok:
+        return True
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+    return False
+
+
+def _seg_roots_cache_tag(seg_roots):
+    """Short legible tag identifying which segmentation roots were used.
+
+    Produces e.g. ``seg_40393_processed_a1b2c3d4`` so cached overlay
+    filenames are both human-readable and unique per seg-root set.
+    """
+    roots = _normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])
+    if len(roots) == 0:
+        return "noseg"
+    joined = "|".join(sorted(roots))
+    h = hashlib.md5(joined.encode("utf-8", errors="replace")).hexdigest()[:8]
+    # Use the last two path components of the first root for readability
+    parts = roots[0].replace("\\", "/").rstrip("/").split("/")
+    readable = "_".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "x")
+    return "seg_" + safe_tag(readable, 40) + "_" + h
+
+
+def render_point_subset_overlay(xvals, yvals, size, out_path):
+    if len(xvals) == 0 or len(yvals) == 0:
+        return False
+    width, height = size
+    img = Image.new("RGBA", (int(width), int(height)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    radius = 4
+    ring = (255, 255, 255, 210)
+    count = min(len(xvals), len(yvals))
+    i = 0
+    while i < count:
+        try:
+            x = int(round(float(xvals[i])))
+            y = int(round(float(yvals[i])))
+        except Exception:
+            i += 1
+            continue
+        if x < 0 or y < 0 or x >= width or y >= height:
+            i += 1
+            continue
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=ring, width=2)
+        i += 1
+    img.save(out_path, "PNG")
+    return True
+
+
+def render_segmentation_subset_overlay_from_file(segfile, ids, out_path):
+    if str(segfile or "").strip() == "" or len(ids) == 0 or tifffile is None:
+        return False
+    if not os.path.isfile(str(segfile)):
+        return False
+    try:
+        label = tifffile.imread(str(segfile))
+    except Exception:
+        return False
+    label = np.asarray(label)
+    label = np.squeeze(label)
+    if label.ndim != 2:
+        return False
+    try:
+        ids_arr = np.asarray(list(ids), dtype=label.dtype)
+    except Exception:
+        ids_arr = np.asarray(list(ids))
+    mask = np.isin(label, ids_arr)
+    if not bool(mask.any()):
+        return False
+    if skseg is not None:
+        bounds = skseg.find_boundaries(label, connectivity=1, background=0, mode="thick")
+    else:
+        bounds = np.zeros_like(label, dtype=bool)
+        bounds[1:, :] |= label[1:, :] != label[:-1, :]
+        bounds[:-1, :] |= label[1:, :] != label[:-1, :]
+        bounds[:, 1:] |= label[:, 1:] != label[:, :-1]
+        bounds[:, :-1] |= label[:, 1:] != label[:, :-1]
+        bounds &= (label != 0)
+    bounds = bounds & mask
+    if not bool(bounds.any()):
+        return False
+    thick = bounds.copy()
+    thick[1:, :] |= bounds[:-1, :]
+    thick[:-1, :] |= bounds[1:, :]
+    thick[:, 1:] |= bounds[:, :-1]
+    thick[:, :-1] |= bounds[:, 1:]
+    bounds = thick
+    rgba = np.zeros((label.shape[0], label.shape[1], 4), dtype=np.uint8)
+    rgba[bounds, 0:3] = 255
+    rgba[bounds, 3] = 255
+    Image.fromarray(rgba, mode="RGBA").save(out_path, "PNG")
+    return True
+
+
+def render_segmentation_subset_overlay(seg_roots, slide_scene, ids, out_path):
+    roots = _normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])
+    if len(roots) == 0:
+        return False
+    segfile = _find_seg_file_multi(roots, slide_scene)
+    return render_segmentation_subset_overlay_from_file(segfile, ids, out_path)
+
+
+def extract_cell_boundaries(seg_path):
+    """Extract per-cell boundary pixel coordinates from a label TIFF. Returns dict {cell_int: [x1,y1,x2,y2,...]}."""
+    if seg_path is None or tifffile is None:
+        return {}
+    try:
+        label = tifffile.imread(str(seg_path))
+    except Exception:
+        return {}
+    label = np.asarray(label)
+    label = np.squeeze(label)
+    if label.ndim != 2:
+        return {}
+    # Find boundary pixels — same logic as render_segmentation_subset_overlay
+    if skseg is not None:
+        bounds = skseg.find_boundaries(label, connectivity=1, background=0, mode="thick")
+    else:
+        bounds = np.zeros_like(label, dtype=bool)
+        bounds[1:, :] |= label[1:, :] != label[:-1, :]
+        bounds[:-1, :] |= label[1:, :] != label[:-1, :]
+        bounds[:, 1:] |= label[:, 1:] != label[:, :-1]
+        bounds[:, :-1] |= label[:, 1:] != label[:, :-1]
+        bounds &= (label != 0)
+    boundary_y, boundary_x = np.where(bounds)
+    if len(boundary_y) == 0:
+        return {}
+    boundary_labels = label[boundary_y, boundary_x]
+    # Group by cell ID into flat [x1,y1,x2,y2,...] arrays
+    from collections import defaultdict
+    cells = defaultdict(list)
+    i = 0
+    while i < len(boundary_labels):
+        cell_id = int(boundary_labels[i])
+        cells[cell_id].append(int(boundary_x[i]))
+        cells[cell_id].append(int(boundary_y[i]))
+        i += 1
+    return dict(cells)
+
+
+def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_roots, cache_dir, segmentation_by_slide_scene=None):
+    obs = overlay_context["obs"]
+    core_series = overlay_context["core_series"]
+    core_mask = core_series == str(core)
+    mask = core_mask.copy()
+    col = str(subset_option.get("column", "")).strip()
+    value = str(subset_option.get("value", "")).strip()
+    if col == "" or value == "" or col not in obs.columns:
+        return ""
+    mask = mask & (obs[col].astype(str) == value)
+    if not bool(mask.any()):
+        return ""
+
+    slide_scene = normalize_slide_scene(core)
+    if "slide_scene" in obs.columns:
+        scenes = sorted(list(set(obs.loc[mask, "slide_scene"].astype(str).tolist())), key=natural_sort_key)
+        if len(scenes) == 1:
+            slide_scene = scenes[0]
+    subset_id = str(subset_option.get("id", "")).strip()
+    scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
+    seg_file = str(seg_map.get(slide_scene, "") or "").strip()
+    seg_tag = _seg_roots_cache_tag([seg_file] if seg_file != "" else seg_roots)
+    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
+    seg_out_path = base + "__seg.png"
+    centroid_out_path = base + "__centroid.png"
+    expected_size = overlay_canvas_size(core, overlay_context, core_mask)
+    has_seg_roots = seg_file != "" or len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
+    if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
+        return seg_out_path
+    if (not has_seg_roots) and _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
+        return centroid_out_path
+    ids = []
+    cell_int = overlay_context.get("cell_int")
+    if isinstance(cell_int, pd.Series):
+        ids = list(cell_int.loc[mask].dropna().astype(int).tolist())
+    if slide_scene != "" and len(ids) > 0 and has_seg_roots:
+        if (seg_file != "" and render_segmentation_subset_overlay_from_file(seg_file, ids, seg_out_path)) or (
+            seg_file == "" and render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path)
+        ):
+            if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
+                return seg_out_path
+
+    xy = overlay_context.get("xy")
+    xcol = overlay_context.get("xcol")
+    ycol = overlay_context.get("ycol")
+    if isinstance(xy, pd.DataFrame) and xcol in xy.columns and ycol in xy.columns:
+        xvals = pd.to_numeric(xy.loc[mask, xcol], errors="coerce").dropna().tolist()
+        yvals = pd.to_numeric(xy.loc[mask, ycol], errors="coerce").dropna().tolist()
+        if len(xvals) > 0 and len(yvals) > 0:
+            if render_point_subset_overlay(xvals, yvals, expected_size, centroid_out_path):
+                return centroid_out_path
+    return ""
+
+
+def report_overlay_result(report, mode, slide_scene=""):
+    if not isinstance(report, dict):
+        return
+    report["total"] = int(report.get("total", 0)) + 1
+    if mode == "segmentation":
+        report["segmentation"] = int(report.get("segmentation", 0)) + 1
+        return
+    if mode == "centroid":
+        report["centroid"] = int(report.get("centroid", 0)) + 1
+        if slide_scene not in [None, ""]:
+            scenes = report.setdefault("centroid_scenes", set())
+            scenes.add(str(slide_scene))
+        return
+    if mode == "none":
+        report["none"] = int(report.get("none", 0)) + 1
+
+
+def build_subset_overlay_for_positions(core, subset_option, positions, overlay_context, cache_dir, seg_roots, report=None, segmentation_by_slide_scene=None):
+    if positions is None or len(positions) == 0:
+        return ""
+    core_mask = overlay_context["core_series"] == str(core)
+    expected_size = overlay_canvas_size(core, overlay_context, core_mask)
+    slide_scene = normalize_slide_scene(core)
+    slide_scene_series = overlay_context.get("slide_scene_series")
+    if isinstance(slide_scene_series, pd.Series):
+        scenes = sorted(list(set(slide_scene_series.iloc[positions].astype(str).tolist())), key=natural_sort_key)
+        if len(scenes) == 1:
+            slide_scene = scenes[0]
+    subset_id = str(subset_option.get("id", "")).strip()
+    scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
+    seg_file = str(seg_map.get(slide_scene, "") or "").strip()
+    seg_tag = _seg_roots_cache_tag([seg_file] if seg_file != "" else seg_roots)
+    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
+    seg_out_path = base + "__seg.png"
+    centroid_out_path = base + "__centroid.png"
+
+    ids = []
+    cell_int = overlay_context.get("cell_int")
+    if isinstance(cell_int, pd.Series):
+        ids = list(cell_int.iloc[positions].dropna().astype(int).tolist())
+    has_seg_roots = seg_file != "" or len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
+    if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
+        report_overlay_result(report, "segmentation", slide_scene)
+        return seg_out_path
+    if slide_scene != "" and len(ids) > 0 and has_seg_roots:
+        if (seg_file != "" and render_segmentation_subset_overlay_from_file(seg_file, ids, seg_out_path)) or (
+            seg_file == "" and render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path)
+        ):
+            if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
+                report_overlay_result(report, "segmentation", slide_scene)
+                return seg_out_path
+
+    xvals = overlay_context.get("xvals")
+    yvals = overlay_context.get("yvals")
+    if _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
+        report_overlay_result(report, "centroid", slide_scene)
+        return centroid_out_path
+    if isinstance(xvals, pd.Series) and isinstance(yvals, pd.Series):
+        xsub = xvals.iloc[positions].dropna().tolist()
+        ysub = yvals.iloc[positions].dropna().tolist()
+        if len(xsub) > 0 and len(ysub) > 0:
+            if render_point_subset_overlay(xsub, ysub, expected_size, centroid_out_path):
+                report_overlay_result(report, "centroid", slide_scene)
+                return centroid_out_path
+    report_overlay_result(report, "none", slide_scene)
+    return ""
+
+
+def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None, segmentation_by_slide_scene=None):
+    overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
+    if overlay_context is None:
+        return {}, {}
+    if not isinstance(subset_options_by_view, dict) or len(subset_options_by_view) == 0:
+        return {}, {}
+    cache_dir = os.path.join(out_root, "_subset_overlay_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    seg_roots = resolve_segmentation_roots(meta)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else build_segmentation_map_from_seed_viewer(seed_viewer, meta)
+    out = {}
+    report = {
+        "segmentation_root": str(seg_roots[0] if len(seg_roots) > 0 else ""),
+        "segmentation_roots": list(seg_roots),
+    }
+    core_names = sorted(list(seed_viewer.get("core_tiles", {}).keys()), key=natural_sort_key)
+    view_core_names = {}
+    if isinstance(view_sets, list):
+        for view in view_sets:
+            if not isinstance(view, dict):
+                continue
+            view_id = str(view.get("id", "")).strip()
+            cores = [str(x) for x in list(view.get("core_names", []) or [])]
+            if view_id != "" and len(cores) > 0:
+                view_core_names[view_id] = cores
+    core_positions = build_core_position_index(core_names, overlay_context)
+    column_cache = {}
+    unique_options = {}
+    for view_id in subset_options_by_view:
+        view_payload = subset_options_by_view.get(view_id, {})
+        if not isinstance(view_payload, dict):
+            continue
+        for subset_group in view_payload:
+            options = list(view_payload.get(subset_group, []))
+            j = 0
+            while j < len(options):
+                subset_option = dict(options[j])
+                subset_id = str(subset_option.get("id", "")).strip()
+                col = str(subset_option.get("column", "")).strip()
+                value = str(subset_option.get("value", "")).strip()
+                if subset_id != "" and col != "" and value != "" and col in obs.columns and subset_id not in unique_options:
+                    unique_options[subset_id] = subset_option
+                j += 1
+    rendered_cache = {}
+    for subset_id in unique_options:
+        subset_option = unique_options.get(subset_id, {})
+        col = str(subset_option.get("column", "")).strip()
+        value = str(subset_option.get("value", "")).strip()
+        if col not in column_cache:
+            column_cache[col] = obs[col].astype(str).to_numpy()
+        col_array = column_cache[col]
+        i = 0
+        while i < len(core_names):
+            core = str(core_names[i])
+            positions = core_positions.get(core)
+            overlay_path = ""
+            if positions is not None and len(positions) > 0:
+                subset_positions = positions[col_array[positions] == value]
+                overlay_path = build_subset_overlay_for_positions(
+                    core,
+                    subset_option,
+                    subset_positions,
+                    overlay_context,
+                    cache_dir,
+                    seg_roots,
+                    report=report,
+                    segmentation_by_slide_scene=seg_map,
+                )
+            rendered_cache[(subset_id, core)] = overlay_path
+            i += 1
+    for view_id in subset_options_by_view:
+        view_payload = subset_options_by_view.get(view_id, {})
+        if not isinstance(view_payload, dict) or len(view_payload) == 0:
+            continue
+        view_cores = list(view_core_names.get(str(view_id), core_names))
+        view_map = {}
+        for subset_group in view_payload:
+            option_map = {}
+            options = list(view_payload.get(subset_group, []))
+            j = 0
+            while j < len(options):
+                subset_option = dict(options[j])
+                subset_id = str(subset_option.get("id", "")).strip()
+                col = str(subset_option.get("column", "")).strip()
+                value = str(subset_option.get("value", "")).strip()
+                if subset_id == "" or col == "" or value == "" or col not in obs.columns:
+                    j += 1
+                    continue
+                if col not in column_cache:
+                    column_cache[col] = obs[col].astype(str).to_numpy()
+                col_array = column_cache[col]
+                core_map = {}
+                i = 0
+                while i < len(view_cores):
+                    core = str(view_cores[i])
+                    overlay_path = str(rendered_cache.get((subset_id, core), "") or "")
+                    if overlay_path != "":
+                        core_map[core] = [overlay_path]
+                    i += 1
+                if len(core_map) > 0:
+                    option_map[subset_id] = core_map
+                j += 1
+            if len(option_map) > 0:
+                view_map[str(subset_group)] = option_map
+        if len(view_map) > 0:
+            out[str(view_id)] = view_map
+    centroid_scenes = sorted(list(report.get("centroid_scenes", set())), key=natural_sort_key)
+    if "centroid_scenes" in report:
+        report["centroid_scenes"] = centroid_scenes[:20]
+    return out, report
+
+
+def _roi_json_scalar(v):
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    if isinstance(v, (np.bool_, bool)):
+        return bool(v)
+    if isinstance(v, (np.integer, int)):
+        return int(v)
+    if isinstance(v, (np.floating, float)):
+        try:
+            fv = float(v)
+        except Exception:
+            return ""
+        if not np.isfinite(fv):
+            return ""
+        return fv
+    return str(v)
+
+
+def build_expression_payload_frame(df, obs):
+    if not isinstance(df, pd.DataFrame):
+        return None, [], "df is not available"
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+        return None, [], "obs is not available"
+    if not obs.index.is_unique:
+        return None, [], "obs index is not unique"
+    if not df.index.is_unique:
+        return None, [], "df index is not unique"
+    col_names = [str(c) for c in list(df.columns)]
+    if len(set(col_names)) != len(col_names):
+        return None, [], "df marker column names are not unique"
+    aligned = df.reindex(obs.index)
+    expr_cols = {}
+    i = 0
+    while i < len(df.columns):
+        marker = str(df.columns[i])
+        try:
+            vals = pd.to_numeric(aligned.iloc[:, i], errors="coerce")
+            arr = vals.to_numpy(dtype=float, copy=False)
+        except Exception:
+            i += 1
+            continue
+        if bool(np.isfinite(arr).any()):
+            expr_cols[marker] = vals
+        i += 1
+    marker_list = sorted(list(expr_cols.keys()), key=natural_sort_key)
+    if len(marker_list) == 0:
+        return None, [], "no numeric marker columns"
+    expr_df = pd.DataFrame(index=obs.index)
+    i = 0
+    while i < len(marker_list):
+        marker = marker_list[i]
+        expr_df[marker] = expr_cols[marker]
+        i += 1
+    return expr_df, marker_list, ""
+
+
+def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root="", segmentation_by_slide_scene=None):
+    overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
+    if overlay_context is None:
+        return {}
+    core_names = sorted(list(seed_viewer.get("core_tiles", {}).keys()), key=natural_sort_key)
+    if len(core_names) == 0:
+        return {}
+
+    expr_df, marker_list, expr_reason = build_expression_payload_frame(df, obs)
+    has_expression_data = expr_df is not None and len(marker_list) > 0
+    if not has_expression_data and str(expr_reason or "").strip() != "":
+        print("Threshold expression payload disabled:", str(expr_reason))
+
+    core_positions = build_core_position_index(core_names, overlay_context)
+    obs_cols = [str(c) for c in list(obs.columns)]
+    subset_source = precompute_subset_option_source(obs, core_positions=core_positions)
+    subset_cols = sorted([str(c) for c in list(subset_source.keys()) if str(c).strip() != ""], key=natural_sort_key)
+    xvals = overlay_context.get("xvals")
+    yvals = overlay_context.get("yvals")
+    slide_scene_series = overlay_context.get("slide_scene_series")
+    cache_dir = ""
+    seg_roots = []
+    if str(out_root or "").strip() != "":
+        cache_dir = os.path.join(str(out_root), "_subset_overlay_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+    if isinstance(meta, dict):
+        seg_roots = resolve_segmentation_roots(meta)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else build_segmentation_map_from_seed_viewer(seed_viewer, meta)
+    cores = {}
+
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        positions = np.asarray(core_positions.get(core, []), dtype=int)
+        if positions.size == 0:
+            i += 1
+            continue
+        slide_scene = normalize_slide_scene(core)
+        core_mask = np.zeros(obs.shape[0], dtype=bool)
+        core_mask[positions] = True
+        size = overlay_canvas_size(core, overlay_context, core_mask)
+        default_overlay_layers = []
+        if cache_dir != "":
+            overlay_path = build_subset_overlay_for_positions(
+                core,
+                {"id": "roi_all_cells"},
+                positions,
+                overlay_context,
+                cache_dir,
+                seg_roots,
+                report=None,
+                segmentation_by_slide_scene=seg_map,
+            )
+            if str(overlay_path or "").strip() != "":
+                try:
+                    rel = os.path.relpath(str(overlay_path), str(os.path.join(str(out_root), "viewer_runs", "_tmp"))).replace("\\", "/")
+                    rel = "../" + rel if not rel.startswith("..") else rel
+                    default_overlay_layers = [rel]
+                except Exception:
+                    default_overlay_layers = [str(overlay_path)]
+        # Extract cell boundary coordinates for threshold overlays
+        cell_boundaries_rel = ""
+        if cache_dir != "":
+            seg_file = str(seg_map.get(slide_scene, "") or "").strip()
+            if seg_file is not None and str(seg_file).strip() != "":
+                boundaries = extract_cell_boundaries(seg_file)
+                if len(boundaries) > 0:
+                    import json as _json
+                    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + safe_tag(core, 80) + ".js")
+                    payload = _json.dumps(boundaries, separators=(",", ":")).replace("</", "<\\/")
+                    with open(boundaries_path, "w", encoding="utf-8") as f:
+                        f.write("window.__CELL_BOUNDARIES__ = ")
+                        f.write(payload)
+                        f.write(";\n")
+                    try:
+                        brel = os.path.relpath(boundaries_path, os.path.join(str(out_root), "viewer_runs", "_tmp")).replace("\\", "/")
+                        cell_boundaries_rel = "../" + brel if not brel.startswith("..") else brel
+                    except Exception:
+                        cell_boundaries_rel = boundaries_path
+                    print("Cell boundaries extracted:", len(boundaries), "cells from", seg_file)
+        rows = []
+        subset_presence = {}
+        j = 0
+        while j < len(positions):
+            pos = int(positions[j])
+            obs_row = obs.iloc[pos]
+            subset_values = {}
+            k = 0
+            while k < len(subset_cols):
+                col = subset_cols[k]
+                try:
+                    sval = _roi_json_scalar(obs_row[col])
+                except Exception:
+                    sval = ""
+                if sval != "":
+                    subset_values[col] = sval
+                    if col not in subset_presence:
+                        subset_presence[col] = []
+                    if sval not in subset_presence[col]:
+                        subset_presence[col].append(sval)
+                k += 1
+            x = None
+            y = None
+            if isinstance(xvals, pd.Series):
+                try:
+                    xv = float(xvals.iloc[pos])
+                    if np.isfinite(xv):
+                        x = xv
+                except Exception:
+                    x = None
+            if isinstance(yvals, pd.Series):
+                try:
+                    yv = float(yvals.iloc[pos])
+                    if np.isfinite(yv):
+                        y = yv
+                except Exception:
+                    y = None
+            rows.append({
+                "row_index": str(obs.index[pos]),
+                "x": x,
+                "y": y,
+                "subset_values": subset_values,
+            })
+            if has_expression_data:
+                expr = {}
+                expr_row = expr_df.iloc[pos]
+                k = 0
+                while k < len(marker_list):
+                    marker = marker_list[k]
+                    v = _roi_json_scalar(expr_row[marker])
+                    # Skip NaN/Inf/missing values (serialized as "" by
+                    # _roi_json_scalar).  Omitting the key lets the JS
+                    # markerValue() function return NaN via hasOwnProperty,
+                    # rather than Number("") which silently becomes 0.
+                    if v != "":
+                        expr[marker] = v
+                    k += 1
+                rows[-1]["expr"] = expr
+            j += 1
+        cores[core] = {
+            "core": core,
+            "slide_scene": slide_scene,
+            "width": int(size[0]),
+            "height": int(size[1]),
+            "default_overlay_layers": default_overlay_layers,
+            "cell_boundaries_rel": cell_boundaries_rel,
+            "subset_presence": subset_presence,
+            "rows": rows,
+        }
+        i += 1
+
+    if len(cores) == 0:
+        return {}
+    return {
+        "obs_columns": obs_cols,
+        "subset_columns": subset_cols,
+        "x_column": str(overlay_context.get("xcol") or ""),
+        "y_column": str(overlay_context.get("ycol") or ""),
+        "marker_list": marker_list,
+        "has_expression_data": bool(has_expression_data),
+        "expression_status": "" if has_expression_data else str(expr_reason or ""),
+        "cores": cores,
+    }
+
+
+def build_roi_mailbox_payload(roi_mailbox):
+    if not isinstance(roi_mailbox, dict):
+        return {}
+    mailbox_dir = normalize_stored_path(roi_mailbox.get("mailbox_dir", ""))
+    patch_file_name = str(roi_mailbox.get("patch_file_name", "ifa_roi_patch.csv")).strip() or "ifa_roi_patch.csv"
+    writer_url = str(roi_mailbox.get("writer_url", "")).strip()
+    patch_path = os.path.join(mailbox_dir, patch_file_name) if mailbox_dir != "" else patch_file_name
+    return {
+        "mailbox_dir": mailbox_dir,
+        "patch_file_name": patch_file_name,
+        "patch_path": patch_path,
+        "writer_url": writer_url,
+    }
+
+
+def study_threshold_writer_url_from_mailbox(roi_mailbox):
+    if not isinstance(roi_mailbox, dict):
+        return ""
+    writer_url = str(roi_mailbox.get("writer_url", "")).strip()
+    suffix = "/ifa_roi_patch"
+    if writer_url.endswith(suffix):
+        return writer_url[: -len(suffix)] + "/study_threshold"
+    return ""
+
+
+def threshold_roi_id_for_core(obs, positions, core, slide_scene=""):
+    scene = normalize_slide_scene(slide_scene)
+    return scene if scene != "" else str(core)
+
+
+def build_threshold_store_payload(obs, df, core_names, core_positions, meta=None, roi_mailbox=None, out_root=""):
+    expr_df, marker_list, _expr_reason = build_expression_payload_frame(df, obs)
+    if expr_df is None or len(marker_list) == 0:
+        return {}
+    if not isinstance(core_positions, dict) or len(core_positions) == 0:
+        return {}
+    base_dir = ""
+    if isinstance(meta, dict):
+        base_dir = normalize_stored_path(meta.get("data_folder", ""))
+    if base_dir == "":
+        base_dir = normalize_stored_path(out_root)
+    if base_dir == "":
+        base_dir = str(out_root or "").strip()
+    roi_ids = []
+    core_to_roi_id = {}
+    for core in list(core_names or []):
+        core = str(core)
+        positions = np.asarray(core_positions.get(core, []), dtype=int)
+        if positions.size == 0:
+            continue
+        roi_id = threshold_roi_id_for_core(obs, positions, core, slide_scene=core)
+        core_to_roi_id[core] = roi_id
+        if roi_id not in roi_ids:
+            roi_ids.append(roi_id)
+    if len(roi_ids) == 0:
+        return {}
+    return {
+        "mode": "study_thresholds",
+        "study_thresholds_path": os.path.join(base_dir, "studythresholds.csv") if base_dir != "" else "studythresholds.csv",
+        "writer_url": study_threshold_writer_url_from_mailbox(roi_mailbox),
+        "roi_ids": roi_ids,
+        "marker_list": marker_list,
+        "initial_thresholds": {},
+        "working_thresholds": {},
+        "saved_thresholds": {},
+        "core_to_roi_id": core_to_roi_id,
+    }
+
+
+def make_missing_tile(core):
+    return {
+        "tile_kind": "missing",
+        "core": core,
+        "slide_scene": core,
+        "label": core + " missing",
+        "asset_type_id": "missing",
+        "asset_type_label": "Missing",
+        "tiff_paths": [],
+        "channel_sources": [],
+        "overlay_paths": [],
+        "figure_path": None,
+        "source_paths": []
+    }
+
+
+def build_core_tile_specs(core_name, bucket):
+    tiffs = list(bucket.get("tiffs", []))
+    channel_sources = list(bucket.get("channel_sources", []))
+    single_tiffs, expanded_sources = split_tiff_channel_sources(tiffs)
+    channel_sources = list(channel_sources) + list(expanded_sources)
+    overlays = list(bucket.get("transparent_pngs", []))
+    figs = list(bucket.get("opaque_pngs", [])) + list(bucket.get("other_files", []))
+    slide_scene = normalize_slide_scene(bucket.get("slide_scene", "")) or normalize_slide_scene(core_name)
+    display_label = str(bucket.get("display_label", "") or "").strip() or display_label_from_slide_scene(slide_scene) or slide_scene
+
+    tiles = []
+    if len(single_tiffs) > 0 or len(channel_sources) > 0:
+        channel_items = list(channel_sources) + list(single_tiffs)
+        markers = marker_labels_from_paths(channel_items)
+        src_paths = list(tiffs) + list(overlays)
+        tiles.append({
+            "tile_kind": "composite",
+            "core": slide_scene,
+            "slide_scene": slide_scene,
+            "label": display_label,
+            "display_label": display_label,
+            "asset_type_id": "composite:tiff_stack",
+            "asset_type_label": "Composite (channel-selectable)",
+            "tiff_paths": list(single_tiffs),
+            "channel_sources": list(channel_sources),
+            "overlay_paths": list(overlays),
+            "figure_path": None,
+            "source_paths": src_paths,
+            "all_markers": markers
+        })
+
+    j = 0
+    while j < len(figs):
+        fp = figs[j]
+        ftype, flabel = infer_figure_type(fp)
+        tiles.append({
+            "tile_kind": "figure",
+            "core": slide_scene,
+            "slide_scene": slide_scene,
+            "label": display_label,
+            "display_label": display_label,
+            "asset_type_id": "figure:" + ftype,
+            "asset_type_label": "Figure " + flabel,
+            "tiff_paths": [],
+            "channel_sources": [],
+            "overlay_paths": [],
+            "figure_path": fp,
+            "source_paths": [fp]
+        })
+        j += 1
+
+    if len(tiles) == 0 and len(overlays) > 0:
+        k = 0
+        while k < len(overlays):
+            fp = overlays[k]
+            tiles.append({
+                "tile_kind": "figure",
+                "core": slide_scene,
+                "slide_scene": slide_scene,
+                "label": display_label,
+                "display_label": display_label,
+                "asset_type_id": "figure:overlay",
+                "asset_type_label": "Figure Overlay",
+                "tiff_paths": [],
+                "channel_sources": [],
+                "overlay_paths": [],
+                "figure_path": fp,
+                "source_paths": [fp]
+            })
+            k += 1
+
+    if len(tiles) == 0:
+        tiles.append(make_missing_tile(slide_scene))
+
+    return tiles
+
+
+def marker_labels_from_paths(paths):
+    out = []
+    seen = set()
+    i = 0
+    while i < len(paths):
+        mk = marker_label_from_path(paths[i])
+        if mk not in seen:
+            seen.add(mk)
+            out.append(mk)
+        i += 1
+    return out
+
+
+def build_catalog_from_identity_manifest(manifest, obs):
+    validate_slide_scene_manifest(manifest)
+    core_names = sorted(list(manifest.keys()), key=natural_sort_key)
+    core_tiles = {}
+    asset_type_catalog = {}
+
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        tiles = build_core_tile_specs(core, manifest[core])
+        core_tiles[core] = tiles
+
+        j = 0
+        while j < len(tiles):
+            tid = tiles[j].get("asset_type_id", "")
+            tlab = tiles[j].get("asset_type_label", tid)
+            if tid != "" and tid not in asset_type_catalog:
+                asset_type_catalog[tid] = tlab
+            j += 1
+        i += 1
+
+    core_positions = build_project_core_positions(obs, core_names)
+    core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
+    if "slide_scene" not in groupings:
+        groupings["slide_scene"] = {}
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        rec = manifest.get(core, {})
+        display_label = str(rec.get("display_label", "") if isinstance(rec, dict) else "").strip()
+        if core not in groupings["slide_scene"]:
+            groupings["slide_scene"][core] = [core]
+        elif core not in groupings["slide_scene"][core]:
+            groupings["slide_scene"][core].append(core)
+        if core not in core_meta:
+            core_meta[core] = {}
+        core_meta[core]["slide_scene"] = core
+        if display_label != "":
+            core_meta[core]["display_label"] = display_label
+        i += 1
+    add_default_full_dataset_grouping(obs, core_names, groupings)
+    groupings = prune_and_sort_groupings(groupings, core_names)
+
+    view_sets = build_view_sets(groupings, core_names)
+    default_view_id = choose_default_view(view_sets)
+
+    default_types = sorted([k for k in asset_type_catalog if k != "missing"], key=natural_sort_key)
+
+    return {
+        "version": 1,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "core_tiles": core_tiles,
+        "core_meta": core_meta,
+        "groupings": groupings,
+        "view_sets": view_sets,
+        "default_view_id": default_view_id,
+        "asset_type_catalog": asset_type_catalog,
+        "default_asset_types": default_types
+    }
+
+
+def add_default_full_dataset_grouping(obs, core_names, groupings):
+    all_cols = []
+    if isinstance(obs, pd.DataFrame):
+        for col in list(obs.columns):
+            name = str(col).strip().lower().replace(" ", "_")
+            if name == "all_data":
+                all_cols.append(str(col))
+        if len(all_cols) == 0:
+            obs["all_data"] = "all data"
+            all_cols.append("all_data")
+    if len(all_cols) > 0:
+        col = all_cols[0]
+        vals = _clean_obs_values(obs[col]).dropna().unique().tolist()
+        value = str(vals[0]).strip() if len(vals) > 0 else "all data"
+        if col not in groupings:
+            groupings[col] = {}
+        groupings[col][value] = list(core_names)
+        return
+    if "all_data" not in groupings:
+        groupings["all_data"] = {}
+    groupings["all_data"]["all data"] = list(core_names)
+
+
+def prune_and_sort_groupings(groupings, core_order):
+    out = {}
+    all_set = set(core_order)
+    for group in groupings:
+        vals = groupings[group]
+        clean_vals = {}
+        for val in vals:
+            cores = []
+            seen = set()
+            arr = vals[val]
+            i = 0
+            while i < len(arr):
+                c = str(arr[i])
+                if c in all_set and c not in seen:
+                    seen.add(c)
+                    cores.append(c)
+                i += 1
+            if len(cores) > 0:
+                clean_vals[str(val)] = sort_cores_with_reference(cores, core_order)
+        if len(clean_vals) > 0:
+            out[str(group)] = clean_vals
+    return out
+
+
+def sort_cores_with_reference(cores, core_order):
+    rank = {}
+    i = 0
+    while i < len(core_order):
+        rank[core_order[i]] = i
+        i += 1
+    return sorted(list(cores), key=lambda c: rank.get(c, 10**9))
+
+
+def make_view_id(group, value):
+    return safe_tag(group, 48) + "__" + safe_tag(value, 96)
+
+
+def safe_tag(s, max_len=80):
+    s = str(s).strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = s.strip("_")
+    if s == "":
+        s = "x"
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("_")
+    return s
+
+
+def group_sort_key(name):
+    ln = str(name).strip().lower()
+    if ln == "slide":
+        return (0, ln)
+    if ln in ["all", "all_data", "all data"]:
+        return (1, ln)
+    return (2, ln)
+
+
+def build_view_sets(groupings, core_order):
+    out = []
+    groups = sorted(list(groupings.keys()), key=group_sort_key)
+
+    i = 0
+    while i < len(groups):
+        g = groups[i]
+        vals = sorted(list(groupings[g].keys()), key=natural_sort_key)
+        j = 0
+        while j < len(vals):
+            v = vals[j]
+            cores = sort_cores_with_reference(groupings[g][v], core_order)
+            layout = "slide" if str(g).strip().lower() == "slide" else "compact"
+            out.append({
+                "id": make_view_id(g, v),
+                "group": g,
+                "value": v,
+                "layout": layout,
+                "core_names": cores
+            })
+            j += 1
+        i += 1
+
+    return out
+
+
+def choose_default_view(view_sets):
+    if len(view_sets) == 0:
+        return ""
+    i = 0
+    while i < len(view_sets):
+        if str(view_sets[i].get("group", "")).strip().lower() == "slide":
+            return view_sets[i]["id"]
+        i += 1
+    return view_sets[0]["id"]
+
+
+def derive_groupings_from_obs(obs, allowed_cores, core_positions=None):
+    core_meta = {}
+    groupings = {}
+    if not isinstance(obs, pd.DataFrame):
+        return core_meta, groupings
+    if obs.shape[0] == 0:
+        return core_meta, groupings
+    if not isinstance(core_positions, dict) or len(core_positions) == 0:
+        core_positions = {}
+        allowed = set([str(c) for c in allowed_cores])
+        if "slide_scene" in obs.columns:
+            scene_series = _clean_obs_values(obs["slide_scene"]).astype(str)
+            scene_array = scene_series.to_numpy()
+            core_source = sorted(list(allowed), key=natural_sort_key) if len(allowed) > 0 else sorted(list(set(scene_series.tolist())), key=natural_sort_key)
+            i = 0
+            while i < len(core_source):
+                core = str(core_source[i])
+                core_positions[core] = np.flatnonzero(scene_array == core)
+                i += 1
+            obs_values = obs
+        else:
+            core_series = infer_core_series_from_obs(obs)
+            if core_series is None:
+                return core_meta, groupings
+            valid_mask = core_series.notna()
+            if len(allowed) > 0:
+                valid_mask = valid_mask & core_series.isin(allowed)
+            if not bool(valid_mask.any()):
+                return core_meta, groupings
+            core_values = core_series.loc[valid_mask].astype(str)
+            core_array = core_values.to_numpy()
+            unique_cores = sorted(list(set(core_values.tolist())), key=natural_sort_key)
+            i = 0
+            while i < len(unique_cores):
+                core = str(unique_cores[i])
+                core_positions[core] = np.flatnonzero(core_array == core)
+                i += 1
+            obs_values = obs.loc[valid_mask, :]
+    else:
+        obs_values = obs
+
+    valid_cores = [str(core) for core in allowed_cores if len(core_positions.get(str(core), [])) > 0]
+    if len(valid_cores) == 0:
+        return core_meta, groupings
+    if "slide_scene" in obs_values.columns:
+        cleaned_scene = _clean_obs_values(obs_values["slide_scene"])
+        if "slide_scene" not in groupings:
+            groupings["slide_scene"] = {}
+        for core in valid_cores:
+            positions = np.asarray(core_positions.get(core, []), dtype=int)
+            try:
+                vals = cleaned_scene.iloc[positions].dropna().unique().tolist()
+            except Exception:
+                vals = []
+            if len(vals) != 1:
+                continue
+            val = str(vals[0])
+            if val not in groupings["slide_scene"]:
+                groupings["slide_scene"][val] = []
+            if core not in groupings["slide_scene"][val]:
+                groupings["slide_scene"][val].append(core)
+            if core not in core_meta:
+                core_meta[core] = {}
+            core_meta[core]["slide_scene"] = val
+    pair_map, _subset_source = classify_obs_columns_by_core_positions(obs_values, {core: core_positions.get(core, []) for core in valid_cores})
+    for cname in pair_map:
+        if str(cname) == "slide_scene":
+            continue
+        pairs = list(pair_map.get(cname, []))
+        if len(pairs) == 0:
+            continue
+        if cname not in groupings:
+            groupings[cname] = {}
+        j = 0
+        while j < len(pairs):
+            core = str(pairs[j][0])
+            val = str(pairs[j][1])
+            if val not in groupings[cname]:
+                groupings[cname][val] = []
+            if core not in groupings[cname][val]:
+                groupings[cname][val].append(core)
+            if core not in core_meta:
+                core_meta[core] = {}
+            core_meta[core][cname] = val
+            j += 1
+    return core_meta, groupings
+
+
+def build_seed_grouping_patch(seed_viewer, obs):
+    if not isinstance(seed_viewer, dict):
+        return {}
+    core_tiles = seed_viewer.get("core_tiles", {})
+    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
+        return {}
+    core_names = sorted(list(core_tiles.keys()), key=natural_sort_key)
+    core_positions = build_project_core_positions(obs, core_names)
+    core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
+    add_default_full_dataset_grouping(obs, core_names, groupings)
+    groupings = prune_and_sort_groupings(groupings, core_names)
+    view_sets = build_view_sets(groupings, core_names)
+    matched_cores = sorted(list(core_meta.keys()), key=natural_sort_key)
+    total_cores = len(core_names)
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "core_meta": core_meta,
+        "groupings": groupings,
+        "view_sets": view_sets,
+        "default_view_id": choose_default_view(view_sets),
+        "seed_core_match_count": len(matched_cores),
+        "seed_core_total": total_cores,
+        "seed_core_match_fraction": (float(len(matched_cores)) / float(total_cores)) if total_cores > 0 else 0.0,
+    }
+
+
+def trim_seed_viewer_to_obs(seed_viewer, obs):
+    if not isinstance(seed_viewer, dict):
+        return seed_viewer
+    core_tiles = seed_viewer.get("core_tiles", {})
+    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
+        return seed_viewer
+    core_names = sorted(list(core_tiles.keys()), key=natural_sort_key)
+    core_positions = build_project_core_positions(obs, core_names)
+    keep = []
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        positions = np.asarray(core_positions.get(core, []), dtype=int)
+        if positions.size > 0:
+            keep.append(core)
+        i += 1
+    if len(keep) == len(core_names):
+        return seed_viewer
+    trimmed = dict(seed_viewer)
+    trimmed["core_tiles"] = {core: core_tiles[core] for core in keep if core in core_tiles}
+    if isinstance(seed_viewer.get("core_meta"), dict):
+        trimmed["core_meta"] = {core: seed_viewer["core_meta"].get(core, {}) for core in keep}
+    return trimmed
+
+
+def collect_asset_type_catalog_from_core_tiles(core_tiles):
+    out = {}
+    if not isinstance(core_tiles, dict):
+        return out
+    for core in core_tiles:
+        tiles = list(core_tiles.get(core, []))
+        i = 0
+        while i < len(tiles):
+            tid = str(tiles[i].get("asset_type_id", "")).strip()
+            tlab = str(tiles[i].get("asset_type_label", tid)).strip()
+            if tid != "" and tid not in out:
+                out[tid] = tlab
+            i += 1
+    return out
+
+
+def extend_asset_type_catalog_from_figure_entries(asset_types, figure_entries):
+    if not isinstance(asset_types, dict):
+        asset_types = {}
+    entries = list(figure_entries or [])
+    i = 0
+    while i < len(entries):
+        entry = dict(entries[i])
+        tid = str(entry.get("asset_type_id", "")).strip()
+        tlab = str(entry.get("asset_type_label", tid)).strip()
+        if tid != "" and tid not in asset_types:
+            asset_types[tid] = tlab
+        i += 1
+    return asset_types
+
+
+def build_figure_entries_from_specs(specs, view, subset_option=None):
+    out = []
+    if not isinstance(view, dict):
+        return out
+    specs_list = list(specs or [])
+    view_group = str(view.get("group", "")).strip()
+    view_value = str(view.get("value", "")).strip()
+    subset_group = ""
+    subset_value = ""
+    if isinstance(subset_option, dict):
+        subset_group = str(subset_option.get("column", "")).strip()
+        subset_value = str(subset_option.get("value", "")).strip()
+    i = 0
+    while i < len(specs_list):
+        spec = dict(specs_list[i])
+        figure_path = str(spec.get("figure_path", "")).strip()
+        if figure_path == "":
+            src_paths = list(spec.get("source_paths", []))
+            if len(src_paths) > 0:
+                figure_path = str(src_paths[0]).strip()
+        filename = str(spec.get("filename", "")).strip()
+        figure_family = str(spec.get("figure_family", "")).strip()
+        figure_subfamily = str(spec.get("figure_subfamily", "")).strip()
+        source_root_label = str(spec.get("source_root_label", "")).strip()
+        search_parts = [figure_path, filename, figure_family, figure_subfamily, source_root_label]
+        search_text = " ".join([str(part).strip() for part in search_parts if str(part).strip() != ""]).lower()
+        spec["path"] = figure_path
+        spec["view_group"] = view_group
+        spec["view_value"] = view_value
+        spec["subset_group"] = subset_group
+        spec["subset_value"] = subset_value
+        spec["search_text"] = search_text
+        out.append(spec)
+        i += 1
+    return out
+
+
+def preflight_segmentation_map(seed_viewer, meta=None):
+    """Resolve label TIFFs once, keyed only by the complete slide_scene value."""
+    seg_map = build_segmentation_map_from_seed_viewer(seed_viewer, meta)
+    scenes = viewer_slide_scene_values(seed_viewer)
+    missing = [scene for scene in scenes if scene not in seg_map]
+    return seg_map, scenes, missing
+
+
+def dedupe_figure_entries_by_path(entries):
+    """Keep one catalog entry per source figure, preferring the broadest scope."""
+    kept = {}
+    order = []
+    for entry in list(entries or []):
+        item = dict(entry)
+        path = str(item.get("path", item.get("figure_path", ""))).strip()
+        if path == "":
+            path = "__missing__|" + str(item.get("label", ""))
+        key = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        priority = (
+            0 if str(item.get("subset_group", "")).strip() == "" else 1,
+            0 if str(item.get("subset_value", "")).strip() == "" else 1,
+        )
+        existing = kept.get(key)
+        if existing is None:
+            item["_figure_scope_priority"] = priority
+            kept[key] = item
+            order.append(key)
+        elif priority < existing.get("_figure_scope_priority", (1, 1)):
+            item["_figure_scope_priority"] = priority
+            kept[key] = item
+    out = []
+    for key in order:
+        item = dict(kept[key])
+        item.pop("_figure_scope_priority", None)
+        out.append(item)
+    return out
+
+
+def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions, segmentation_by_slide_scene=None):
+    ifprog.tick_progress("Project viewer: building subset options and overlays.")
+    print("Project viewer: building subset options and overlays.")
+    subset_options, subset_source = build_subset_options_by_view(view_sets, obs, core_positions=core_positions, return_source=True)
+    report_project_subset_debug(view_sets, obs, core_positions, subset_source, subset_options)
+    subset_overlays, overlay_report = build_subset_overlay_specs(
+        base_viewer,
+        subset_options,
+        obs,
+        dfxy,
+        meta,
+        out_root,
+        view_sets=view_sets,
+        segmentation_by_slide_scene=segmentation_by_slide_scene,
+    )
+    return subset_options, subset_overlays, overlay_report
+
+
+def build_project_figure_artifacts(view_sets, subset_options, meta):
+    ifprog.tick_progress("Project viewer: discovering figures and writing HTML.")
+    print("Project viewer: discovering figures and writing HTML.")
+    scan_cache = {}
+    spec_cache = {}
+    descendant_cache = {}
+    figure_entries = []
+    i = 0
+    while i < len(view_sets):
+        view = view_sets[i]
+        base_specs = discover_view_figure_specs_cached(
+            view,
+            meta,
+            scan_cache,
+            spec_cache,
+            descendant_cache=descendant_cache,
+        )
+        if len(base_specs) > 0:
+            figure_entries.extend(build_figure_entries_from_specs(base_specs, view))
+        j = 0
+        view_options = []
+        view_payload = subset_options.get(str(view.get("id", "")), {})
+        if isinstance(view_payload, dict):
+            for subset_group in view_payload:
+                view_options.extend(list(view_payload.get(subset_group, [])))
+        else:
+            view_options = list(view_payload or [])
+        while j < len(view_options):
+            subset_option = view_options[j]
+            specs = discover_view_figure_specs_cached(
+                view,
+                meta,
+                scan_cache,
+                spec_cache,
+                subset_option=subset_option,
+                descendant_cache=descendant_cache,
+            )
+            if len(specs) > 0:
+                figure_entries.extend(build_figure_entries_from_specs(specs, view, subset_option=subset_option))
+            j += 1
+        i += 1
+    deduped = dedupe_figure_entries_by_path(figure_entries)
+    if len(deduped) != len(figure_entries):
+        print("Project viewer: deduplicated figures", len(figure_entries), "to", len(deduped), "unique source files.")
+    return deduped
+
+
+def assemble_project_catalog(core_tiles, patch, figure_entries, subset_options, subset_overlays):
+    return {
+        "version": 2,
+        "generated_at": patch.get("generated_at", datetime.utcnow().isoformat() + "Z"),
+        "dataset_label": patch.get("dataset_label", ""),
+        "viewer_filename_base": patch.get("viewer_filename_base", ""),
+        "seed_viewer_label": patch.get("seed_viewer_label", ""),
+        "seed_viewer_path": patch.get("seed_viewer_path", ""),
+        "seed_core_match_count": patch.get("seed_core_match_count", 0),
+        "seed_core_total": patch.get("seed_core_total", 0),
+        "seed_core_match_fraction": patch.get("seed_core_match_fraction", 0.0),
+        "core_tiles": {str(core): list(core_tiles.get(core, [])) for core in core_tiles},
+        "figure_entries": figure_entries,
+        "subset_options": subset_options,
+        "subset_overlays": subset_overlays,
+        "overlay_backend": patch.get("overlay_backend", {}),
+        "roi_data": patch.get("roi_data", {}),
+        "roi_mailbox": patch.get("roi_mailbox", {}),
+        "threshold_store": patch.get("threshold_store", {}),
+        "core_meta": patch.get("core_meta", {}),
+        "groupings": patch.get("groupings", {}),
+        "view_sets": patch.get("view_sets", []),
+        "default_view_id": patch.get("default_view_id", ""),
+        "asset_type_catalog": patch.get("asset_type_catalog", {}),
+    }
+
+
+def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_root, roi_mailbox=None, provenance=None, df=None):
+    if not isinstance(base_viewer, dict):
+        return None
+    core_tiles = base_viewer.get("core_tiles", {})
+    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
+        return None
+
+    patch = build_seed_grouping_patch(base_viewer, obs)
+    dataset_label = derive_dataset_label(meta, obs)
+    patch["dataset_label"] = dataset_label
+    patch["viewer_filename_base"] = derive_viewer_filename_base(dataset_label)
+
+    provenance = provenance if isinstance(provenance, dict) else {}
+    if str(provenance.get("kind", "")).strip() == "seed":
+        patch["seed_viewer_path"] = str(provenance.get("path", "")).strip()
+        patch["seed_viewer_label"] = str(provenance.get("label", "")).strip()
+    else:
+        patch["seed_viewer_path"] = ""
+        patch["seed_viewer_label"] = ""
+
+    view_sets = patch.get("view_sets", [])
+    core_names = [str(x) for x in core_tiles.keys()]
+    core_positions = build_project_core_positions(obs, core_names)
+    segmentation_by_slide_scene = meta.get("_segmentation_by_slide_scene") if isinstance(meta, dict) else None
+    if not isinstance(segmentation_by_slide_scene, dict):
+        segmentation_by_slide_scene = build_segmentation_map_from_seed_viewer(base_viewer, meta)
+
+    subset_options, subset_overlays, overlay_report = build_project_subset_artifacts(
+        base_viewer,
+        view_sets,
+        obs,
+        dfxy,
+        meta,
+        out_root,
+        core_positions,
+        segmentation_by_slide_scene=segmentation_by_slide_scene,
+    )
+    figure_entries = build_project_figure_artifacts(view_sets, subset_options, meta)
+
+    asset_type_catalog = collect_asset_type_catalog_from_core_tiles(core_tiles)
+    asset_type_catalog = extend_asset_type_catalog_from_figure_entries(asset_type_catalog, figure_entries)
+
+    patch["subset_options"] = subset_options
+    patch["subset_overlays"] = subset_overlays
+    patch["figure_entries"] = figure_entries
+    patch["roi_data"] = build_roi_data_for_seed(
+        base_viewer,
+        obs,
+        dfxy,
+        df=df,
+        meta=meta,
+        out_root=out_root,
+        segmentation_by_slide_scene=segmentation_by_slide_scene,
+    )
+    patch["roi_mailbox"] = build_roi_mailbox_payload(roi_mailbox)
+    patch["threshold_store"] = build_threshold_store_payload(
+        obs,
+        df,
+        core_names,
+        core_positions,
+        meta=meta,
+        roi_mailbox=roi_mailbox,
+        out_root=out_root,
+    )
+    patch["overlay_backend"] = {
+        "segmentation_root": str(overlay_report.get("segmentation_root", "")),
+        "segmentation_roots": list(overlay_report.get("segmentation_roots", [])),
+        "segmentation_count": int(overlay_report.get("segmentation", 0)),
+        "centroid_count": int(overlay_report.get("centroid", 0)),
+        "none_count": int(overlay_report.get("none", 0)),
+        "centroid_scenes": list(overlay_report.get("centroid_scenes", [])),
+    }
+    patch["asset_type_catalog"] = asset_type_catalog
+
+    return assemble_project_catalog(
+        core_tiles,
+        patch,
+        figure_entries,
+        subset_options,
+        subset_overlays,
+    )
+
+
+def missing_obs_slide_scenes(base_viewer, obs):
+    if not isinstance(base_viewer, dict) or not isinstance(obs, pd.DataFrame):
+        return []
+    if "slide_scene" not in obs.columns:
+        return []
+    available = set(viewer_slide_scene_values(base_viewer))
+    if len(available) == 0:
+        return []
+    wanted = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()
+    wanted = sorted(list(set([str(v).strip() for v in wanted if str(v).strip() != ""])), key=natural_sort_key)
+    missing = []
+    i = 0
+    while i < len(wanted):
+        if wanted[i] not in available:
+            missing.append(wanted[i])
+        i += 1
+    return missing
+
+
+def covered_obs_slide_scenes(base_viewer, obs):
+    if not isinstance(base_viewer, dict) or not isinstance(obs, pd.DataFrame):
+        return []
+    if "slide_scene" not in obs.columns:
+        return []
+    available = set(viewer_slide_scene_values(base_viewer))
+    if len(available) == 0:
+        return []
+    wanted = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()
+    wanted = sorted(list(set([str(v).strip() for v in wanted if str(v).strip() != ""])), key=natural_sort_key)
+    covered = []
+    i = 0
+    while i < len(wanted):
+        if wanted[i] in available:
+            covered.append(wanted[i])
+        i += 1
+    return covered
+
+
+def filter_tables_to_slide_scenes(df, obs, dfxy, slide_scenes):
+    if not isinstance(obs, pd.DataFrame) or "slide_scene" not in obs.columns:
+        return df, obs, dfxy
+    keep = set([str(x).strip() for x in list(slide_scenes or []) if str(x).strip() != ""])
+    if len(keep) == 0:
+        return df, obs.iloc[0:0].copy(), dfxy.iloc[0:0].copy() if isinstance(dfxy, pd.DataFrame) else dfxy
+    mask = obs["slide_scene"].astype(str).isin(keep)
+    build_obs = obs.loc[mask].copy()
+    build_df = df.reindex(build_obs.index) if isinstance(df, pd.DataFrame) else df
+    build_dfxy = dfxy.reindex(build_obs.index) if isinstance(dfxy, pd.DataFrame) else dfxy
+    return build_df, build_obs, build_dfxy
+
+
+def _build_and_write_project_viewer(base_viewer, build_df, build_obs, build_dfxy, meta, out_root, roi_mailbox, provenance, update_meta=True, run_name_hint=""):
+    ifprog.reset_progress(4, "Project viewer: preparing dataset overlay onto seed viewer.")
+    try:
+        seg_roots = resolve_segmentation_roots(meta)
+        if len(seg_roots) > 0:
+            meta["segmentation_root"] = seg_roots[0]
+            meta["segmentation_roots"] = seg_roots
+            print("Project viewer: segmentation outlines enabled from", len(seg_roots), "folder(s).")
+        else:
+            print("Project viewer: no segmentation root selected; centroid subset overlays will be used when needed.")
+        print("Project viewer: preparing dataset overlay onto reusable assets.")
+        catalog = build_project_catalog_from_base_viewer(
+            base_viewer,
+            build_obs,
+            build_dfxy,
+            meta,
+            out_root,
+            roi_mailbox=roi_mailbox,
+            provenance=provenance,
+            df=build_df,
+        )
+        if catalog is None:
+            print("Project viewer could not build a fresh catalog from the available reusable assets.")
+            return None
+        if str(run_name_hint).strip() != "":
+            catalog["run_name_hint"] = str(run_name_hint).strip()
+        overlay_report = dict(catalog.get("overlay_backend", {}))
+        if int(overlay_report.get("centroid_count", 0)) > 0:
+            scenes = list(overlay_report.get("centroid_scenes", []))
+            if len(scenes) > 0:
+                print("Project viewer: centroid fallback used for subset overlays on", len(scenes), "slide_scene values.")
+            else:
+                print("Project viewer: centroid fallback used for subset overlays.")
+        if update_meta:
+            _set_cvh_meta(
+                cvh_mode="project",
+                cvh_out_root=os.path.abspath(out_root),
+                cvh_seed_viewer=str(provenance.get("path", "")).strip(),
+                cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
+                viewer_root=os.path.abspath(out_root),
+                figure_folder=str(meta.get("figure_folder", "")).strip(),
+                segmentation_root=seg_roots[0] if len(seg_roots) > 0 else "",
+                segmentation_roots=seg_roots,
+            )
+        ifprog.tick_progress("Project viewer: writing HTML.")
+        if str(provenance.get("kind", "")).strip() == "seed":
+            vhf.build_viewer_from_seed(base_viewer, catalog_patch=catalog, outdir=out_root)
+        else:
+            vhf.build_catalog(catalog, outdir=out_root)
+        if update_meta:
+            latest_html = discover_latest_run_html(out_root)
+            _set_cvh_meta(
+                cvh_last_viewer_data=os.path.abspath(discover_latest_seed_viewer(out_root)),
+                cvh_last_html=os.path.abspath(latest_html) if latest_html != "" else "",
+            )
+        ifprog.tick_progress("Project viewer: viewer HTML ready.")
+        return catalog
+    finally:
+        ifprog.clear_progress()
+
+
+def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
+    meta = dict(_cvh_meta_sink())
+    if isinstance(resolved, dict):
+        data_folder = str(resolved.get("data_folder", "")).strip()
+        build_folder = str(resolved.get("build_folder", "")).strip()
+        dataset_stem = str(resolved.get("dataset_stem", "")).strip()
+        out_root = str(resolved.get("viewer_root", "")).strip()
+        seed_path = str(resolved.get("seed_viewer_path", "")).strip()
+        figure_folder = str(resolved.get("figure_folder", "")).strip()
+        segmentation_roots = _normalize_path_list(list(resolved.get("segmentation_roots", [])))
+        if len(segmentation_roots) == 0:
+            single = str(resolved.get("segmentation_root", "")).strip()
+            if single != "":
+                segmentation_roots = _normalize_path_list([single], keep_missing=True)
+        if data_folder != "":
+            meta["data_folder"] = data_folder
+        if build_folder != "":
+            meta["build_folder"] = build_folder
+        if dataset_stem != "":
+            meta["dataset_stem"] = dataset_stem
+        if figure_folder != "":
+            meta["figure_folder"] = figure_folder
+        meta["segmentation_root"] = segmentation_roots[0] if len(segmentation_roots) > 0 else ""
+        meta["segmentation_roots"] = segmentation_roots
+        meta["viewer_root"] = out_root
+        seed_viewer_just_built = _optional_bool(resolved.get("seed_viewer_just_built", None)) is True
+        use_existing_seed_viewer = _optional_bool(resolved.get("use_existing_seed_viewer", None))
+        per_slide_scene_viewers = _optional_bool(resolved.get("per_slide_scene_viewers", None))
+    else:
+        out_root = prompt_output_root(find_default_out_root(meta))
+        default_seed = discover_latest_seed_viewer(out_root, obs=obs)
+        seed_path = prompt_seed_viewer_path(default_seed)
+        seed_viewer_just_built = False
+        use_existing_seed_viewer = None
+        per_slide_scene_viewers = None
+
+    # External callers may supply an incomplete context.  Resolve this choice
+    # here, before any reusable assets are read or reconstructed.
+    if per_slide_scene_viewers is None:
+        per_slide_scene_viewers = prompt_per_slide_scene_viewers(obs)
+
+    reuse_json_var = False
+    if seed_path != "" and os.path.isfile(seed_path):
+        seed_name = os.path.basename(str(seed_path).strip())
+        if seed_viewer_just_built:
+            print("Project viewer: using newly built reusable viewer assets from", seed_name)
+            reuse_json_var = True
+        elif use_existing_seed_viewer is not None:
+            reuse_json_var = bool(use_existing_seed_viewer)
+        else:
+            reuse_raw = str(
+                cvh_input(
+                    "Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ",
+                    default="y",
+                    prompt_meta={
+                        "options": [
+                            {
+                                "value": "y",
+                                "label": "Use assets",
+                                "description": "Reuse the existing viewer asset map and write a fresh project-aware viewer run.",
+                            },
+                            {
+                                "value": "n",
+                                "label": "Skip assets",
+                                "description": "Try to rebuild from the asset registry instead.",
+                            },
+                        ]
+                    },
+                )
+            ).strip().lower()
+            reuse_json_var = reuse_raw in ["", "y", "yes"]
+    base_viewer = None
+    provenance = {}
+    if seed_path != "" and os.path.isfile(seed_path) and reuse_json_var:
+        seed_viewer = load_json_file(seed_path, default={})
+        if isinstance(seed_viewer, dict) and isinstance(seed_viewer.get("core_tiles"), dict):
+            if seed_viewer_compatible_with_obs(seed_viewer, obs):
+                trimmed_seed = trim_seed_viewer_to_obs(seed_viewer, obs)
+                if isinstance(trimmed_seed.get("core_tiles"), dict) and len(trimmed_seed.get("core_tiles", {})) > 0:
+                    base_viewer = trimmed_seed
+                    provenance = {
+                        "kind": "seed",
+                        "path": os.path.abspath(seed_path),
+                        "label": os.path.basename(os.path.dirname(os.path.abspath(seed_path))),
+                    }
+                    print("Project viewer: reusing compatible seed viewer structure.")
+                else:
+                    print("Seed viewer does not match the current obs; trying reusable asset pool instead.")
+            else:
+                print("Seed viewer does not fully cover the current obs; trying reusable asset pool instead.")
+        else:
+            print("Seed viewer data is invalid; trying reusable asset pool instead.")
+    else:
+        print("No reusable seed viewer_data.json found; trying reusable asset pool instead.")
+
+    if base_viewer is None:
+        fresh_core_tiles = build_core_tiles_from_asset_registry(out_root)
+        used_convention_sources = False
+        if len(fresh_core_tiles) == 0:
+            roots = viewer_convention_root_candidates(meta, out_root, segmentation_roots)
+            fresh_core_tiles = build_core_tiles_from_convention_roots(roots, obs)
+            used_convention_sources = len(fresh_core_tiles) > 0
+        if len(fresh_core_tiles) == 0:
+            print("No reusable asset pool or convention-resolved source images could be reconstructed.")
+            return None
+        fresh_viewer = {"core_tiles": fresh_core_tiles}
+        fresh_viewer = trim_seed_viewer_to_obs(fresh_viewer, obs)
+        if not isinstance(fresh_viewer.get("core_tiles"), dict) or len(fresh_viewer.get("core_tiles", {})) == 0:
+            print("Reusable asset pool does not match the current obs; no active cores remained after trimming.")
+            return None
+        base_viewer = fresh_viewer
+        provenance_kind = "asset_pool"
+        provenance_path = os.path.abspath(asset_registry_path(out_root))
+        provenance_label = "_asset_pool"
+        if used_convention_sources:
+            provenance_kind = "convention_sources"
+            provenance_path = os.path.abspath(out_root)
+            provenance_label = "Sam/FCS"
+        provenance = {
+            "kind": provenance_kind,
+            "path": provenance_path,
+            "label": provenance_label,
+        }
+        print("Project viewer: building a fresh run structure from", provenance_label + ".")
+
+    build_df = df
+    build_obs = obs
+    build_dfxy = dfxy
+    missing_scenes = missing_obs_slide_scenes(base_viewer, obs)
+    if len(missing_scenes) > 0:
+        covered_scenes = covered_obs_slide_scenes(base_viewer, obs)
+        if len(covered_scenes) == 0:
+            print("Reusable viewer assets are incomplete for the current obs.")
+            print("Missing slide_scene values:", ", ".join(missing_scenes[:12]))
+            return None
+        print(
+            "Reusable viewer assets cover",
+            len(covered_scenes),
+            "of",
+            len(covered_scenes) + len(missing_scenes),
+            "slide_scene values. Building viewer for the covered subset only.",
+        )
+        print("Skipped slide_scene values:", ", ".join(missing_scenes[:12]))
+        build_df, build_obs, build_dfxy = filter_tables_to_slide_scenes(df, obs, dfxy, covered_scenes)
+
+    # Resolve each segmentation mask before expensive overlay generation.  A
+    # missing exact scene match is allowed only after the user explicitly
+    # accepts centroid-only overlays for those scenes.
+    if len(segmentation_roots) > 0:
+        segmentation_by_slide_scene, map_scenes, unresolved_scenes = preflight_segmentation_map(base_viewer, meta)
+        print("Viewer segmentation preflight: full slide_scene matches.")
+        for scene in map_scenes:
+            source = str(segmentation_by_slide_scene.get(scene, "") or "").strip()
+            print("-", scene, "->", source if source != "" else "UNRESOLVED")
+        if len(unresolved_scenes) > 0:
+            print("WARNING: no segmentation label TIFF matched:", ", ".join(unresolved_scenes[:12]))
+            if len(unresolved_scenes) > 12:
+                print("WARNING:", len(unresolved_scenes) - 12, "additional slide_scene values are unresolved.")
+            raw = str(
+                cvh_input(
+                    "Continue with centroid-only overlays for unresolved slide_scene values? (y/n) [n]: ",
+                    default="n",
+                    prompt_meta={
+                        "options": [
+                            {
+                                "value": "n",
+                                "label": "Stop",
+                                "description": "Return without starting viewer generation.",
+                            },
+                            {
+                                "value": "y",
+                                "label": "Continue",
+                                "description": "Use centroid-only overlays for unresolved scenes.",
+                            },
+                        ]
+                    },
+                )
+            ).strip().lower()
+            if raw not in ["y", "yes", "continue"]:
+                print("Viewer generation cancelled before overlay rendering.")
+                return None
+        meta["_segmentation_by_slide_scene"] = segmentation_by_slide_scene
+
+    per_roi = False
+    unique_scenes = []
+    if isinstance(build_obs, pd.DataFrame) and "slide_scene" in build_obs.columns:
+        unique_scenes = sorted(
+            build_obs["slide_scene"].dropna().astype(str).unique().tolist(),
+            key=natural_sort_key,
+        )
+        if len(unique_scenes) > 1:
+            per_roi = bool(per_slide_scene_viewers)
+
+    if per_roi:
+        built_count = 0
+        built_roots = []
+        last_viewer_data = ""
+        last_html = ""
+        scene_series = build_obs["slide_scene"].astype(str)
+        scene_i = 0
+        while scene_i < len(unique_scenes):
+            scene_val = str(unique_scenes[scene_i])
+            print("--- Viewer", scene_i + 1, "of", len(unique_scenes), ":", scene_val, "---")
+            sub_obs = build_obs.loc[scene_series == scene_val].copy()
+            sub_df = build_df.reindex(sub_obs.index) if isinstance(build_df, pd.DataFrame) else build_df
+            sub_dfxy = build_dfxy.reindex(sub_obs.index) if isinstance(build_dfxy, pd.DataFrame) else build_dfxy
+            sub_viewer = trim_seed_viewer_to_obs(copy.deepcopy(base_viewer), sub_obs)
+            if not isinstance(sub_viewer.get("core_tiles"), dict) or len(sub_viewer.get("core_tiles", {})) == 0:
+                print("  Skipping", scene_val, "- no matching core tiles.")
+                scene_i += 1
+                continue
+            sub_run_hint = safe_tag(scene_val, 80)
+            catalog = _build_and_write_project_viewer(
+                sub_viewer,
+                sub_df,
+                sub_obs,
+                sub_dfxy,
+                meta,
+                out_root,
+                roi_mailbox,
+                provenance,
+                update_meta=False,
+                run_name_hint=sub_run_hint,
+            )
+            if catalog is None:
+                print("  Skipping", scene_val, "- catalog build failed.")
+            else:
+                built_count += 1
+                latest_viewer_data = discover_latest_seed_viewer(out_root)
+                latest_html = discover_latest_run_html(out_root)
+                if latest_viewer_data != "":
+                    last_viewer_data = os.path.abspath(latest_viewer_data)
+                    built_roots.append(os.path.dirname(os.path.abspath(latest_viewer_data)))
+                if latest_html != "":
+                    last_html = os.path.abspath(latest_html)
+            scene_i += 1
+        if built_count == 0:
+            print("No individual viewers were built.")
+            return None
+        _set_cvh_meta(
+            cvh_mode="project_per_slide_scene",
+            cvh_out_root=os.path.abspath(out_root),
+            cvh_seed_viewer=str(provenance.get("path", "")).strip(),
+            cvh_selection_view_count=built_count,
+            cvh_individual_viewer_roots=built_roots,
+            cvh_last_viewer_data=last_viewer_data,
+            cvh_last_html=last_html,
+            viewer_root=os.path.abspath(out_root),
+            figure_folder=str(meta.get("figure_folder", "")).strip(),
+            segmentation_root=str(meta.get("segmentation_root", "")).strip(),
+            segmentation_roots=list(meta.get("segmentation_roots", [])) if isinstance(meta.get("segmentation_roots", []), list) else [],
+        )
+        print("Done. Built individual viewers for", built_count, "of", len(unique_scenes), "slide_scene values.")
+        return (df, obs, dfxy)
+
+    catalog = _build_and_write_project_viewer(
+        base_viewer,
+        build_df,
+        build_obs,
+        build_dfxy,
+        meta,
+        out_root,
+        roi_mailbox,
+        provenance,
+        update_meta=True,
+    )
+    if catalog is None:
+        return None
+    print("Done.")
+    return (df, obs, dfxy)
+
+
+def infer_core_series_from_obs(obs):
+    if not isinstance(obs, pd.DataFrame):
+        return None
+    if not obs.index.is_unique:
+        raise ValueError("HTML ROI viewer requires unique obs index; duplicate cell indices found.")
+
+    candidates = []
+    try:
+        idx_ser = pd.Series(obs.index, index=obs.index, dtype="object")
+        candidates.append(("__index__", idx_ser))
+    except Exception:
+        pass
+
+    cols = list(obs.columns)
+    i = 0
+    while i < len(cols):
+        col = cols[i]
+        lc = str(col).lower()
+        if ("scene" in lc) or ("core" in lc) or ("slide" in lc) or ("coordinate" in lc):
+            try:
+                candidates.append((str(col), obs[col].astype(str)))
+            except Exception:
+                pass
+        i += 1
+
+    if len(candidates) == 0:
+        return None
+
+    best_score = -1.0
+    best_priority = -1
+    best_core = None
+    i = 0
+    while i < len(candidates):
+        name, ser = candidates[i]
+        parsed = parse_core_series(ser)
+        score = float(parsed.notna().mean())
+        priority = core_series_candidate_priority(name)
+        if score > best_score or (score == best_score and priority > best_priority):
+            best_score = score
+            best_priority = priority
+            best_core = parsed
+        i += 1
+
+    if best_core is None or best_score < 0.02:
+        return None
+    return best_core
+
+
+def core_series_candidate_priority(name):
+    low = str(name).strip().lower()
+    if low == "core":
+        return 6
+    if low == "slide_scene":
+        return 5
+    if "scene" in low:
+        return 4
+    if "core" in low:
+        return 3
+    if "slide" in low:
+        return 2
+    if "coordinate" in low:
+        return 1
+    if low == "__index__":
+        return 0
+    return -1
+
+
+def parse_core_series(ser):
+    s = ser.astype(str).str.strip()
+
+    m_scene = s.str.extract(r"(?i)scene[_-]?([A-Za-z])0*(\d{1,3})")
+    core_scene = m_scene[0].str.upper() + m_scene[1].str.lstrip("0")
+    core_scene = core_scene.mask(m_scene[0].isna())
+
+    m_core = s.str.extract(r"(?i)^([A-Za-z])0*(\d{1,3})$")
+    core_direct = m_core[0].str.upper() + m_core[1].str.lstrip("0")
+    core_direct = core_direct.mask(m_core[0].isna())
+
+    m_roi = s.str.extract(r"(?i)ROI0*(\d{1,3})(?!\d)")
+    roi_num = pd.to_numeric(m_roi[0], errors="coerce")
+    core_roi = pd.Series(np.nan, index=s.index, dtype="object")
+    valid = roi_num.dropna().astype(int).astype(str)
+    core_roi.loc[valid.index] = "A" + valid
+
+    out = core_scene.copy()
+    miss = out.isna()
+    out.loc[miss] = core_direct.loc[miss]
+    miss = out.isna()
+    out.loc[miss] = core_roi.loc[miss]
+    out = out.mask(out == "")
+    return out
+
+
+if __name__ == "__main__":
+    main()
