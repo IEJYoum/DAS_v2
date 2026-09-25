@@ -439,42 +439,30 @@ calculate them from the actual run_dir supplied by the writer.
 call_visu_html_7.py: Figures
 --------------------------------
 
+Do not restructure figure discovery or selection in this rework.
+
 Preserve the existing figure roots, folder matching, filename search text,
-view matching, subset matching, and GUI filters.
+view matching, subset matching, auto-selection behavior, entry shape, sidecar
+shape, and GUI filters.
 
-REPLACE dedupe_figure_entries_by_path(). Path-only dedupe currently confuses
-asset identity with display applicability.
+Figures are not spatial assets merely because they are PNG files. A heatmap,
+boxplot, or embedding may legitimately apply to all data, one group, one
+subset, or several views. Keep applicability keyed by the existing view and
+subset fields. Use slide_scene only for a figure that is explicitly declared
+to represent one spatial scene.
 
-Have figure discovery return two simple structures:
+KEEP:
 
-  figure_sources = {
-    "<figure_id>": {
-      "source_path": "...",
-      "filename": "...",
-      "family": "...",
-      "subfamily": "...",
-      "search_text": "..."
-    }
-  }
+- discover_view_figure_specs_cached
+- build_figure_entries_from_specs
+- build_project_figure_artifacts behavior
+- dedupe_figure_entries_by_path behavior for this pass
+- figure_entries.js payload and browser filtering behavior
 
-  figure_links = [
-    {
-      "figure_id": "...",
-      "view_id": "..." or "",
-      "subset_id": "..." or ""
-    }
-  ]
-
-One source file is staged at most once. It may retain multiple legitimate
-view/subset links without duplicating the file record.
-
-UPDATE discover_view_figure_specs_cached() and
-build_figure_entries_from_specs() only at their output boundary. Do not rewrite
-the working matching rules in the same pass.
-
-Figure discovery and preflight report the number of unique files and links
-before staging. No figures selected or no figure folder must remain a valid
-core-viewer run.
+The only figure change in the engine pass is failure isolation during portable
+asset staging. Missing, inaccessible, or invalid figures are skipped and
+reported without blocking the core viewer. No figures selected or no figure
+folder remains a valid core-viewer run.
 
 
 visu_html_functions7.py: One Explicit Writer
@@ -665,7 +653,7 @@ Browser Contract
 Preserve:
 
 - viewer_data embedded in the main HTML
-- figure_entries.js sidecar loading
+- figure_entries.js sidecar loading and current payload shape
 - one ROI payload sidecar per scene
 - ROI and threshold editor tabs
 - localStorage metadata handoff to editor tabs
@@ -677,10 +665,8 @@ button availability should derive from successfully materialized payloads.
 Where the UI currently shows a live button for a failed feature, disable it
 and show the recorded reason.
 
-figure_entries.js should carry the compact figure_sources + figure_links
-payload rather than flattening every association back into duplicate entries.
-Update the one sidecar loader/filter boundary in the browser to consume that
-shape. Keep the filename and dynamic-script loading mechanism unchanged.
+Do not make figure entries slide_scene-keyed. Existing view/subset links remain
+the source of applicability unless an entry is explicitly spatial.
 
 
 Implementation Order

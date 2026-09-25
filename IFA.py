@@ -14,7 +14,6 @@ import os
 import csv
 import importlib
 import importlib.util
-import shutil
 import sys
 from pathlib import Path
 import numpy as np
@@ -220,25 +219,6 @@ def _viewer_project_root():
     if str(SAVEFOLDER).strip() != "" and os.path.isdir(SAVEFOLDER):
         return os.path.abspath(os.path.normpath(SAVEFOLDER))
     return os.path.abspath(os.getcwd())
-
-
-def _remove_transient_manual_viewer_run(seed_viewer_path, viewer_root):
-    seed = Path(str(seed_viewer_path or "").strip())
-    if not seed.is_file() or seed.name != "viewer_data.json":
-        return
-    try:
-        run_dir = seed.resolve().parent
-        root = Path(str(viewer_root or "")).resolve()
-        if run_dir.parent.name != "viewer_runs":
-            return
-        run_dir.relative_to(root)
-    except Exception:
-        return
-    try:
-        shutil.rmtree(run_dir)
-        print("Removed transient manual seed viewer run:", run_dir)
-    except Exception as exc:
-        print("Could not remove transient manual seed viewer run:", exc)
 
 
 def _resolve_roi_mailbox_dir(project_root, create=True):
@@ -602,7 +582,7 @@ def main(dataFolder=DATAFOLDER,saveFolder=SAVEFOLDER,runmode=None):
 def htmlViewer(df=9,obs=9,dfxy=9):
     """Resolve viewer inputs from the active project, then launch the HTML viewer once."""
     _sync_cvh_meta_sink()
-    if not cvh.preflight_project_viewer_obs(obs):
+    if not cvh.validate_standard_triplet(df, obs, dfxy):
         print("Viewer preflight failed. No viewer assets or HTML were written.")
         return(df,obs,dfxy)
     current = _viewer_project_root()
@@ -617,18 +597,6 @@ def htmlViewer(df=9,obs=9,dfxy=9):
     if not isinstance(viewer_context, dict):
         print("Could not resolve HTML viewer context from the current project.")
         return(df,obs,dfxy)
-    viewer_root = str(viewer_context.get("viewer_root", "")).strip()
-    transient_seed_viewer = ""
-    if not cvh.has_reusable_viewer_assets(viewer_root, obs=obs):
-        print("No reusable viewer assets detected. Starting manual asset creation runtime.")
-        built_seed = cvh.run_manual_asset_creation(viewer_root, obs, project_folder=current)
-        if str(built_seed).strip() == "" or (not os.path.isfile(str(built_seed))):
-            print("Manual asset creation did not produce reusable viewer assets. Returning without launching HTML viewer.")
-            return(df,obs,dfxy)
-        transient_seed_viewer = str(built_seed)
-        viewer_context["seed_viewer_path"] = str(built_seed)
-        viewer_context["seed_viewer_just_built"] = True
-        print("Manual asset creation finished. Continuing to HTML generation.")
     mailbox = _ensure_roi_mailbox_session(current)
     roi_mailbox = {
         "mailbox_dir": str(mailbox.get("mailbox_dir", "")) if isinstance(mailbox, dict) else "",
@@ -640,12 +608,6 @@ def htmlViewer(df=9,obs=9,dfxy=9):
         meta = cvh._cvh_meta_sink()
     except Exception:
         meta = {}
-    if (
-        transient_seed_viewer != ""
-        and str(meta.get("cvh_mode", "")).startswith("project")
-        and str(meta.get("cvh_last_viewer_data", "")).strip() != os.path.abspath(transient_seed_viewer)
-    ):
-        _remove_transient_manual_viewer_run(transient_seed_viewer, viewer_root)
     viewer_html = str(meta.get("cvh_last_html", "")).strip()
     if viewer_html != "" and os.path.isfile(viewer_html):
         try:

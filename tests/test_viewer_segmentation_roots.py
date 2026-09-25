@@ -125,7 +125,7 @@ class ViewerSegmentationRootTests(unittest.TestCase):
             choice = viewer.prompt_per_slide_scene_viewers(obs)
 
         self.assertTrue(choice)
-        self.assertIn("Build individual viewer per slide_scene", prompt.call_args.args[0])
+        self.assertIn("Build individual viewer per slide_scene", prompt.call_args[0][0])
 
     def test_viewer_preflight_reports_renamed_slide_scene(self):
         obs = viewer.pd.DataFrame({"slide_scene.1": ["ROI01", "ROI02"]})
@@ -159,6 +159,7 @@ class ViewerSegmentationRootTests(unittest.TestCase):
                     [{"value": "class"}],
                     cache=cache,
                 )
+                first_walk_count = walk.call_count
                 second = viewer.candidate_descendant_figure_roots(
                     str(root),
                     [{"value": "class"}],
@@ -167,7 +168,8 @@ class ViewerSegmentationRootTests(unittest.TestCase):
 
             self.assertEqual(len(first), 1)
             self.assertEqual(first, second)
-            self.assertEqual(walk.call_count, 1)
+            self.assertGreater(first_walk_count, 0)
+            self.assertEqual(walk.call_count, first_walk_count)
 
             path = str((root / "class" / "plot.png").resolve())
             entries = viewer.dedupe_figure_entries_by_path(
@@ -183,11 +185,11 @@ class ViewerSegmentationRootTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "source.png"
             source.write_bytes(b"png bytes")
-            registry, run_dir, _registry_path = viewer_html.prepare_run_context(outdir=str(root / "viewer"))
+            paths, registry = viewer_html.prepare_run_paths(str(root / "viewer"))
 
-            rel, _key = viewer_html.ensure_figure_asset(str(source), registry)
+            rel, _key = viewer_html.ensure_figure_asset(str(source), registry, paths)
 
-            staged = Path(run_dir, rel)
+            staged = Path(paths["run_dir"], rel)
             self.assertTrue(staged.is_file())
             self.assertFalse(rel.startswith("file:"))
             self.assertEqual(staged.read_bytes(), source.read_bytes())

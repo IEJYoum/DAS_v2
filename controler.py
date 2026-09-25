@@ -2662,7 +2662,6 @@ def _run_legacy_call(
             {
                 "viewer_mode": legacy_meta.get("cvh_mode"),
                 "viewer_out_root": legacy_meta.get("cvh_out_root"),
-                "viewer_seed_path": legacy_meta.get("cvh_seed_viewer"),
                 "viewer_selection_view_count": legacy_meta.get("cvh_selection_view_count"),
             }
         )

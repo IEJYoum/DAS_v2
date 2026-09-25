@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import copy
 import sys
 from datetime import datetime
 
@@ -288,7 +287,6 @@ def normalize_viewer_context(context):
     figure_folder = str(context.get("figure_folder", "")).strip()
     viewer_root = str(context.get("viewer_root", "")).strip()
     dataset_stem = str(context.get("dataset_stem", "")).strip()
-    seed_path = str(context.get("seed_viewer_path", "")).strip()
     segmentation_roots = _normalize_path_list(list(context.get("segmentation_roots", [])), keep_missing=True)
     single_seg = str(context.get("segmentation_root", "")).strip()
     if len(segmentation_roots) == 0 and single_seg != "":
@@ -301,17 +299,10 @@ def normalize_viewer_context(context):
         "segmentation_root": segmentation_roots[0] if len(segmentation_roots) > 0 else "",
         "segmentation_roots": segmentation_roots,
         "viewer_root": normalize_stored_path(viewer_root) if viewer_root != "" else "",
-        "seed_viewer_path": normalize_stored_path(seed_path) if seed_path != "" else "",
     }
     per_slide_scene_viewers = _optional_bool(context.get("per_slide_scene_viewers", None))
     if per_slide_scene_viewers is not None:
         out["per_slide_scene_viewers"] = per_slide_scene_viewers
-    use_existing_seed_viewer = _optional_bool(context.get("use_existing_seed_viewer", None))
-    if use_existing_seed_viewer is not None:
-        out["use_existing_seed_viewer"] = use_existing_seed_viewer
-    seed_viewer_just_built = _optional_bool(context.get("seed_viewer_just_built", None))
-    if seed_viewer_just_built is not None:
-        out["seed_viewer_just_built"] = seed_viewer_just_built
     if out["dataset_stem"] == "" and out["data_folder"] != "":
         out["dataset_stem"] = os.path.basename(out["data_folder"])
     return out
@@ -334,8 +325,273 @@ def preflight_project_viewer_obs(obs):
     return True
 
 
+def validate_standard_triplet(df, obs, dfxy):
+    tables = [("df", df), ("obs", obs), ("dfxy", dfxy)]
+    for name, table in tables:
+        if not isinstance(table, pd.DataFrame):
+            print("HTML viewer requires", name, "to be a pandas DataFrame.")
+            return False
+        if table.shape[0] == 0:
+            print("HTML viewer requires", name, "to contain rows.")
+            return False
+        if not table.index.is_unique:
+            print("HTML viewer requires a unique", name, "index.")
+            return False
+    if not df.index.equals(obs.index):
+        print("HTML viewer requires df.index to exactly match obs.index.")
+        return False
+    if not df.index.equals(dfxy.index):
+        print("HTML viewer requires df.index to exactly match dfxy.index.")
+        return False
+    return preflight_project_viewer_obs(obs)
+
+
+def _manifest_from_filepaths(filepaths, obs):
+    if len(list(filepaths or [])) == 0:
+        return {}
+    templates = build_templates(filepaths)
+    buckets = build_direct_viewer_buckets(templates)
+    manifest = build_identity_manifest_from_direct_buckets(buckets)
+    required = set(_obs_slide_scene_values(obs))
+    return {scene: manifest[scene] for scene in manifest if scene in required}
+
+
+def _asset_input_specs(values):
+    return [str(value).strip() for value in list(values or []) if str(value).strip() != ""]
+
+
+def _manifest_from_registry(out_root, obs, expected_inputs=None):
+    registry = load_asset_registry(out_root)
+    expected = _asset_input_specs(expected_inputs)
+    recorded = _asset_input_specs(registry.get("source_specs", []) if isinstance(registry, dict) else [])
+    if len(expected) > 0 and recorded != expected:
+        return {}
+    tiles = build_core_tiles_from_asset_registry(out_root)
+    if len(tiles) == 0:
+        return {}
+    manifest = build_scene_manifest_from_core_tiles(tiles)
+    required = set(_obs_slide_scene_values(obs))
+    return {scene: manifest[scene] for scene in manifest if scene in required}
+
+
+def resolve_standard_scene_manifest(obs, project_context):
+    required = _obs_slide_scene_values(obs)
+    if len(required) == 0:
+        return {}
+    data_folder = str(project_context.get("data_folder", "")).strip()
+    out_root = str(project_context.get("viewer_root", "")).strip()
+    saved_inputs = load_inherited_viewer_asset_inputs(data_folder)
+    project_context["_viewer_asset_inputs"] = list(saved_inputs)
+    manifest = _manifest_from_registry(out_root, obs, expected_inputs=saved_inputs)
+
+    missing = [scene for scene in required if scene not in manifest]
+    if len(missing) > 0 and len(saved_inputs) > 0:
+        filepaths = []
+        for item in saved_inputs:
+            filepaths.extend(expand_input_line(item))
+        direct = _manifest_from_filepaths(dedupe_keep_order(filepaths), obs)
+        for scene in direct:
+            if scene not in manifest:
+                manifest[scene] = direct[scene]
+
+    missing = [scene for scene in required if scene not in manifest]
+    if len(missing) > 0:
+        roots = viewer_convention_root_candidates(
+            project_context,
+            out_root,
+            list(project_context.get("segmentation_roots", []) or []),
+        )
+        convention_tiles = build_core_tiles_from_convention_roots(roots, obs)
+        convention_manifest = build_scene_manifest_from_core_tiles(convention_tiles)
+        for scene in convention_manifest:
+            if scene not in manifest:
+                manifest[scene] = convention_manifest[scene]
+
+    missing = [scene for scene in required if scene not in manifest]
+    if len(missing) > 0:
+        print("Viewer images unresolved for slide_scene value(s):", _scene_list_text(missing, limit=12))
+        filepaths, input_lines = prompt_filepaths(
+            default_input_lines=saved_inputs,
+        )
+        if len(filepaths) > 0:
+            direct = _manifest_from_filepaths(filepaths, obs)
+            manifest.update(direct)
+            save_viewer_asset_inputs(data_folder, input_lines)
+            project_context["_viewer_asset_inputs"] = list(input_lines)
+
+    return {scene: manifest[scene] for scene in required if scene in manifest}
+
+
+def build_run_plan(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=None, threshold_store=None, run_options=None):
+    validate_slide_scene_manifest(scene_manifest)
+    catalog = build_catalog_from_identity_manifest(scene_manifest, obs)
+    meta = dict(project_context or {})
+    segmentation_map = dict(meta.get("_segmentation_by_slide_scene", {}) or {})
+    if len(segmentation_map) == 0:
+        segmentation_map = build_segmentation_map_from_manifest(scene_manifest)
+    meta["_segmentation_by_slide_scene"] = segmentation_map
+
+    core_tiles = catalog["core_tiles"]
+    core_names = list(core_tiles.keys())
+    core_positions = build_project_core_positions(obs, core_names)
+    view_sets = catalog["view_sets"]
+    subset_options, subset_overlays, overlay_report = build_project_subset_artifacts(
+        catalog,
+        view_sets,
+        obs,
+        dfxy,
+        meta,
+        str(meta.get("viewer_root", "")),
+        core_positions,
+        segmentation_by_slide_scene=segmentation_map,
+    )
+    figure_entries = build_project_figure_artifacts(view_sets, subset_options, meta)
+    asset_types = collect_asset_type_catalog_from_core_tiles(core_tiles)
+    asset_types = extend_asset_type_catalog_from_figure_entries(asset_types, figure_entries)
+
+    dataset_label = derive_dataset_label(meta, obs)
+    catalog.update({
+        "version": 2,
+        "dataset_label": dataset_label,
+        "viewer_filename_base": derive_viewer_filename_base(dataset_label),
+        "figure_entries": figure_entries,
+        "subset_options": subset_options,
+        "subset_overlays": subset_overlays,
+        "overlay_backend": {
+            "segmentation_root": str(overlay_report.get("segmentation_root", "")),
+            "segmentation_roots": list(overlay_report.get("segmentation_roots", [])),
+            "segmentation_count": int(overlay_report.get("segmentation", 0)),
+            "centroid_count": int(overlay_report.get("centroid", 0)),
+            "none_count": int(overlay_report.get("none", 0)),
+            "centroid_scenes": list(overlay_report.get("centroid_scenes", [])),
+        },
+        "roi_data": build_roi_payload_plan(
+            catalog,
+            obs,
+            dfxy,
+            df=df,
+            meta=meta,
+            out_root=str(meta.get("viewer_root", "")),
+            segmentation_by_slide_scene=segmentation_map,
+        ),
+        "roi_mailbox": build_roi_mailbox_payload(roi_mailbox),
+        "threshold_store": build_threshold_store_payload(
+            obs,
+            df,
+            core_names,
+            core_positions,
+            meta=meta,
+            roi_mailbox=roi_mailbox,
+            out_root=str(meta.get("viewer_root", "")),
+        ),
+        "asset_type_catalog": asset_types,
+        "asset_input_specs": list(meta.get("_viewer_asset_inputs", []) or []),
+    })
+    if isinstance(threshold_store, dict):
+        catalog["threshold_store"] = threshold_store
+    return catalog
+
+
+def _build_viewer_run(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=None, threshold_store=None, run_options=None):
+    if not validate_standard_triplet(df, obs, dfxy):
+        return {"status": "failed", "errors": ["standard triplet validation failed"]}
+    context = dict(project_context or {})
+    out_root = str(context.get("viewer_root", "")).strip()
+    if out_root == "":
+        raise ValueError("viewer_root is required")
+
+    required = _obs_slide_scene_values(obs)
+    available = [scene for scene in required if scene in scene_manifest]
+    missing = [scene for scene in required if scene not in scene_manifest]
+    if len(available) == 0:
+        print("No current slide_scene values have resolved image assets. No viewer was written.")
+        return {"status": "failed", "errors": ["no resolved image assets"]}
+    if len(missing) > 0:
+        print("Viewer image preflight missing:", _scene_list_text(missing, limit=12))
+        raw = str(cvh_input(
+            "Build viewer for resolved slide_scene values only? (y/n) [n]: ",
+            default="n",
+            prompt_meta={"options": [
+                {"value": "n", "label": "Stop", "description": "Return without writing a partial viewer."},
+                {"value": "y", "label": "Continue", "description": "Build only scenes with exact image matches."},
+            ]},
+        )).strip().lower()
+        if raw not in ["y", "yes", "continue"]:
+            return {"status": "failed", "errors": ["unresolved image scenes"]}
+        df, obs, dfxy = filter_tables_to_slide_scenes(df, obs, dfxy, available)
+        scene_manifest = {scene: scene_manifest[scene] for scene in available}
+
+    seg_roots = resolve_segmentation_roots(context)
+    segmentation_map = build_segmentation_map_from_manifest(scene_manifest)
+    for scene in scene_manifest:
+        if scene in segmentation_map:
+            continue
+        seg = _find_seg_file_multi(seg_roots, scene)
+        if seg is not None:
+            segmentation_map[scene] = seg
+    unresolved_masks = [scene for scene in scene_manifest if scene not in segmentation_map]
+    if len(seg_roots) > 0:
+        print("Viewer segmentation preflight: full slide_scene matches.")
+        for scene in scene_manifest:
+            print("-", scene, "->", segmentation_map.get(scene, "UNRESOLVED"))
+        if len(unresolved_masks) > 0:
+            raw = str(cvh_input(
+                "Continue with centroid-only overlays for unresolved slide_scene values? (y/n) [n]: ",
+                default="n",
+                prompt_meta={"options": [
+                    {"value": "n", "label": "Stop", "description": "Return without starting viewer generation."},
+                    {"value": "y", "label": "Continue", "description": "Use centroid-only overlays for unresolved scenes."},
+                ]},
+            )).strip().lower()
+            if raw not in ["y", "yes", "continue"]:
+                return {"status": "failed", "errors": ["unresolved segmentation scenes"]}
+    context["_segmentation_by_slide_scene"] = segmentation_map
+
+    options = dict(run_options or {})
+    per_scene = bool(options.get("per_slide_scene_viewers", context.get("per_slide_scene_viewers", False)))
+    scene_groups = [[scene] for scene in available] if per_scene and len(available) > 1 else [available]
+    results = []
+    for scenes in scene_groups:
+        build_df, build_obs, build_dfxy = filter_tables_to_slide_scenes(df, obs, dfxy, scenes)
+        build_manifest = {scene: scene_manifest[scene] for scene in scenes}
+        catalog = build_run_plan(
+            build_df,
+            build_obs,
+            build_dfxy,
+            build_manifest,
+            context,
+            roi_mailbox=roi_mailbox,
+            threshold_store=threshold_store,
+            run_options=options,
+        )
+        if len(scene_groups) > 1:
+            catalog["run_name_hint"] = safe_tag(scenes[0], 80)
+        results.append(vhf.write_viewer_plan(catalog, outdir=out_root))
+
+    last = dict(results[-1])
+    last["runs"] = results
+    return last
+
+
+def build_viewer_run(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=None, threshold_store=None, run_options=None):
+    ifprog.reset_progress(4, "Project viewer: validating current data and assets.")
+    try:
+        return _build_viewer_run(
+            df,
+            obs,
+            dfxy,
+            scene_manifest,
+            project_context,
+            roi_mailbox=roi_mailbox,
+            threshold_store=threshold_store,
+            run_options=run_options,
+        )
+    finally:
+        ifprog.clear_progress()
+
+
 def main(df=9, obs=9, dfxy=9, *args, **kwargs):
-    if not preflight_project_viewer_obs(obs):
+    if not validate_standard_triplet(df, obs, dfxy):
         print("Viewer preflight failed. No viewer assets or HTML were written.")
         return (df, obs, dfxy)
     meta = _cvh_meta_sink()
@@ -351,115 +607,37 @@ def main(df=9, obs=9, dfxy=9, *args, **kwargs):
         context_ok = isinstance(obs, pd.DataFrame) and obs.shape[0] > 0 and (
             str(meta.get("data_folder", "")).strip() != "" or str(meta.get("figure_folder", "")).strip() != ""
         )
-    if context_ok:
-        if resolved is None:
-            resolved = prompt_project_viewer_context(meta, obs=obs)
-        if resolved is not None:
-            out = run_context_mode(df, obs, dfxy, resolved=resolved, roi_mailbox=roi_mailbox)
-            if out is not None:
-                return out
-            if viewer_context is not None:
-                print("HTML viewer could not build a project-aware run from the current project. No viewer was written.")
-                return (df, obs, dfxy)
-    print("Project viewer context is not available or no reusable assets were found; using manual asset mode.")
-    print("In manual mode, project-aware grouping, subset menus, and segmentation prompting will be limited.")
-
-    out_root = ""
-    if isinstance(resolved, dict):
-        out_root = str(resolved.get("viewer_root", "")).strip()
-    if out_root == "":
-        out_root = prompt_output_root(find_default_out_root(meta))
-    else:
-        print("Manual mode: using viewer assets/output folder:", out_root)
-    default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
-    project_folder = str(resolved.get("data_folder", "") if isinstance(resolved, dict) else meta.get("data_folder", "")).strip()
-    saved_inputs = load_inherited_viewer_asset_inputs(project_folder)
-    filepaths, input_lines = prompt_filepaths(
-        default_items=default_files,
-        default_label=default_seed,
-        default_input_lines=saved_inputs,
-        return_input_lines=True,
-    )
-    if len(filepaths) == 0:
-        print("No filepaths provided. Returning.")
+    if not context_ok:
+        print("Project viewer context is unavailable. Standard DAS viewer was not started.")
         return (df, obs, dfxy)
-    save_viewer_asset_inputs(project_folder, input_lines)
-
-    if should_reuse_default_seed_viewer(filepaths, default_files, default_seed, out_root):
-        seed_viewer = load_json_file(default_seed, default={})
-        if isinstance(seed_viewer, dict) and len(seed_viewer) > 0:
-            print("Manual mode: reusing latest seed viewer directly.")
-            reuse_seed_viewer_run(seed_viewer, default_seed, out_root)
-            _set_cvh_meta(
-                cvh_mode="manual_seed_reuse",
-                cvh_out_root=os.path.abspath(out_root),
-                cvh_seed_viewer=os.path.abspath(default_seed),
-                cvh_selection_view_count=len(list(seed_viewer.get("view_sets", []))) if isinstance(seed_viewer.get("view_sets", []), list) else 0,
-            )
-            print("Done.")
-            return (df, obs, dfxy)
-
-    catalog = build_manual_asset_catalog(filepaths, obs)
-    if catalog is None:
+    if resolved is None:
+        resolved = prompt_project_viewer_context(meta, obs=obs)
+    if not isinstance(resolved, dict):
+        print("Could not resolve HTML viewer context from the current project.")
+        return (df, obs, dfxy)
+    manifest = resolve_standard_scene_manifest(obs, resolved)
+    result = build_viewer_run(
+        df,
+        obs,
+        dfxy,
+        manifest,
+        resolved,
+        roi_mailbox=roi_mailbox,
+        run_options={"per_slide_scene_viewers": resolved.get("per_slide_scene_viewers", False)},
+    )
+    if str(result.get("status", "")) != "ready":
+        print("HTML viewer was not written:", "; ".join(list(result.get("errors", []))))
         return (df, obs, dfxy)
     _set_cvh_meta(
-        cvh_mode="manual",
-        cvh_out_root=os.path.abspath(out_root),
-        cvh_seed_viewer="",
-        cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
+        cvh_mode="project",
+        cvh_out_root=os.path.abspath(str(resolved.get("viewer_root", ""))),
+        cvh_last_viewer_data=str(result.get("viewer_data_path", "")),
+        cvh_last_html=str(result.get("html_path", "")),
+        cvh_build_report=str(result.get("build_report_path", "")),
+        cvh_selection_view_count=len(list(result.get("viewer_data", {}).get("view_sets", []))),
     )
-    vhf.build(catalog, out_root)
     print("Done.")
     return (df, obs, dfxy)
-
-
-def run_manual_asset_creation(out_root, obs, project_folder=""):
-    out_root = str(out_root or "").strip()
-    if out_root == "":
-        out_root = prompt_output_root(DEFAULT_OUT_ROOT)
-    else:
-        print("Manual asset creation: using viewer assets/output folder:", out_root)
-
-    default_files, default_seed = discover_default_manual_filepaths(out_root, obs=obs)
-    saved_inputs = load_inherited_viewer_asset_inputs(project_folder)
-    filepaths, input_lines = prompt_filepaths(
-        default_items=default_files,
-        default_label=default_seed,
-        default_input_lines=saved_inputs,
-        return_input_lines=True,
-    )
-    if len(filepaths) == 0:
-        print("No filepaths provided. Returning without creating viewer assets.")
-        return ""
-    save_viewer_asset_inputs(project_folder, input_lines)
-
-    if should_reuse_default_seed_viewer(filepaths, default_files, default_seed, out_root):
-        seed_viewer = load_json_file(default_seed, default={})
-        if isinstance(seed_viewer, dict) and len(seed_viewer) > 0:
-            print("Manual asset creation: reusing latest seed viewer directly.")
-            reuse_seed_viewer_run(seed_viewer, default_seed, out_root)
-            _set_cvh_meta(
-                cvh_mode="manual_seed_reuse",
-                cvh_out_root=os.path.abspath(out_root),
-                cvh_seed_viewer=os.path.abspath(default_seed),
-                cvh_selection_view_count=len(list(seed_viewer.get("view_sets", []))) if isinstance(seed_viewer.get("view_sets", []), list) else 0,
-            )
-            print("Done.")
-            return os.path.abspath(default_seed)
-
-    catalog = build_manual_asset_catalog(filepaths, obs)
-    if catalog is None:
-        return ""
-    _set_cvh_meta(
-        cvh_mode="manual",
-        cvh_out_root=os.path.abspath(out_root),
-        cvh_seed_viewer="",
-        cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
-    )
-    vhf.build(catalog, out_root)
-    print("Done.")
-    latest = discover_latest_seed_viewer(out_root)
-    return os.path.abspath(latest) if str(latest).strip() != "" else ""
 
 
 def asset_registry_path(out_root):
@@ -492,6 +670,20 @@ def build_core_tiles_from_asset_registry(out_root):
             continue
         tiff_path = str(item.get("tiff", "")).strip()
         channel_source = item.get("channel_source")
+        source_path = source_path_text(channel_source) if isinstance(channel_source, dict) else tiff_path
+        if not os.path.isfile(source_path):
+            rel = str(item.get("rel", "") or "")
+            pooled_path = os.path.join(out_root, vhf.POOL_DIRNAME, "channels", os.path.basename(rel))
+            if os.path.isfile(pooled_path):
+                channel_source = {
+                    "path": os.path.abspath(pooled_path),
+                    "source_kind": "cached_png",
+                    "marker": str(item.get("marker", "") or "channel"),
+                }
+                tiff_path = ""
+            else:
+                channel_source = None
+                tiff_path = ""
         if tiff_path == "" and not isinstance(channel_source, dict):
             continue
         slide_scene = normalize_slide_scene(item.get("slide_scene", ""))
@@ -621,26 +813,13 @@ def viewer_convention_root_candidates(meta, out_root, segmentation_roots):
     return roots
 
 
-def has_reusable_viewer_assets(out_root, obs=None):
-    seed_path = discover_latest_seed_viewer(out_root, obs=obs)
-    if seed_path not in [None, ""] and os.path.isfile(seed_path):
-        return True
-    core_tiles = build_core_tiles_from_asset_registry(out_root)
-    if obs is not None and len(core_tiles) > 0:
-        return seed_viewer_compatible_with_obs({"core_tiles": core_tiles}, obs)
-    return len(core_tiles) > 0
-
-
-def prompt_filepaths(default_items=None, default_label="", default_input_lines=None, return_input_lines=False):
+def prompt_filepaths(default_input_lines=None):
     saved_inputs = [str(item).strip() for item in list(default_input_lines or []) if str(item).strip() != ""]
     print("Submit an asset source folder, file, or glob (e.g. C:/path/*.tiff).")
     print("A Sam/FCS Slides folder is accepted directly.")
     print("Press Enter on empty line to finish.")
     if len(saved_inputs) > 0:
         print("Press Enter immediately to reuse saved asset input(s):", " || ".join(saved_inputs))
-    elif isinstance(default_items, list) and len(default_items) > 0:
-        label = str(default_label or "latest seed viewer").strip()
-        print("Press Enter immediately to reuse defaults from:", label)
 
     out = []
     input_lines = []
@@ -654,9 +833,6 @@ def prompt_filepaths(default_items=None, default_label="", default_input_lines=N
                     out.extend(expand_input_line(saved_inputs[i]))
                     i += 1
                 print("  using saved input(s) ->", len(dedupe_keep_order(out)), "file(s)")
-            elif len(out) == 0 and isinstance(default_items, list) and len(default_items) > 0:
-                print("  using defaults ->", len(default_items), "file(s)")
-                out = [os.path.normpath(str(x)) for x in default_items]
             break
         line = strip_quotes(line)
         if line == "":
@@ -675,88 +851,7 @@ def prompt_filepaths(default_items=None, default_label="", default_input_lines=N
             i += 1
 
     out = dedupe_keep_order(out)
-    if return_input_lines:
-        return out, input_lines
-    return out
-
-
-def discover_default_manual_filepaths(out_root, obs=None):
-    seed_path = discover_latest_seed_viewer(out_root, obs=obs)
-    if seed_path in [None, ""] or (not os.path.isfile(seed_path)):
-        return [], ""
-    seed_viewer = load_json_file(seed_path, default={})
-    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
-    if not isinstance(core_tiles, dict):
-        return [], ""
-    out = []
-    for core in core_tiles:
-        tiles = list(core_tiles.get(core, []))
-        i = 0
-        while i < len(tiles):
-            src_paths = list(tiles[i].get("source_paths", []))
-            j = 0
-            while j < len(src_paths):
-                fp = os.path.normpath(str(src_paths[j]))
-                if os.path.isfile(fp) and is_supported_asset_file(fp):
-                    out.append(fp)
-                j += 1
-            i += 1
-    return dedupe_keep_order(out), os.path.abspath(seed_path)
-
-
-def seed_viewer_root(seed_path):
-    try:
-        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(seed_path))))
-    except Exception:
-        return ""
-
-
-def should_reuse_default_seed_viewer(filepaths, default_items, default_seed, out_root):
-    if not isinstance(default_items, list) or len(default_items) == 0:
-        return False
-    if default_seed in [None, ""] or (not os.path.isfile(default_seed)):
-        return False
-    lhs = [os.path.abspath(os.path.normpath(str(x))) for x in list(filepaths or [])]
-    rhs = [os.path.abspath(os.path.normpath(str(x))) for x in list(default_items or [])]
-    if lhs != rhs:
-        return False
-    seed_root = seed_viewer_root(default_seed)
-    if seed_root == "":
-        return False
-    return os.path.abspath(os.path.normpath(out_root)) == os.path.abspath(os.path.normpath(seed_root))
-
-
-def reuse_seed_viewer_run(seed_viewer, seed_path, out_root):
-    run_name_hint = str(seed_viewer.get("dataset_label", "") or seed_viewer.get("viewer_filename_base", "")).strip() if isinstance(seed_viewer, dict) else ""
-    registry, run_dir, registry_path = vhf.prepare_run_context(outdir=out_root, run_name_hint=run_name_hint)
-    viewer_data = json.loads(json.dumps(seed_viewer))
-    viewer_data["generated_at"] = datetime.utcnow().isoformat() + "Z"
-    if str(viewer_data.get("seed_viewer_path", "")).strip() == "":
-        viewer_data["seed_viewer_path"] = os.path.abspath(seed_path)
-    if str(viewer_data.get("seed_viewer_label", "")).strip() == "":
-        viewer_data["seed_viewer_label"] = os.path.basename(os.path.dirname(os.path.abspath(seed_path)))
-    vhf.write_viewer_run(run_dir, registry_path, registry, viewer_data)
-    return viewer_data
-
-
-def prompt_output_root(default_root=None):
-    if default_root is None or str(default_root).strip() == "":
-        default_root = DEFAULT_OUT_ROOT
-    default_root = normalize_stored_path(default_root)
-    while True:
-        s = input("Output root folder [" + str(default_root) + "]: ").strip()
-        if s == "":
-            s = str(default_root)
-        s = strip_quotes(s)
-        s = normalize_stored_path(s)
-        if s == "":
-            print("Path is not usable on this system. Please enter a native path.")
-            continue
-        try:
-            os.makedirs(s, exist_ok=True)
-            return s
-        except Exception as exc:
-            print("Could not create output folder:", exc)
+    return out, input_lines
 
 
 def load_json_file(path, default=None):
@@ -848,38 +943,6 @@ def prompt_project_viewer_context(meta, obs=None):
     except Exception as exc:
         print("Could not save viewer project settings:", exc)
 
-    seed_path = discover_latest_seed_viewer(viewer_root, obs=obs)
-    use_existing_seed_viewer = None
-    if seed_path == "":
-        any_seed = discover_latest_seed_viewer(viewer_root)
-        if any_seed != "":
-            print("No compatible reusable viewer_data.json found under:", viewer_root)
-        else:
-            print("No reusable viewer assets found under:", viewer_root)
-    else:
-        seed_name = os.path.basename(str(seed_path).strip())
-        raw = strip_quotes(
-            cvh_input(
-                "Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ",
-                default="y",
-                prompt_meta={
-                    "options": [
-                        {
-                            "value": "y",
-                            "label": "Use assets",
-                            "description": "Reuse the existing viewer asset map and write a fresh project-aware viewer run.",
-                        },
-                        {
-                            "value": "n",
-                            "label": "Skip assets",
-                            "description": "Try to rebuild from the asset registry instead.",
-                        },
-                    ]
-                },
-            ).strip()
-        ).lower()
-        use_existing_seed_viewer = raw in ["", "y", "yes", "use"]
-
     # Ask before any asset discovery/building so long viewer work needs no input.
     per_slide_scene_viewers = prompt_per_slide_scene_viewers(obs)
 
@@ -900,95 +963,8 @@ def prompt_project_viewer_context(meta, obs=None):
         "segmentation_root": segmentation_roots[0] if len(segmentation_roots) > 0 else "",
         "segmentation_roots": segmentation_roots,
         "viewer_root": viewer_root,
-        "seed_viewer_path": seed_path,
-        "use_existing_seed_viewer": use_existing_seed_viewer,
         "per_slide_scene_viewers": per_slide_scene_viewers,
     }
-
-
-def seed_viewer_compatible_with_obs(seed_viewer, obs):
-    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
-    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
-        return False
-    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
-        return True
-    if len(missing_obs_slide_scenes(seed_viewer, obs)) > 0:
-        return False
-    trimmed = trim_seed_viewer_to_obs(seed_viewer, obs)
-    trimmed_tiles = trimmed.get("core_tiles", {}) if isinstance(trimmed, dict) else {}
-    return isinstance(trimmed_tiles, dict) and len(trimmed_tiles) > 0
-
-
-def discover_latest_seed_viewer(out_root, obs=None):
-    runs_dir = os.path.join(out_root, vhf.RUNS_DIRNAME)
-    if not os.path.isdir(runs_dir):
-        return ""
-    names = []
-    try:
-        names = os.listdir(runs_dir)
-    except Exception:
-        names = []
-    dirs = []
-    i = 0
-    while i < len(names):
-        full = os.path.join(runs_dir, names[i])
-        if os.path.isdir(full):
-            dirs.append(full)
-        i += 1
-    dirs = sorted(
-        dirs,
-        key=lambda p: (
-            os.path.getmtime(p) if os.path.exists(p) else 0,
-            os.path.basename(p).lower(),
-        ),
-        reverse=True,
-    )
-    i = len(dirs) - 1
-    i = 0
-    while i < len(dirs):
-        candidate = os.path.join(dirs[i], vhf.VIEWER_DATA_FN)
-        if os.path.isfile(candidate):
-            if obs is not None:
-                seed_viewer = load_json_file(candidate, default={})
-                if not seed_viewer_compatible_with_obs(seed_viewer, obs):
-                    i += 1
-                    continue
-            return candidate
-        i += 1
-    return ""
-
-
-def discover_latest_run_html(out_root):
-    latest_json = discover_latest_seed_viewer(out_root)
-    if latest_json == "" or (not os.path.isfile(latest_json)):
-        return ""
-    run_dir = os.path.dirname(os.path.abspath(latest_json))
-    names = []
-    try:
-        names = os.listdir(run_dir)
-    except Exception:
-        names = []
-    htmls = []
-    i = 0
-    while i < len(names):
-        name = str(names[i])
-        low = name.lower()
-        if low.endswith(".html") and low not in [ROI_RUNTIME_NAME.lower(), THRESH_RUNTIME_NAME.lower()]:
-            htmls.append(name)
-        i += 1
-    htmls = sorted(htmls, key=natural_sort_key)
-    return os.path.join(run_dir, htmls[0]) if len(htmls) > 0 else ""
-
-
-def prompt_seed_viewer_path(default_path=""):
-    prompt = "Seed viewer_data.json"
-    if default_path:
-        prompt += " [" + str(default_path) + "]"
-    prompt += ": "
-    raw = strip_quotes(input(prompt).strip())
-    if raw == "":
-        raw = str(default_path)
-    return os.path.normpath(raw) if raw else ""
 
 
 def strip_quotes(s):
@@ -1010,7 +986,7 @@ def expand_input_line(line):
                 matches = []
         else:
             try:
-                matches = [Path(path) for path in glob.glob(line, recursive=True)]
+                matches = glob.glob(line, recursive=True)
             except Exception:
                 matches = []
         for match in matches:
@@ -1082,13 +1058,17 @@ def is_ome_tiff_path(fp):
 
 
 def is_channel_source_spec(value):
+    if isinstance(value, dict):
+        return True
     if image_sources is None:
         return False
     source_cls = getattr(image_sources, "ChannelSource", None)
-    return isinstance(value, dict) or (source_cls is not None and isinstance(value, source_cls))
+    return source_cls is not None and isinstance(value, source_cls)
 
 
 def source_path_text(source):
+    if isinstance(source, dict) and str(source.get("path", "")).strip() != "":
+        return str(source.get("path"))
     if is_channel_source_spec(source):
         try:
             return str(image_sources.coerce_channel_source(source).path)
@@ -1369,15 +1349,18 @@ def _expand_viewer_segmentation_glob(raw):
     of mask files.  Globbed files therefore contribute their parent folders.
     Literal files keep the legacy single-scene behavior in the prompt below.
     """
-    if not callable(expand_generic_source_spec):
-        return []
     try:
-        matches = expand_generic_source_spec(raw, want="either")
+        matches = (
+            expand_generic_source_spec(raw, want="either")
+            if callable(expand_generic_source_spec)
+            else glob.glob(raw, recursive=True)
+        )
     except Exception:
         return []
     roots = []
     for match in matches:
-        candidate = match if match.is_dir() else match.parent
+        match_path = str(match)
+        candidate = match_path if os.path.isdir(match_path) else os.path.dirname(match_path)
         path = normalize_stored_path(candidate)
         if path != "" and os.path.isdir(path) and path not in roots:
             roots.append(path)
@@ -1673,69 +1656,6 @@ def _scene_list_text(values, limit=6):
     return text
 
 
-def build_manual_asset_catalog(filepaths, obs):
-    """Build a catalog from asset paths with explicit slide_scene identities."""
-    templates = build_templates(filepaths)
-    by_scene = build_direct_viewer_buckets(templates)
-    unresolved = [
-        str(template.get("sample_path", ""))
-        for template in templates
-        if normalize_slide_scene(template.get("slide_scene", "")) == ""
-    ]
-    print(
-        "Viewer asset discovery:",
-        len(templates),
-        "file(s) ->",
-        len(by_scene),
-        "parsed slide_scene value(s).",
-    )
-    if len(unresolved) > 0:
-        print(
-            "Skipped",
-            len(unresolved),
-            "file(s) without a slide_scene identity:",
-            _scene_list_text([os.path.basename(path) for path in unresolved]),
-        )
-    if len(by_scene) == 0:
-        print("No supplied viewer assets could be mapped to slide_scene. Nothing was written.")
-        return None
-
-    active_scenes = _obs_slide_scene_values(obs)
-    selected = by_scene
-    if len(active_scenes) > 0:
-        active_set = set(active_scenes)
-        selected = {scene: bucket for scene, bucket in by_scene.items() if scene in active_set}
-        skipped_scenes = sorted([scene for scene in by_scene if scene not in active_set], key=natural_sort_key)
-        missing_scenes = sorted([scene for scene in active_scenes if scene not in by_scene], key=natural_sort_key)
-        print(
-            "Viewer asset match:",
-            len(selected),
-            "of",
-            len(active_scenes),
-            "current slide_scene value(s) have supplied assets.",
-        )
-        if len(skipped_scenes) > 0:
-            print(
-                "Skipped asset slide_scene value(s) not in current obs:",
-                len(skipped_scenes),
-                "::",
-                _scene_list_text(skipped_scenes),
-            )
-        if len(missing_scenes) > 0:
-            print(
-                "Current slide_scene value(s) without supplied assets:",
-                len(missing_scenes),
-                "::",
-                _scene_list_text(missing_scenes),
-            )
-        if len(selected) == 0:
-            print("No supplied viewer assets match the current obs slide_scene values. Nothing was written.")
-            return None
-
-    manifest = build_identity_manifest_from_direct_buckets(selected)
-    return build_catalog_from_identity_manifest(manifest, obs)
-
-
 def make_template(fp):
     ap = os.path.abspath(os.path.normpath(fp))
     kind = classify_path_kind(ap)
@@ -1939,9 +1859,8 @@ def build_identity_manifest_from_direct_buckets(by_scene):
     return manifest
 
 
-def build_identity_manifest_from_seed_viewer(seed_viewer):
+def build_scene_manifest_from_core_tiles(core_tiles):
     manifest = {}
-    core_tiles = seed_viewer.get("core_tiles", {}) if isinstance(seed_viewer, dict) else {}
     if not isinstance(core_tiles, dict):
         return manifest
     for core in core_tiles:
@@ -1981,7 +1900,7 @@ def build_identity_manifest_from_seed_viewer(seed_viewer):
         if slide_scene == "":
             continue
         if slide_scene in manifest:
-            raise ValueError("Duplicate seed viewer tile set for slide_scene: " + slide_scene)
+            raise ValueError("Duplicate core tile set for slide_scene: " + slide_scene)
         manifest[slide_scene] = {
             "slide_scene": slide_scene,
             "display_label": display_label_from_slide_scene(slide_scene),
@@ -2000,17 +1919,35 @@ def build_identity_manifest_from_seed_viewer(seed_viewer):
 def validate_slide_scene_manifest(manifest):
     if not isinstance(manifest, dict):
         raise ValueError("slide_scene manifest is not a dict")
-    seen = set()
+    seen_paths = {}
     for slide_scene in manifest:
         key = normalize_slide_scene(slide_scene)
         if key == "":
             raise ValueError("slide_scene manifest contains a blank key")
-        if key in seen:
-            raise ValueError("slide_scene manifest contains duplicate key: " + key)
-        seen.add(key)
         rec = manifest.get(slide_scene, {})
-        if isinstance(rec, dict):
-            rec["slide_scene"] = key
+        if not isinstance(rec, dict):
+            raise ValueError("slide_scene manifest record is not a dict: " + key)
+        record_key = normalize_slide_scene(rec.get("slide_scene", ""))
+        if str(slide_scene) != key or record_key != key:
+            raise ValueError("slide_scene manifest key does not match its record: " + str(slide_scene))
+
+        declared = []
+        for field in ["tiffs", "transparent_pngs", "opaque_pngs", "other_files"]:
+            declared.extend([str(path) for path in list(rec.get(field, []) or [])])
+        declared.extend([source_path_text(source) for source in list(rec.get("channel_sources", []) or [])])
+        segmentation = str(rec.get("segmentation_tif", "") or "").strip()
+        if segmentation != "":
+            declared.append(segmentation)
+        if len(declared) == 0:
+            raise ValueError("slide_scene manifest has no declared assets: " + key)
+        for path in declared:
+            absolute = os.path.abspath(os.path.normpath(path))
+            if not os.path.isfile(absolute):
+                raise ValueError("slide_scene asset does not exist for " + key + ": " + path)
+            owner = seen_paths.get(os.path.normcase(absolute))
+            if owner is not None and owner != key:
+                raise ValueError("viewer asset belongs to more than one slide_scene: " + path)
+            seen_paths[os.path.normcase(absolute)] = key
     return True
 
 
@@ -2024,27 +1961,6 @@ def build_segmentation_map_from_manifest(manifest):
         if seg != "" and os.path.isfile(seg):
             out[normalize_slide_scene(slide_scene)] = seg
     return out
-
-
-def build_segmentation_map_from_seed_viewer(seed_viewer, meta=None):
-    manifest = build_identity_manifest_from_seed_viewer(seed_viewer)
-    out = build_segmentation_map_from_manifest(manifest)
-    roots = resolve_segmentation_roots(meta if isinstance(meta, dict) else {})
-    if len(roots) > 0:
-        for slide_scene in manifest:
-            key = normalize_slide_scene(slide_scene)
-            if key == "" or key in out:
-                continue
-            seg = _find_seg_file_multi(roots, key)
-            if seg is not None:
-                out[key] = seg
-    return out
-
-
-def viewer_slide_scene_values(seed_viewer):
-    manifest = build_identity_manifest_from_seed_viewer(seed_viewer)
-    vals = [normalize_slide_scene(v) for v in manifest.keys()]
-    return sorted(list(set([v for v in vals if v != ""])), key=natural_sort_key)
 
 
 def infer_figure_type(fp):
@@ -2342,9 +2258,9 @@ def precompute_subset_option_source(obs, core_positions=None):
         return {}
     obs_source = obs
     if not isinstance(core_positions, dict) or len(core_positions) == 0:
-        core_series = infer_core_series_from_obs(obs)
-        if core_series is None:
+        if "slide_scene" not in obs.columns:
             return {}
+        core_series = _clean_obs_values(obs["slide_scene"])
         valid_mask = core_series.notna()
         if not bool(valid_mask.any()):
             return {}
@@ -2822,9 +2738,9 @@ def extract_slide_scene_from_path(path):
     return slide_id + roi_tag
 
 
-def seed_core_tiff_map(seed_viewer):
+def core_tiff_map(run_plan):
     out = {}
-    core_tiles = seed_viewer.get("core_tiles", {})
+    core_tiles = run_plan.get("core_tiles", {})
     if not isinstance(core_tiles, dict):
         return out
     for core in core_tiles:
@@ -2867,20 +2783,13 @@ def choose_xy_columns(dfxy):
     return None, None
 
 
-def prepare_overlay_context(obs, dfxy, seed_viewer):
-    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0:
+def prepare_overlay_context(obs, dfxy, run_plan):
+    if not isinstance(obs, pd.DataFrame) or obs.shape[0] == 0 or "slide_scene" not in obs.columns:
         return None
-    slide_scene_series = None
-    if "slide_scene" in obs.columns:
-        slide_scene_series = _clean_obs_values(obs["slide_scene"])
-        if not bool(slide_scene_series.notna().any()):
-            slide_scene_series = None
-    if isinstance(slide_scene_series, pd.Series):
-        core_series = slide_scene_series.astype(str)
-    else:
-        core_series = infer_core_series_from_obs(obs)
-    if core_series is None:
+    slide_scene_series = _clean_obs_values(obs["slide_scene"])
+    if not bool(slide_scene_series.notna().any()):
         return None
+    core_series = slide_scene_series.astype(str)
     def _series_to_cell_int(series):
         ids = []
         ok = True
@@ -2945,7 +2854,7 @@ def prepare_overlay_context(obs, dfxy, seed_viewer):
         "xvals": xvals,
         "yvals": yvals,
         "cell_int": cell_int,
-        "seed_tiffs": seed_core_tiff_map(seed_viewer),
+        "source_tiffs": core_tiff_map(run_plan),
     }
 
 
@@ -2974,19 +2883,9 @@ def build_project_core_positions(obs, allowed_cores=None):
     core_names = [str(x) for x in list(allowed_cores or [])]
     if len(core_names) == 0:
         return out
-    if "slide_scene" in obs.columns:
-        slide_scene_array = _clean_obs_values(obs["slide_scene"]).astype(str).to_numpy()
-        i = 0
-        while i < len(core_names):
-            core = str(core_names[i])
-            out[core] = np.flatnonzero(slide_scene_array == core)
-            i += 1
+    if "slide_scene" not in obs.columns:
         return out
-
-    core_series = infer_core_series_from_obs(obs)
-    if core_series is None:
-        return out
-    core_array = core_series.astype(str).to_numpy()
+    core_array = _clean_obs_values(obs["slide_scene"]).astype(str).to_numpy()
     i = 0
     while i < len(core_names):
         core = str(core_names[i])
@@ -3015,7 +2914,7 @@ def build_core_position_index(core_names, overlay_context):
 
 
 def overlay_canvas_size(core, overlay_context, core_mask):
-    tiffs = list(overlay_context.get("seed_tiffs", {}).get(str(core), []))
+    tiffs = list(overlay_context.get("source_tiffs", {}).get(str(core), []))
     i = 0
     while i < len(tiffs):
         try:
@@ -3070,6 +2969,24 @@ def _seg_roots_cache_tag(seg_roots):
     parts = roots[0].replace("\\", "/").rstrip("/").split("/")
     readable = "_".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "x")
     return "seg_" + safe_tag(readable, 40) + "_" + h
+
+
+def _overlay_cache_tag(seg_file, positions, ids, xvals, yvals, size):
+    """Identify the data that determines one rendered overlay."""
+    parts = ["overlay-v2", str(int(size[0])), str(int(size[1]))]
+    path = str(seg_file or "").strip()
+    if path != "":
+        try:
+            stat = os.stat(path)
+            parts.extend([os.path.abspath(path), str(stat.st_size), str(stat.st_mtime_ns)])
+        except OSError:
+            parts.append(os.path.abspath(path))
+    parts.extend([str(int(value)) for value in list(positions)])
+    parts.extend(["id=" + str(int(value)) for value in list(ids)])
+    if path == "":
+        parts.extend(["x=" + str(value) for value in list(xvals)])
+        parts.extend(["y=" + str(value) for value in list(yvals)])
+    return hashlib.sha1("|".join(parts).encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
 def render_point_subset_overlay(xvals, yvals, size, out_path):
@@ -3276,15 +3193,21 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
     seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
     seg_file = str(seg_map.get(slide_scene, "") or "").strip()
-    seg_tag = _seg_roots_cache_tag([seg_file] if seg_file != "" else seg_roots)
-    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
-    seg_out_path = base + "__seg.png"
-    centroid_out_path = base + "__centroid.png"
-
     ids = []
     cell_int = overlay_context.get("cell_int")
     if isinstance(cell_int, pd.Series):
         ids = list(cell_int.iloc[positions].dropna().astype(int).tolist())
+    xvals = overlay_context.get("xvals")
+    yvals = overlay_context.get("yvals")
+    xsub = xvals.iloc[positions].dropna().tolist() if isinstance(xvals, pd.Series) else []
+    ysub = yvals.iloc[positions].dropna().tolist() if isinstance(yvals, pd.Series) else []
+    data_tag = _overlay_cache_tag(seg_file, positions, ids, xsub, ysub, expected_size)
+    base = os.path.join(
+        cache_dir,
+        safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + data_tag,
+    )
+    seg_out_path = base + "__seg.png"
+    centroid_out_path = base + "__centroid.png"
     has_seg_roots = seg_file != "" or len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
     if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
         report_overlay_result(report, "segmentation", slide_scene)
@@ -3297,14 +3220,10 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
                 report_overlay_result(report, "segmentation", slide_scene)
                 return seg_out_path
 
-    xvals = overlay_context.get("xvals")
-    yvals = overlay_context.get("yvals")
     if _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
         report_overlay_result(report, "centroid", slide_scene)
         return centroid_out_path
     if isinstance(xvals, pd.Series) and isinstance(yvals, pd.Series):
-        xsub = xvals.iloc[positions].dropna().tolist()
-        ysub = yvals.iloc[positions].dropna().tolist()
         if len(xsub) > 0 and len(ysub) > 0:
             if render_point_subset_overlay(xsub, ysub, expected_size, centroid_out_path):
                 report_overlay_result(report, "centroid", slide_scene)
@@ -3313,8 +3232,8 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     return ""
 
 
-def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None, segmentation_by_slide_scene=None):
-    overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
+def build_subset_overlay_specs(run_plan, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None, segmentation_by_slide_scene=None):
+    overlay_context = prepare_overlay_context(obs, dfxy, run_plan)
     if overlay_context is None:
         return {}, {}
     if not isinstance(subset_options_by_view, dict) or len(subset_options_by_view) == 0:
@@ -3322,13 +3241,13 @@ def build_subset_overlay_specs(seed_viewer, subset_options_by_view, obs, dfxy, m
     cache_dir = os.path.join(out_root, "_subset_overlay_cache")
     os.makedirs(cache_dir, exist_ok=True)
     seg_roots = resolve_segmentation_roots(meta)
-    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else build_segmentation_map_from_seed_viewer(seed_viewer, meta)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
     out = {}
     report = {
         "segmentation_root": str(seg_roots[0] if len(seg_roots) > 0 else ""),
         "segmentation_roots": list(seg_roots),
     }
-    core_names = sorted(list(seed_viewer.get("core_tiles", {}).keys()), key=natural_sort_key)
+    core_names = sorted(list(run_plan.get("core_tiles", {}).keys()), key=natural_sort_key)
     view_core_names = {}
     if isinstance(view_sets, list):
         for view in view_sets:
@@ -3484,11 +3403,11 @@ def build_expression_payload_frame(df, obs):
     return expr_df, marker_list, ""
 
 
-def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root="", segmentation_by_slide_scene=None):
-    overlay_context = prepare_overlay_context(obs, dfxy, seed_viewer)
+def build_roi_payload_plan(run_plan, obs, dfxy, df=None, meta=None, out_root="", segmentation_by_slide_scene=None):
+    overlay_context = prepare_overlay_context(obs, dfxy, run_plan)
     if overlay_context is None:
         return {}
-    core_names = sorted(list(seed_viewer.get("core_tiles", {}).keys()), key=natural_sort_key)
+    core_names = sorted(list(run_plan.get("core_tiles", {}).keys()), key=natural_sort_key)
     if len(core_names) == 0:
         return {}
 
@@ -3511,7 +3430,7 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
         os.makedirs(cache_dir, exist_ok=True)
     if isinstance(meta, dict):
         seg_roots = resolve_segmentation_roots(meta)
-    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else build_segmentation_map_from_seed_viewer(seed_viewer, meta)
+    seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
     cores = {}
 
     i = 0
@@ -3525,7 +3444,7 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
         core_mask = np.zeros(obs.shape[0], dtype=bool)
         core_mask[positions] = True
         size = overlay_canvas_size(core, overlay_context, core_mask)
-        default_overlay_layers = []
+        default_overlay_sources = []
         if cache_dir != "":
             overlay_path = build_subset_overlay_for_positions(
                 core,
@@ -3539,31 +3458,31 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
             )
             if str(overlay_path or "").strip() != "":
                 try:
-                    rel = os.path.relpath(str(overlay_path), str(os.path.join(str(out_root), "viewer_runs", "_tmp"))).replace("\\", "/")
-                    rel = "../" + rel if not rel.startswith("..") else rel
-                    default_overlay_layers = [rel]
+                    default_overlay_sources = [os.path.abspath(str(overlay_path))]
                 except Exception:
-                    default_overlay_layers = [str(overlay_path)]
+                    default_overlay_sources = [str(overlay_path)]
         # Extract cell boundary coordinates for threshold overlays
-        cell_boundaries_rel = ""
+        cell_boundaries_source = ""
         if cache_dir != "":
             seg_file = str(seg_map.get(slide_scene, "") or "").strip()
             if seg_file is not None and str(seg_file).strip() != "":
-                boundaries = extract_cell_boundaries(seg_file)
-                if len(boundaries) > 0:
-                    import json as _json
-                    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + safe_tag(core, 80) + ".js")
-                    payload = _json.dumps(boundaries, separators=(",", ":")).replace("</", "<\\/")
-                    with open(boundaries_path, "w", encoding="utf-8") as f:
-                        f.write("window.__CELL_BOUNDARIES__ = ")
-                        f.write(payload)
-                        f.write(";\n")
-                    try:
-                        brel = os.path.relpath(boundaries_path, os.path.join(str(out_root), "viewer_runs", "_tmp")).replace("\\", "/")
-                        cell_boundaries_rel = "../" + brel if not brel.startswith("..") else brel
-                    except Exception:
-                        cell_boundaries_rel = boundaries_path
-                    print("Cell boundaries extracted:", len(boundaries), "cells from", seg_file)
+                boundary_tag = _overlay_cache_tag(seg_file, [], [], [], [], size)
+                boundaries_path = os.path.join(
+                    cache_dir,
+                    "cell_boundaries_" + safe_tag(core, 60) + "_" + boundary_tag + ".js",
+                )
+                if os.path.isfile(boundaries_path):
+                    cell_boundaries_source = os.path.abspath(boundaries_path)
+                else:
+                    boundaries = extract_cell_boundaries(seg_file)
+                    if len(boundaries) > 0:
+                        payload = json.dumps(boundaries, separators=(",", ":")).replace("</", "<\\/")
+                        with open(boundaries_path, "w", encoding="utf-8") as f:
+                            f.write("window.__CELL_BOUNDARIES__ = ")
+                            f.write(payload)
+                            f.write(";\n")
+                        cell_boundaries_source = os.path.abspath(boundaries_path)
+                        print("Cell boundaries extracted:", len(boundaries), "cells from", seg_file)
         rows = []
         subset_presence = {}
         j = 0
@@ -3628,8 +3547,8 @@ def build_roi_data_for_seed(seed_viewer, obs, dfxy, df=None, meta=None, out_root
             "slide_scene": slide_scene,
             "width": int(size[0]),
             "height": int(size[1]),
-            "default_overlay_layers": default_overlay_layers,
-            "cell_boundaries_rel": cell_boundaries_rel,
+            "default_overlay_sources": default_overlay_sources,
+            "cell_boundaries_source": cell_boundaries_source,
             "subset_presence": subset_presence,
             "rows": rows,
         }
@@ -3718,22 +3637,6 @@ def build_threshold_store_payload(obs, df, core_names, core_positions, meta=None
     }
 
 
-def make_missing_tile(core):
-    return {
-        "tile_kind": "missing",
-        "core": core,
-        "slide_scene": core,
-        "label": core + " missing",
-        "asset_type_id": "missing",
-        "asset_type_label": "Missing",
-        "tiff_paths": [],
-        "channel_sources": [],
-        "overlay_paths": [],
-        "figure_path": None,
-        "source_paths": []
-    }
-
-
 def build_core_tile_specs(core_name, bucket):
     tiffs = list(bucket.get("tiffs", []))
     channel_sources = list(bucket.get("channel_sources", []))
@@ -3806,7 +3709,7 @@ def build_core_tile_specs(core_name, bucket):
             k += 1
 
     if len(tiles) == 0:
-        tiles.append(make_missing_tile(slide_scene))
+        raise ValueError("No displayable image assets found for slide_scene: " + slide_scene)
 
     return tiles
 
@@ -4012,34 +3915,17 @@ def derive_groupings_from_obs(obs, allowed_cores, core_positions=None):
     if not isinstance(core_positions, dict) or len(core_positions) == 0:
         core_positions = {}
         allowed = set([str(c) for c in allowed_cores])
-        if "slide_scene" in obs.columns:
-            scene_series = _clean_obs_values(obs["slide_scene"]).astype(str)
-            scene_array = scene_series.to_numpy()
-            core_source = sorted(list(allowed), key=natural_sort_key) if len(allowed) > 0 else sorted(list(set(scene_series.tolist())), key=natural_sort_key)
-            i = 0
-            while i < len(core_source):
-                core = str(core_source[i])
-                core_positions[core] = np.flatnonzero(scene_array == core)
-                i += 1
-            obs_values = obs
-        else:
-            core_series = infer_core_series_from_obs(obs)
-            if core_series is None:
-                return core_meta, groupings
-            valid_mask = core_series.notna()
-            if len(allowed) > 0:
-                valid_mask = valid_mask & core_series.isin(allowed)
-            if not bool(valid_mask.any()):
-                return core_meta, groupings
-            core_values = core_series.loc[valid_mask].astype(str)
-            core_array = core_values.to_numpy()
-            unique_cores = sorted(list(set(core_values.tolist())), key=natural_sort_key)
-            i = 0
-            while i < len(unique_cores):
-                core = str(unique_cores[i])
-                core_positions[core] = np.flatnonzero(core_array == core)
-                i += 1
-            obs_values = obs.loc[valid_mask, :]
+        if "slide_scene" not in obs.columns:
+            return core_meta, groupings
+        scene_series = _clean_obs_values(obs["slide_scene"]).astype(str)
+        scene_array = scene_series.to_numpy()
+        core_source = sorted(list(allowed), key=natural_sort_key) if len(allowed) > 0 else sorted(list(set(scene_series.tolist())), key=natural_sort_key)
+        i = 0
+        while i < len(core_source):
+            core = str(core_source[i])
+            core_positions[core] = np.flatnonzero(scene_array == core)
+            i += 1
+        obs_values = obs
     else:
         obs_values = obs
 
@@ -4088,57 +3974,6 @@ def derive_groupings_from_obs(obs, allowed_cores, core_positions=None):
             core_meta[core][cname] = val
             j += 1
     return core_meta, groupings
-
-
-def build_seed_grouping_patch(seed_viewer, obs):
-    if not isinstance(seed_viewer, dict):
-        return {}
-    core_tiles = seed_viewer.get("core_tiles", {})
-    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
-        return {}
-    core_names = sorted(list(core_tiles.keys()), key=natural_sort_key)
-    core_positions = build_project_core_positions(obs, core_names)
-    core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
-    add_default_full_dataset_grouping(obs, core_names, groupings)
-    groupings = prune_and_sort_groupings(groupings, core_names)
-    view_sets = build_view_sets(groupings, core_names)
-    matched_cores = sorted(list(core_meta.keys()), key=natural_sort_key)
-    total_cores = len(core_names)
-    return {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "core_meta": core_meta,
-        "groupings": groupings,
-        "view_sets": view_sets,
-        "default_view_id": choose_default_view(view_sets),
-        "seed_core_match_count": len(matched_cores),
-        "seed_core_total": total_cores,
-        "seed_core_match_fraction": (float(len(matched_cores)) / float(total_cores)) if total_cores > 0 else 0.0,
-    }
-
-
-def trim_seed_viewer_to_obs(seed_viewer, obs):
-    if not isinstance(seed_viewer, dict):
-        return seed_viewer
-    core_tiles = seed_viewer.get("core_tiles", {})
-    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
-        return seed_viewer
-    core_names = sorted(list(core_tiles.keys()), key=natural_sort_key)
-    core_positions = build_project_core_positions(obs, core_names)
-    keep = []
-    i = 0
-    while i < len(core_names):
-        core = str(core_names[i])
-        positions = np.asarray(core_positions.get(core, []), dtype=int)
-        if positions.size > 0:
-            keep.append(core)
-        i += 1
-    if len(keep) == len(core_names):
-        return seed_viewer
-    trimmed = dict(seed_viewer)
-    trimmed["core_tiles"] = {core: core_tiles[core] for core in keep if core in core_tiles}
-    if isinstance(seed_viewer.get("core_meta"), dict):
-        trimmed["core_meta"] = {core: seed_viewer["core_meta"].get(core, {}) for core in keep}
-    return trimmed
 
 
 def collect_asset_type_catalog_from_core_tiles(core_tiles):
@@ -4207,14 +4042,6 @@ def build_figure_entries_from_specs(specs, view, subset_option=None):
         out.append(spec)
         i += 1
     return out
-
-
-def preflight_segmentation_map(seed_viewer, meta=None):
-    """Resolve label TIFFs once, keyed only by the complete slide_scene value."""
-    seg_map = build_segmentation_map_from_seed_viewer(seed_viewer, meta)
-    scenes = viewer_slide_scene_values(seed_viewer)
-    missing = [scene for scene in scenes if scene not in seg_map]
-    return seg_map, scenes, missing
 
 
 def dedupe_figure_entries_by_path(entries):
@@ -4312,154 +4139,6 @@ def build_project_figure_artifacts(view_sets, subset_options, meta):
     return deduped
 
 
-def assemble_project_catalog(core_tiles, patch, figure_entries, subset_options, subset_overlays):
-    return {
-        "version": 2,
-        "generated_at": patch.get("generated_at", datetime.utcnow().isoformat() + "Z"),
-        "dataset_label": patch.get("dataset_label", ""),
-        "viewer_filename_base": patch.get("viewer_filename_base", ""),
-        "seed_viewer_label": patch.get("seed_viewer_label", ""),
-        "seed_viewer_path": patch.get("seed_viewer_path", ""),
-        "seed_core_match_count": patch.get("seed_core_match_count", 0),
-        "seed_core_total": patch.get("seed_core_total", 0),
-        "seed_core_match_fraction": patch.get("seed_core_match_fraction", 0.0),
-        "core_tiles": {str(core): list(core_tiles.get(core, [])) for core in core_tiles},
-        "figure_entries": figure_entries,
-        "subset_options": subset_options,
-        "subset_overlays": subset_overlays,
-        "overlay_backend": patch.get("overlay_backend", {}),
-        "roi_data": patch.get("roi_data", {}),
-        "roi_mailbox": patch.get("roi_mailbox", {}),
-        "threshold_store": patch.get("threshold_store", {}),
-        "core_meta": patch.get("core_meta", {}),
-        "groupings": patch.get("groupings", {}),
-        "view_sets": patch.get("view_sets", []),
-        "default_view_id": patch.get("default_view_id", ""),
-        "asset_type_catalog": patch.get("asset_type_catalog", {}),
-    }
-
-
-def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_root, roi_mailbox=None, provenance=None, df=None):
-    if not isinstance(base_viewer, dict):
-        return None
-    core_tiles = base_viewer.get("core_tiles", {})
-    if not isinstance(core_tiles, dict) or len(core_tiles) == 0:
-        return None
-
-    patch = build_seed_grouping_patch(base_viewer, obs)
-    dataset_label = derive_dataset_label(meta, obs)
-    patch["dataset_label"] = dataset_label
-    patch["viewer_filename_base"] = derive_viewer_filename_base(dataset_label)
-
-    provenance = provenance if isinstance(provenance, dict) else {}
-    if str(provenance.get("kind", "")).strip() == "seed":
-        patch["seed_viewer_path"] = str(provenance.get("path", "")).strip()
-        patch["seed_viewer_label"] = str(provenance.get("label", "")).strip()
-    else:
-        patch["seed_viewer_path"] = ""
-        patch["seed_viewer_label"] = ""
-
-    view_sets = patch.get("view_sets", [])
-    core_names = [str(x) for x in core_tiles.keys()]
-    core_positions = build_project_core_positions(obs, core_names)
-    segmentation_by_slide_scene = meta.get("_segmentation_by_slide_scene") if isinstance(meta, dict) else None
-    if not isinstance(segmentation_by_slide_scene, dict):
-        segmentation_by_slide_scene = build_segmentation_map_from_seed_viewer(base_viewer, meta)
-
-    subset_options, subset_overlays, overlay_report = build_project_subset_artifacts(
-        base_viewer,
-        view_sets,
-        obs,
-        dfxy,
-        meta,
-        out_root,
-        core_positions,
-        segmentation_by_slide_scene=segmentation_by_slide_scene,
-    )
-    figure_entries = build_project_figure_artifacts(view_sets, subset_options, meta)
-
-    asset_type_catalog = collect_asset_type_catalog_from_core_tiles(core_tiles)
-    asset_type_catalog = extend_asset_type_catalog_from_figure_entries(asset_type_catalog, figure_entries)
-
-    patch["subset_options"] = subset_options
-    patch["subset_overlays"] = subset_overlays
-    patch["figure_entries"] = figure_entries
-    patch["roi_data"] = build_roi_data_for_seed(
-        base_viewer,
-        obs,
-        dfxy,
-        df=df,
-        meta=meta,
-        out_root=out_root,
-        segmentation_by_slide_scene=segmentation_by_slide_scene,
-    )
-    patch["roi_mailbox"] = build_roi_mailbox_payload(roi_mailbox)
-    patch["threshold_store"] = build_threshold_store_payload(
-        obs,
-        df,
-        core_names,
-        core_positions,
-        meta=meta,
-        roi_mailbox=roi_mailbox,
-        out_root=out_root,
-    )
-    patch["overlay_backend"] = {
-        "segmentation_root": str(overlay_report.get("segmentation_root", "")),
-        "segmentation_roots": list(overlay_report.get("segmentation_roots", [])),
-        "segmentation_count": int(overlay_report.get("segmentation", 0)),
-        "centroid_count": int(overlay_report.get("centroid", 0)),
-        "none_count": int(overlay_report.get("none", 0)),
-        "centroid_scenes": list(overlay_report.get("centroid_scenes", [])),
-    }
-    patch["asset_type_catalog"] = asset_type_catalog
-
-    return assemble_project_catalog(
-        core_tiles,
-        patch,
-        figure_entries,
-        subset_options,
-        subset_overlays,
-    )
-
-
-def missing_obs_slide_scenes(base_viewer, obs):
-    if not isinstance(base_viewer, dict) or not isinstance(obs, pd.DataFrame):
-        return []
-    if "slide_scene" not in obs.columns:
-        return []
-    available = set(viewer_slide_scene_values(base_viewer))
-    if len(available) == 0:
-        return []
-    wanted = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()
-    wanted = sorted(list(set([str(v).strip() for v in wanted if str(v).strip() != ""])), key=natural_sort_key)
-    missing = []
-    i = 0
-    while i < len(wanted):
-        if wanted[i] not in available:
-            missing.append(wanted[i])
-        i += 1
-    return missing
-
-
-def covered_obs_slide_scenes(base_viewer, obs):
-    if not isinstance(base_viewer, dict) or not isinstance(obs, pd.DataFrame):
-        return []
-    if "slide_scene" not in obs.columns:
-        return []
-    available = set(viewer_slide_scene_values(base_viewer))
-    if len(available) == 0:
-        return []
-    wanted = _clean_obs_values(obs["slide_scene"]).dropna().astype(str).tolist()
-    wanted = sorted(list(set([str(v).strip() for v in wanted if str(v).strip() != ""])), key=natural_sort_key)
-    covered = []
-    i = 0
-    while i < len(wanted):
-        if wanted[i] in available:
-            covered.append(wanted[i])
-        i += 1
-    return covered
-
-
 def filter_tables_to_slide_scenes(df, obs, dfxy, slide_scenes):
     if not isinstance(obs, pd.DataFrame) or "slide_scene" not in obs.columns:
         return df, obs, dfxy
@@ -4471,432 +4150,6 @@ def filter_tables_to_slide_scenes(df, obs, dfxy, slide_scenes):
     build_df = df.reindex(build_obs.index) if isinstance(df, pd.DataFrame) else df
     build_dfxy = dfxy.reindex(build_obs.index) if isinstance(dfxy, pd.DataFrame) else dfxy
     return build_df, build_obs, build_dfxy
-
-
-def _build_and_write_project_viewer(base_viewer, build_df, build_obs, build_dfxy, meta, out_root, roi_mailbox, provenance, update_meta=True, run_name_hint=""):
-    ifprog.reset_progress(4, "Project viewer: preparing dataset overlay onto seed viewer.")
-    try:
-        seg_roots = resolve_segmentation_roots(meta)
-        if len(seg_roots) > 0:
-            meta["segmentation_root"] = seg_roots[0]
-            meta["segmentation_roots"] = seg_roots
-            print("Project viewer: segmentation outlines enabled from", len(seg_roots), "folder(s).")
-        else:
-            print("Project viewer: no segmentation root selected; centroid subset overlays will be used when needed.")
-        print("Project viewer: preparing dataset overlay onto reusable assets.")
-        catalog = build_project_catalog_from_base_viewer(
-            base_viewer,
-            build_obs,
-            build_dfxy,
-            meta,
-            out_root,
-            roi_mailbox=roi_mailbox,
-            provenance=provenance,
-            df=build_df,
-        )
-        if catalog is None:
-            print("Project viewer could not build a fresh catalog from the available reusable assets.")
-            return None
-        if str(run_name_hint).strip() != "":
-            catalog["run_name_hint"] = str(run_name_hint).strip()
-        overlay_report = dict(catalog.get("overlay_backend", {}))
-        if int(overlay_report.get("centroid_count", 0)) > 0:
-            scenes = list(overlay_report.get("centroid_scenes", []))
-            if len(scenes) > 0:
-                print("Project viewer: centroid fallback used for subset overlays on", len(scenes), "slide_scene values.")
-            else:
-                print("Project viewer: centroid fallback used for subset overlays.")
-        if update_meta:
-            _set_cvh_meta(
-                cvh_mode="project",
-                cvh_out_root=os.path.abspath(out_root),
-                cvh_seed_viewer=str(provenance.get("path", "")).strip(),
-                cvh_selection_view_count=len(list(catalog.get("view_sets", []))),
-                viewer_root=os.path.abspath(out_root),
-                figure_folder=str(meta.get("figure_folder", "")).strip(),
-                segmentation_root=seg_roots[0] if len(seg_roots) > 0 else "",
-                segmentation_roots=seg_roots,
-            )
-        ifprog.tick_progress("Project viewer: writing HTML.")
-        if str(provenance.get("kind", "")).strip() == "seed":
-            vhf.build_viewer_from_seed(base_viewer, catalog_patch=catalog, outdir=out_root)
-        else:
-            vhf.build_catalog(catalog, outdir=out_root)
-        if update_meta:
-            latest_html = discover_latest_run_html(out_root)
-            _set_cvh_meta(
-                cvh_last_viewer_data=os.path.abspath(discover_latest_seed_viewer(out_root)),
-                cvh_last_html=os.path.abspath(latest_html) if latest_html != "" else "",
-            )
-        ifprog.tick_progress("Project viewer: viewer HTML ready.")
-        return catalog
-    finally:
-        ifprog.clear_progress()
-
-
-def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
-    meta = dict(_cvh_meta_sink())
-    if isinstance(resolved, dict):
-        data_folder = str(resolved.get("data_folder", "")).strip()
-        build_folder = str(resolved.get("build_folder", "")).strip()
-        dataset_stem = str(resolved.get("dataset_stem", "")).strip()
-        out_root = str(resolved.get("viewer_root", "")).strip()
-        seed_path = str(resolved.get("seed_viewer_path", "")).strip()
-        figure_folder = str(resolved.get("figure_folder", "")).strip()
-        segmentation_roots = _normalize_path_list(list(resolved.get("segmentation_roots", [])))
-        if len(segmentation_roots) == 0:
-            single = str(resolved.get("segmentation_root", "")).strip()
-            if single != "":
-                segmentation_roots = _normalize_path_list([single], keep_missing=True)
-        if data_folder != "":
-            meta["data_folder"] = data_folder
-        if build_folder != "":
-            meta["build_folder"] = build_folder
-        if dataset_stem != "":
-            meta["dataset_stem"] = dataset_stem
-        if figure_folder != "":
-            meta["figure_folder"] = figure_folder
-        meta["segmentation_root"] = segmentation_roots[0] if len(segmentation_roots) > 0 else ""
-        meta["segmentation_roots"] = segmentation_roots
-        meta["viewer_root"] = out_root
-        seed_viewer_just_built = _optional_bool(resolved.get("seed_viewer_just_built", None)) is True
-        use_existing_seed_viewer = _optional_bool(resolved.get("use_existing_seed_viewer", None))
-        per_slide_scene_viewers = _optional_bool(resolved.get("per_slide_scene_viewers", None))
-    else:
-        out_root = prompt_output_root(find_default_out_root(meta))
-        default_seed = discover_latest_seed_viewer(out_root, obs=obs)
-        seed_path = prompt_seed_viewer_path(default_seed)
-        seed_viewer_just_built = False
-        use_existing_seed_viewer = None
-        per_slide_scene_viewers = None
-
-    # External callers may supply an incomplete context.  Resolve this choice
-    # here, before any reusable assets are read or reconstructed.
-    if per_slide_scene_viewers is None:
-        per_slide_scene_viewers = prompt_per_slide_scene_viewers(obs)
-
-    reuse_json_var = False
-    if seed_path != "" and os.path.isfile(seed_path):
-        seed_name = os.path.basename(str(seed_path).strip())
-        if seed_viewer_just_built:
-            print("Project viewer: using newly built reusable viewer assets from", seed_name)
-            reuse_json_var = True
-        elif use_existing_seed_viewer is not None:
-            reuse_json_var = bool(use_existing_seed_viewer)
-        else:
-            reuse_raw = str(
-                cvh_input(
-                    "Use existing reusable viewer assets from " + seed_name + "? (y/n) [y]: ",
-                    default="y",
-                    prompt_meta={
-                        "options": [
-                            {
-                                "value": "y",
-                                "label": "Use assets",
-                                "description": "Reuse the existing viewer asset map and write a fresh project-aware viewer run.",
-                            },
-                            {
-                                "value": "n",
-                                "label": "Skip assets",
-                                "description": "Try to rebuild from the asset registry instead.",
-                            },
-                        ]
-                    },
-                )
-            ).strip().lower()
-            reuse_json_var = reuse_raw in ["", "y", "yes"]
-    base_viewer = None
-    provenance = {}
-    if seed_path != "" and os.path.isfile(seed_path) and reuse_json_var:
-        seed_viewer = load_json_file(seed_path, default={})
-        if isinstance(seed_viewer, dict) and isinstance(seed_viewer.get("core_tiles"), dict):
-            if seed_viewer_compatible_with_obs(seed_viewer, obs):
-                trimmed_seed = trim_seed_viewer_to_obs(seed_viewer, obs)
-                if isinstance(trimmed_seed.get("core_tiles"), dict) and len(trimmed_seed.get("core_tiles", {})) > 0:
-                    base_viewer = trimmed_seed
-                    provenance = {
-                        "kind": "seed",
-                        "path": os.path.abspath(seed_path),
-                        "label": os.path.basename(os.path.dirname(os.path.abspath(seed_path))),
-                    }
-                    print("Project viewer: reusing compatible seed viewer structure.")
-                else:
-                    print("Seed viewer does not match the current obs; trying reusable asset pool instead.")
-            else:
-                print("Seed viewer does not fully cover the current obs; trying reusable asset pool instead.")
-        else:
-            print("Seed viewer data is invalid; trying reusable asset pool instead.")
-    else:
-        print("No reusable seed viewer_data.json found; trying reusable asset pool instead.")
-
-    if base_viewer is None:
-        fresh_core_tiles = build_core_tiles_from_asset_registry(out_root)
-        used_convention_sources = False
-        if len(fresh_core_tiles) == 0:
-            roots = viewer_convention_root_candidates(meta, out_root, segmentation_roots)
-            fresh_core_tiles = build_core_tiles_from_convention_roots(roots, obs)
-            used_convention_sources = len(fresh_core_tiles) > 0
-        if len(fresh_core_tiles) == 0:
-            print("No reusable asset pool or convention-resolved source images could be reconstructed.")
-            return None
-        fresh_viewer = {"core_tiles": fresh_core_tiles}
-        fresh_viewer = trim_seed_viewer_to_obs(fresh_viewer, obs)
-        if not isinstance(fresh_viewer.get("core_tiles"), dict) or len(fresh_viewer.get("core_tiles", {})) == 0:
-            print("Reusable asset pool does not match the current obs; no active cores remained after trimming.")
-            return None
-        base_viewer = fresh_viewer
-        provenance_kind = "asset_pool"
-        provenance_path = os.path.abspath(asset_registry_path(out_root))
-        provenance_label = "_asset_pool"
-        if used_convention_sources:
-            provenance_kind = "convention_sources"
-            provenance_path = os.path.abspath(out_root)
-            provenance_label = "Sam/FCS"
-        provenance = {
-            "kind": provenance_kind,
-            "path": provenance_path,
-            "label": provenance_label,
-        }
-        print("Project viewer: building a fresh run structure from", provenance_label + ".")
-
-    build_df = df
-    build_obs = obs
-    build_dfxy = dfxy
-    missing_scenes = missing_obs_slide_scenes(base_viewer, obs)
-    if len(missing_scenes) > 0:
-        covered_scenes = covered_obs_slide_scenes(base_viewer, obs)
-        if len(covered_scenes) == 0:
-            print("Reusable viewer assets are incomplete for the current obs.")
-            print("Missing slide_scene values:", ", ".join(missing_scenes[:12]))
-            return None
-        print(
-            "Reusable viewer assets cover",
-            len(covered_scenes),
-            "of",
-            len(covered_scenes) + len(missing_scenes),
-            "slide_scene values. Building viewer for the covered subset only.",
-        )
-        print("Skipped slide_scene values:", ", ".join(missing_scenes[:12]))
-        build_df, build_obs, build_dfxy = filter_tables_to_slide_scenes(df, obs, dfxy, covered_scenes)
-
-    # Resolve each segmentation mask before expensive overlay generation.  A
-    # missing exact scene match is allowed only after the user explicitly
-    # accepts centroid-only overlays for those scenes.
-    if len(segmentation_roots) > 0:
-        segmentation_by_slide_scene, map_scenes, unresolved_scenes = preflight_segmentation_map(base_viewer, meta)
-        print("Viewer segmentation preflight: full slide_scene matches.")
-        for scene in map_scenes:
-            source = str(segmentation_by_slide_scene.get(scene, "") or "").strip()
-            print("-", scene, "->", source if source != "" else "UNRESOLVED")
-        if len(unresolved_scenes) > 0:
-            print("WARNING: no segmentation label TIFF matched:", ", ".join(unresolved_scenes[:12]))
-            if len(unresolved_scenes) > 12:
-                print("WARNING:", len(unresolved_scenes) - 12, "additional slide_scene values are unresolved.")
-            raw = str(
-                cvh_input(
-                    "Continue with centroid-only overlays for unresolved slide_scene values? (y/n) [n]: ",
-                    default="n",
-                    prompt_meta={
-                        "options": [
-                            {
-                                "value": "n",
-                                "label": "Stop",
-                                "description": "Return without starting viewer generation.",
-                            },
-                            {
-                                "value": "y",
-                                "label": "Continue",
-                                "description": "Use centroid-only overlays for unresolved scenes.",
-                            },
-                        ]
-                    },
-                )
-            ).strip().lower()
-            if raw not in ["y", "yes", "continue"]:
-                print("Viewer generation cancelled before overlay rendering.")
-                return None
-        meta["_segmentation_by_slide_scene"] = segmentation_by_slide_scene
-
-    per_roi = False
-    unique_scenes = []
-    if isinstance(build_obs, pd.DataFrame) and "slide_scene" in build_obs.columns:
-        unique_scenes = sorted(
-            build_obs["slide_scene"].dropna().astype(str).unique().tolist(),
-            key=natural_sort_key,
-        )
-        if len(unique_scenes) > 1:
-            per_roi = bool(per_slide_scene_viewers)
-
-    if per_roi:
-        built_count = 0
-        built_roots = []
-        last_viewer_data = ""
-        last_html = ""
-        scene_series = build_obs["slide_scene"].astype(str)
-        scene_i = 0
-        while scene_i < len(unique_scenes):
-            scene_val = str(unique_scenes[scene_i])
-            print("--- Viewer", scene_i + 1, "of", len(unique_scenes), ":", scene_val, "---")
-            sub_obs = build_obs.loc[scene_series == scene_val].copy()
-            sub_df = build_df.reindex(sub_obs.index) if isinstance(build_df, pd.DataFrame) else build_df
-            sub_dfxy = build_dfxy.reindex(sub_obs.index) if isinstance(build_dfxy, pd.DataFrame) else build_dfxy
-            sub_viewer = trim_seed_viewer_to_obs(copy.deepcopy(base_viewer), sub_obs)
-            if not isinstance(sub_viewer.get("core_tiles"), dict) or len(sub_viewer.get("core_tiles", {})) == 0:
-                print("  Skipping", scene_val, "- no matching core tiles.")
-                scene_i += 1
-                continue
-            sub_run_hint = safe_tag(scene_val, 80)
-            catalog = _build_and_write_project_viewer(
-                sub_viewer,
-                sub_df,
-                sub_obs,
-                sub_dfxy,
-                meta,
-                out_root,
-                roi_mailbox,
-                provenance,
-                update_meta=False,
-                run_name_hint=sub_run_hint,
-            )
-            if catalog is None:
-                print("  Skipping", scene_val, "- catalog build failed.")
-            else:
-                built_count += 1
-                latest_viewer_data = discover_latest_seed_viewer(out_root)
-                latest_html = discover_latest_run_html(out_root)
-                if latest_viewer_data != "":
-                    last_viewer_data = os.path.abspath(latest_viewer_data)
-                    built_roots.append(os.path.dirname(os.path.abspath(latest_viewer_data)))
-                if latest_html != "":
-                    last_html = os.path.abspath(latest_html)
-            scene_i += 1
-        if built_count == 0:
-            print("No individual viewers were built.")
-            return None
-        _set_cvh_meta(
-            cvh_mode="project_per_slide_scene",
-            cvh_out_root=os.path.abspath(out_root),
-            cvh_seed_viewer=str(provenance.get("path", "")).strip(),
-            cvh_selection_view_count=built_count,
-            cvh_individual_viewer_roots=built_roots,
-            cvh_last_viewer_data=last_viewer_data,
-            cvh_last_html=last_html,
-            viewer_root=os.path.abspath(out_root),
-            figure_folder=str(meta.get("figure_folder", "")).strip(),
-            segmentation_root=str(meta.get("segmentation_root", "")).strip(),
-            segmentation_roots=list(meta.get("segmentation_roots", [])) if isinstance(meta.get("segmentation_roots", []), list) else [],
-        )
-        print("Done. Built individual viewers for", built_count, "of", len(unique_scenes), "slide_scene values.")
-        return (df, obs, dfxy)
-
-    catalog = _build_and_write_project_viewer(
-        base_viewer,
-        build_df,
-        build_obs,
-        build_dfxy,
-        meta,
-        out_root,
-        roi_mailbox,
-        provenance,
-        update_meta=True,
-    )
-    if catalog is None:
-        return None
-    print("Done.")
-    return (df, obs, dfxy)
-
-
-def infer_core_series_from_obs(obs):
-    if not isinstance(obs, pd.DataFrame):
-        return None
-    if not obs.index.is_unique:
-        raise ValueError("HTML ROI viewer requires unique obs index; duplicate cell indices found.")
-
-    candidates = []
-    try:
-        idx_ser = pd.Series(obs.index, index=obs.index, dtype="object")
-        candidates.append(("__index__", idx_ser))
-    except Exception:
-        pass
-
-    cols = list(obs.columns)
-    i = 0
-    while i < len(cols):
-        col = cols[i]
-        lc = str(col).lower()
-        if ("scene" in lc) or ("core" in lc) or ("slide" in lc) or ("coordinate" in lc):
-            try:
-                candidates.append((str(col), obs[col].astype(str)))
-            except Exception:
-                pass
-        i += 1
-
-    if len(candidates) == 0:
-        return None
-
-    best_score = -1.0
-    best_priority = -1
-    best_core = None
-    i = 0
-    while i < len(candidates):
-        name, ser = candidates[i]
-        parsed = parse_core_series(ser)
-        score = float(parsed.notna().mean())
-        priority = core_series_candidate_priority(name)
-        if score > best_score or (score == best_score and priority > best_priority):
-            best_score = score
-            best_priority = priority
-            best_core = parsed
-        i += 1
-
-    if best_core is None or best_score < 0.02:
-        return None
-    return best_core
-
-
-def core_series_candidate_priority(name):
-    low = str(name).strip().lower()
-    if low == "core":
-        return 6
-    if low == "slide_scene":
-        return 5
-    if "scene" in low:
-        return 4
-    if "core" in low:
-        return 3
-    if "slide" in low:
-        return 2
-    if "coordinate" in low:
-        return 1
-    if low == "__index__":
-        return 0
-    return -1
-
-
-def parse_core_series(ser):
-    s = ser.astype(str).str.strip()
-
-    m_scene = s.str.extract(r"(?i)scene[_-]?([A-Za-z])0*(\d{1,3})")
-    core_scene = m_scene[0].str.upper() + m_scene[1].str.lstrip("0")
-    core_scene = core_scene.mask(m_scene[0].isna())
-
-    m_core = s.str.extract(r"(?i)^([A-Za-z])0*(\d{1,3})$")
-    core_direct = m_core[0].str.upper() + m_core[1].str.lstrip("0")
-    core_direct = core_direct.mask(m_core[0].isna())
-
-    m_roi = s.str.extract(r"(?i)ROI0*(\d{1,3})(?!\d)")
-    roi_num = pd.to_numeric(m_roi[0], errors="coerce")
-    core_roi = pd.Series(np.nan, index=s.index, dtype="object")
-    valid = roi_num.dropna().astype(int).astype(str)
-    core_roi.loc[valid.index] = "A" + valid
-
-    out = core_scene.copy()
-    miss = out.isna()
-    out.loc[miss] = core_direct.loc[miss]
-    miss = out.isna()
-    out.loc[miss] = core_roi.loc[miss]
-    out = out.mask(out == "")
-    return out
 
 
 if __name__ == "__main__":

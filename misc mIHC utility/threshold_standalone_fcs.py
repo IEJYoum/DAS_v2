@@ -20,14 +20,10 @@ if str(ANALYSIS_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from visualization.call_visu_html_7 import add_default_full_dataset_grouping
-from visualization.call_visu_html_7 import build_roi_data_for_seed
-from visualization.call_visu_html_7 import build_view_sets
-from visualization.call_visu_html_7 import choose_default_view
-from visualization.call_visu_html_7 import derive_groupings_from_obs
-from visualization.call_visu_html_7 import natural_sort_key
-from visualization.call_visu_html_7 import prune_and_sort_groupings
-from visualization.visu_html_functions7 import build_catalog
+from visualization import call_visu_html_7 as viewer_engine
+
+
+natural_sort_key = viewer_engine.natural_sort_key
 
 
 NUCLEI_PREFIX = "Intensity_MeanIntensity_"
@@ -240,6 +236,7 @@ def discover_processed_roi_datasets(processed_root, slide_name=None):
         else:
             scene = slide_roi_scene(slide, roi_folder.name)
             roi_id = scene
+            print("Standalone identity fallback:", slide + "/" + roi_folder.name, "->", scene)
         datasets.append({
             "roi_id": roi_id,
             "slide_scene": scene,
@@ -649,122 +646,36 @@ def validate_label_overlap(dataset_dict, obs):
 
 
 
-def build_minimal_view_fields(core_names, obs):
-    """Return core_meta, groupings, view_sets, and default_view_id for viewer cores."""
-    core_names = [str(x) for x in list(core_names)]
-    if len(core_names) == 0:
-        raise ValueError("core_names is empty")
-    if not isinstance(obs, pd.DataFrame):
-        raise ValueError("obs must be a pandas DataFrame")
-    core_positions = {}
-    if "slide_scene" in obs.columns:
-        scene_array = obs["slide_scene"].astype(str).to_numpy()
-        for core in core_names:
-            core_positions[core] = np.flatnonzero(scene_array == str(core))
-    elif "core" in obs.columns:
-        core_array = obs["core"].astype(str).to_numpy()
-        for core in core_names:
-            core_positions[core] = np.flatnonzero(core_array == str(core))
-    core_meta, groupings = derive_groupings_from_obs(obs, core_names, core_positions=core_positions)
-    add_default_full_dataset_grouping(obs, core_names, groupings)
-    groupings = prune_and_sort_groupings(groupings, core_names)
-    view_sets = build_view_sets(groupings, core_names)
-    default_view_id = choose_default_view(view_sets)
-    if len(view_sets) == 0 or default_view_id == "":
-        raise ValueError("could not build a default viewer view")
-    return core_meta, groupings, view_sets, default_view_id
-
-
-def build_catalog_for_datasets(datasets, df, obs, dfxy, output_root, threshold_store):
-    """Return a viewer catalog dictionary for discovered FCS datasets."""
-    datasets = list(datasets)
-    if len(datasets) == 0:
-        raise ValueError("datasets is empty")
-    if not isinstance(df, pd.DataFrame):
-        raise ValueError("df must be a pandas DataFrame")
-    if not isinstance(obs, pd.DataFrame):
-        raise ValueError("obs must be a pandas DataFrame")
-    if not isinstance(dfxy, pd.DataFrame):
-        raise ValueError("dfxy must be a pandas DataFrame")
-    if threshold_store not in [None, ""] and not isinstance(threshold_store, dict):
-        raise ValueError("threshold_store must be a dict when provided")
-    output_path = require_output_directory(output_root, "output_root")
-    core_tiles = {}
-    core_names = []
-    seg_roots = []
-    for dataset_dict in datasets:
-        for key in ["roi_id", "slide_scene", "label_tif", "channel_tifs", "roi_folder"]:
-            if key not in dataset_dict or dataset_dict[key] in [None, ""]:
-                raise ValueError("dataset_dict is missing " + key)
-        roi_id = str(dataset_dict["roi_id"])
-        slide_scene = str(dataset_dict["slide_scene"])
-        core_name = str(dataset_dict.get("core_name", "")).strip() or str(slide_scene)
-        if core_name in core_tiles:
-            raise ValueError("duplicate viewer core name " + core_name + " from " + slide_scene)
-        channel_tifs = [Path(p) for p in list(dataset_dict["channel_tifs"])]
-        if len(channel_tifs) == 0:
-            raise ValueError("dataset_dict has no channel_tifs for " + roi_id)
-        label_tif = Path(dataset_dict["label_tif"])
-        source_paths = [str(p) for p in channel_tifs] + [str(label_tif)]
-        core_names.append(core_name)
-        seg_roots.append(str(dataset_dict["roi_folder"]))
-        core_tiles[core_name] = [
-            {
-                "tile_kind": "composite",
-                "core": core_name,
-                "slide_scene": slide_scene,
-                "label": core_name,
-                "display_label": slide_scene.replace("_", " "),
-                "asset_type_id": "composite:tiff_stack",
-                "asset_type_label": "Composite (channel-selectable)",
-                "tiff_paths": [str(p) for p in channel_tifs],
-                "overlay_paths": [str(label_tif)],
-                "figure_path": None,
-                "source_paths": source_paths,
-            }
-        ]
-        dataset_dict["core_name"] = core_name
-    core_names = sorted(core_names, key=natural_sort_key)
-    core_meta, groupings, view_sets, default_view_id = build_minimal_view_fields(core_names, obs)
-
-    catalog = {
-        "dataset_label": "FCS thresholding",
-        "viewer_filename_base": "fcs_thresholding",
-        "run_name_hint": "fcs_thresholding",
-        "core_tiles": core_tiles,
-        "roi_data": {},
-        "roi_mailbox": {},
-        "subset_options": {},
-        "subset_overlays": {},
-        "overlay_backend": {
-            "segmentation_root": seg_roots[0],
-            "segmentation_roots": seg_roots,
-        },
-        "core_meta": core_meta,
-        "groupings": groupings,
-        "view_sets": view_sets,
-        "default_view_id": default_view_id,
-        "asset_type_catalog": {"composite:tiff_stack": "Composite (channel-selectable)"},
-    }
-    if isinstance(threshold_store, dict) and len(threshold_store) > 0:
-        catalog["threshold_store"] = threshold_store
-
-    fake_seed = {"core_tiles": catalog["core_tiles"]}
-    meta = {"segmentation_roots": seg_roots, "segmentation_root": seg_roots[0]}
-    roi_data = build_roi_data_for_seed(fake_seed, obs, dfxy, df=df, meta=meta, out_root=str(output_path))
-    if not isinstance(roi_data, dict) or len(roi_data.get("cores", {})) == 0:
-        unique_scenes = sorted([str(x) for x in obs["slide_scene"].dropna().unique().tolist()], key=natural_sort_key)
-        raise ValueError(
-            "build_roi_data_for_seed returned empty roi_data for obs slide_scene values " + str(unique_scenes)
-        )
-    catalog["roi_data"] = roi_data
-    print("Built catalog:", len(core_names), "ROI(s), expression:", bool(roi_data.get("has_expression_data", False)))
-    return catalog
-
-
-def build_catalog_for_dataset(dataset_dict, df, obs, dfxy, output_root, threshold_store):
-    """Return a viewer catalog dictionary for one discovered FCS dataset."""
-    return build_catalog_for_datasets([dataset_dict], df, obs, dfxy, output_root, threshold_store)
+def build_fcs_scene_manifest(datasets):
+    """Translate standalone FCS records into the shared viewer scene contract."""
+    manifest = {}
+    for dataset in list(datasets):
+        slide_scene = str(dataset.get("slide_scene", "")).strip()
+        if slide_scene == "":
+            raise ValueError("standalone dataset is missing slide_scene")
+        if slide_scene in manifest:
+            raise ValueError("duplicate standalone slide_scene: " + slide_scene)
+        channels = [str(Path(path)) for path in list(dataset.get("channel_tifs", []) or [])]
+        if len(channels) == 0:
+            raise ValueError("standalone dataset has no channel TIFFs: " + slide_scene)
+        label_tif = str(dataset.get("label_tif", "") or "").strip()
+        source_paths = list(channels)
+        if label_tif != "":
+            source_paths.append(label_tif)
+        manifest[slide_scene] = {
+            "slide_scene": slide_scene,
+            "display_label": slide_scene.replace("_", " "),
+            "tiffs": channels,
+            "channel_sources": [],
+            "transparent_pngs": [],
+            "opaque_pngs": [],
+            "other_files": [],
+            "source_paths": source_paths,
+            "segmentation_tif": label_tif,
+        }
+        dataset["core_name"] = slide_scene
+    viewer_engine.validate_slide_scene_manifest(manifest)
+    return manifest
 
 
 def assign_core_names(datasets):
@@ -784,23 +695,34 @@ def build_viewer_from_datasets(datasets, output_root, study_thresholds_path="", 
         validate_label_overlap(dataset, obs1)
         triplets.append((df1, obs1, dfxy1))
     df, obs, dfxy = combine_triplets(triplets)
-    write_triplet_project(output_path, df, obs, dfxy)
+    project_dir = write_triplet_project(output_path, df, obs, dfxy)
     threshold_store = build_threshold_store(datasets, output_path, study_thresholds_path, predicted_thresholds_path)
-    catalog = build_catalog_for_datasets(datasets, df, obs, dfxy, output_path, threshold_store)
-    viewer_data = build_viewer(catalog, output_path)
+    manifest = build_fcs_scene_manifest(datasets)
+    seg_roots = [str(dataset["roi_folder"]) for dataset in datasets]
+    result = viewer_engine.build_viewer_run(
+        df,
+        obs,
+        dfxy,
+        manifest,
+        {
+            "data_folder": str(project_dir),
+            "build_folder": str(project_dir),
+            "dataset_stem": TRIPLET_STEM,
+            "figure_folder": "",
+            "viewer_root": str(output_path),
+            "segmentation_roots": seg_roots,
+            "segmentation_root": seg_roots[0] if len(seg_roots) > 0 else "",
+            "_segmentation_by_slide_scene": {
+                str(dataset["slide_scene"]): str(dataset["label_tif"])
+                for dataset in datasets
+            },
+        },
+        threshold_store=threshold_store,
+    )
+    if str(result.get("status", "")) != "ready":
+        raise RuntimeError("shared viewer engine failed: " + "; ".join(result.get("errors", [])))
+    viewer_data = result["viewer_data"]
     write_debug_report(output_path, datasets, viewer_data)
-    return viewer_data
-
-
-def build_viewer(catalog, output_root):
-    """Return viewer_data written by the shared viewer catalog builder."""
-    if not isinstance(catalog, dict):
-        raise ValueError("catalog must be a dict")
-    output_path = require_output_directory(output_root, "output_root")
-    viewer_data = build_catalog(catalog, outdir=str(output_path))
-    if not isinstance(viewer_data, dict):
-        raise ValueError("build_catalog did not return viewer_data")
-    print("Viewer written under:", str(output_path))
     return viewer_data
 
 

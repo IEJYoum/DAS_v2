@@ -2,7 +2,6 @@ import os
 import shutil
 import hashlib
 import json
-import copy
 import re
 import sys
 from pathlib import Path
@@ -30,16 +29,14 @@ try:
 except Exception:
     image_sources = None
 
-OUTDIR = "HTML figs default"
-ASSETSDIR = os.path.join(OUTDIR, "assets")
-ROOTDIR = OUTDIR
-
 BG = "#141418"
 GAP = 8
 TILE = 520
 FIGURE_RENDER_LIMIT = 100
 ASSET_REGISTRY_FN = "asset_registry.json"
 VIEWER_DATA_FN = "viewer_data.json"
+BUILD_REPORT_FN = "build_report.json"
+READY_FN = "READY"
 RUNS_DIRNAME = "viewer_runs"
 POOL_DIRNAME = "_asset_pool"
 POOL_REGISTRY_FN = "asset_pool_registry.json"
@@ -69,57 +66,6 @@ def clamp_u8(x):
     return np.clip(x, 0, 255).astype(np.uint8)
 
 
-def file_id(path):
-    try:
-        st = os.stat(path)
-        s = str(os.path.abspath(path)) + "|" + str(st.st_size) + "|" + str(int(st.st_mtime))
-    except Exception:
-        s = os.path.abspath(path)
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
-
-
-def html_escape(s):
-    return (s.replace("&", "&amp;")
-             .replace("<", "&lt;")
-             .replace(">", "&gt;")
-             .replace('"', "&quot;")
-             .replace("'", "&#39;"))
-
-
-def is_tiff(fp):
-    ext = os.path.splitext(fp)[1].lower()
-    return ext in [".tif", ".tiff"]
-
-
-def is_png(fp):
-    ext = os.path.splitext(fp)[1].lower()
-    return ext == ".png"
-
-
-def png_has_alpha(fp):
-    try:
-        im = Image.open(fp)
-        return ("A" in im.getbands())
-    except Exception:
-        return False
-
-
-def copy_asset(fp, subdir=None):
-    ext = os.path.splitext(fp)[1].lower()
-    fid = file_id(fp)
-    if subdir is None:
-        out = os.path.join(ASSETSDIR, fid + ext)
-        rel = "assets/" + os.path.basename(out)
-    else:
-        d = os.path.join(ASSETSDIR, subdir)
-        safe_mkdir(d)
-        out = os.path.join(d, fid + ext)
-        rel = "assets/" + subdir + "/" + os.path.basename(out)
-    if not os.path.exists(out):
-        shutil.copy2(fp, out)
-    return rel
-
-
 def norm_cycif(arr, out_lo=20, out_hi=200, p=99, gamma=1.0):
     a = np.asarray(arr).astype(np.float32)
     hi = np.percentile(a, p)
@@ -133,14 +79,20 @@ def norm_cycif(arr, out_lo=20, out_hi=200, p=99, gamma=1.0):
 
 
 def is_channel_source_spec(value):
+    if isinstance(value, dict):
+        return True
     if image_sources is None:
         return False
     source_cls = getattr(image_sources, "ChannelSource", None)
-    return isinstance(value, dict) or (source_cls is not None and isinstance(value, source_cls))
+    return source_cls is not None and isinstance(value, source_cls)
 
 
 def safe_imread(fp, Norm=True, **kw):
-    if is_channel_source_spec(fp):
+    if isinstance(fp, dict) and str(fp.get("source_kind", "")) == "cached_png":
+        with Image.open(str(fp.get("path", ""))) as im:
+            a = np.array(im)
+        Norm = False
+    elif is_channel_source_spec(fp):
         a = image_sources.read_channel(fp)
     elif tiff is None:
         with Image.open(fp) as im:
@@ -155,490 +107,88 @@ def safe_imread(fp, Norm=True, **kw):
     return a
 
 
-def build_cycif_composite_rgb(pathsD, viz):
-    mc = viz.get("marker_colors", {})
-    if mc is None:
-        return None
-    if len(mc) == 0:
-        return None
-
-    norm_default = viz.get("norm_default", {})
-    per_marker = viz.get("per_marker", {})
-    final_gamma = float(viz.get("final_gamma", 1.0))
-    bg_p_default = float(viz.get("bg_p", 0))
-    thr_default = float(viz.get("thr", 0))
-
-    rgb = None
-
-    for mk in mc.keys():
-        path = pathsD.get(mk, None)
-        if path is None:
-            continue
-
-        kw = dict(norm_default)
-        if mk in per_marker:
-            kw.update(per_marker[mk])
-
-        try:
-            im = safe_imread(path, Norm=True, **kw)
-        except Exception:
-            continue
-        im = np.asarray(im).astype(np.float32)
-        im = np.squeeze(im)
-        if im.ndim != 2:
-            continue
-
-        bg_p = bg_p_default
-        thr = thr_default
-        if mk in per_marker:
-            if "bg_p" in per_marker[mk]:
-                bg_p = float(per_marker[mk]["bg_p"])
-            if "thr" in per_marker[mk]:
-                thr = float(per_marker[mk]["thr"])
-
-        if bg_p > 0:
-            bg = np.percentile(im, bg_p)
-            im = im - bg
-            im[im < 0] = 0
-
-        if thr > 0:
-            im[im < thr] = 0
-
-        if rgb is None:
-            rgb = np.zeros((im.shape[0], im.shape[1], 3), dtype=np.float32)
-
-        info = mc.get(mk, {})
-        col = np.asarray(info.get("color", (255, 255, 255)), dtype=np.float32)
-        w = float(info.get("w", 1.0))
-
-        s = (im / 255.0) * w
-        rgb[..., 0] += s * col[0]
-        rgb[..., 1] += s * col[1]
-        rgb[..., 2] += s * col[2]
-
-    if rgb is None:
-        return None
-
-    if final_gamma != 1.0:
-        x = np.clip(rgb / 255.0, 0, 1)
-        rgb = 255.0 * (x ** (1.0 / final_gamma))
-
-    return clamp_u8(rgb)
-
-
-def save_rgb_png(rgb_u8, out_png_path):
-    Image.fromarray(rgb_u8, mode="RGB").save(out_png_path)
-
-
-def make_base_image(paths, norm_kw=None):
-    if norm_kw is None:
-        norm_kw = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0)
-
-    ch_cols = [
-        (255, 60, 60),
-        (60, 255, 60),
-        (80, 140, 255),
-        (255, 170, 50),
-    ]
-
-    overlays = []
-    tiffs = []
-    others = []
-
-    for fp in paths:
-        if fp is None:
-            continue
-        ext = os.path.splitext(fp)[1].lower()
-        if ext in [".tif", ".tiff"]:
-            tiffs.append(fp)
-        elif ext == ".png" and png_has_alpha(fp):
-            overlays.append(fp)
-        else:
-            others.append(fp)
-
-    if len(tiffs) > 0:
-        if len(tiffs) > 4:
-            tiffs = tiffs[:4]
-
-        pathsD = {}
-        viz = dict(
-            marker_colors={},
-            legend_order=[],
-            norm_default=norm_kw,
-            bg_p=60,
-            thr=5,
-            per_marker={},
-            final_gamma=1.0,
-        )
-
-        i = 0
-        while i < len(tiffs):
-            fp = tiffs[i]
-            mk = os.path.splitext(os.path.basename(fp))[0]
-            pathsD[mk] = fp
-            viz["marker_colors"][mk] = {"color": ch_cols[i], "w": 1.0}
-            viz["legend_order"].append(mk)
-            i += 1
-
-        rgb_u8 = build_cycif_composite_rgb(pathsD, viz)
-        if rgb_u8 is None:
-            a = safe_imread(tiffs[0], Norm=True, **norm_kw)
-            rgb_u8 = np.stack([a, a, a], axis=2).astype(np.uint8)
-
-        legend_items = []
-        i = 0
-        while i < len(tiffs):
-            mk = os.path.splitext(os.path.basename(tiffs[i]))[0]
-            legend_items.append((mk, ch_cols[i]))
-            i += 1
-
-        return rgb_u8, overlays, legend_items
-
-    if len(others) > 0:
-        return None, overlays, []
-
-    if len(overlays) > 0:
-        overlays_out = overlays[1:]
-        return None, overlays_out, []
-
-    return None, [], []
-
-
-def build(payload, outdir=None, norm_kw=None):
-    if isinstance(payload, dict) and ("core_tiles" in payload) and ("view_sets" in payload):
-        return build_catalog(payload, outdir=outdir, norm_kw=norm_kw)
-    return build_legacy(payload, outdir=outdir, norm_kw=norm_kw)
-
-
-def build_legacy(grid2, outdir=None, norm_kw=None):
-    global OUTDIR
-    global ASSETSDIR
-    if outdir is not None:
-        OUTDIR = outdir
-    ASSETSDIR = os.path.join(OUTDIR, "assets")
-    safe_mkdir(OUTDIR)
-    safe_mkdir(ASSETSDIR)
-
-    rows = len(grid2)
-    cols = 0
-    r = 0
-    while r < rows:
-        lr = len(grid2[r])
-        if lr > cols:
-            cols = lr
-        r += 1
-
-    tiles_html = []
-    global_legend = {}
-
-    r = 0
-    while r < rows:
-        row = list(grid2[r])
-        while len(row) < cols:
-            row.append(None)
-
-        c = 0
-        while c < cols:
-            cell = row[c]
-            grid_row = r + 1
-            grid_col = c + 1
-
-            if cell is None:
-                tiles_html.append(
-                    '<div class="tile empty" style="grid-row:' + str(grid_row) + '; grid-column:' + str(grid_col) + ';"></div>'
-                )
-                c += 1
-                continue
-
-            if not isinstance(cell, dict) or len(cell) == 0:
-                tiles_html.append(
-                    '<div class="tile empty" style="grid-row:' + str(grid_row) + '; grid-column:' + str(grid_col) + ';"></div>'
-                )
-                c += 1
-                continue
-
-            label, paths = next(iter(cell.items()))
-            if label is None:
-                label = ""
-
-            if isinstance(paths, str):
-                paths = [paths]
-            if paths is None:
-                paths = []
-
-            rgb_u8, overlays, legend_items = make_base_image(list(paths), norm_kw=norm_kw)
-
-            base_rel = None
-            if rgb_u8 is not None:
-                cache_key = "rgb|" + str(label) + "|" + "|".join([file_id(p) for p in paths if p is not None])
-                tile_id = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
-                base_out = os.path.join(ASSETSDIR, "base_" + tile_id + ".png")
-                if not os.path.exists(base_out):
-                    save_rgb_png(rgb_u8, base_out)
-                base_rel = "assets/" + os.path.basename(base_out)
-            else:
-                if len(paths) > 0:
-                    i = 0
-                    picked = None
-                    while i < len(paths):
-                        p = paths[i]
-                        if p is None:
-                            i += 1
-                            continue
-                        if not is_tiff(p):
-                            if is_png(p):
-                                if png_has_alpha(p):
-                                    picked = p
-                                    break
-                                else:
-                                    picked = p
-                                    break
-                            else:
-                                picked = p
-                                break
-                        i += 1
-                    if picked is not None:
-                        base_rel = copy_asset(picked, subdir="base")
-
-            overlay_rels = []
-            i = 0
-            while i < len(overlays):
-                overlay_rels.append(copy_asset(overlays[i], subdir="ov"))
-                i += 1
-
-            i = 0
-            while i < len(legend_items):
-                mk, col = legend_items[i]
-                if mk not in global_legend:
-                    global_legend[mk] = col
-                i += 1
-
-            label_html = html_escape(str(label))
-            lbl = ""
-            if str(label).strip() != "":
-                lbl = '<div class="lbl">' + label_html + '</div>'
-
-            if base_rel is None:
-                tile_html = (
-                    '<div class="tile missing" style="grid-row:' + str(grid_row) + '; grid-column:' + str(grid_col) + ';">'
-                    '<div class="missingtxt">' + label_html + '</div>'
-                    '</div>'
-                )
-                tiles_html.append(tile_html)
-                c += 1
-                continue
-
-            layers = []
-            layers.append('<img class="layer base" src="' + html_escape(base_rel) + '" loading="lazy" decoding="async">')
-
-            i = 0
-            while i < len(overlay_rels):
-                layers.append('<img class="layer ann" src="' + html_escape(overlay_rels[i]) + '" loading="lazy" decoding="async">')
-                i += 1
-
-            tile_html = (
-                '<div class="tile" style="grid-row:' + str(grid_row) + '; grid-column:' + str(grid_col) + ';">'
-                '<div class="stack">' + "".join(layers) + '</div>'
-                + lbl +
-                '</div>'
-            )
-            tiles_html.append(tile_html)
-            c += 1
-        r += 1
-
-    legend_rows = []
-    for mk in global_legend:
-        c1, c2, c3 = global_legend[mk]
-        legend_rows.append(
-            '<div class="legitem"><span class="sw" style="background:rgb(' + str(c1) + ',' + str(c2) + ',' + str(c3) + ')"></span>'
-            '<span class="mk">' + html_escape(mk) + '</span></div>'
-        )
-
-    if len(legend_rows) == 0:
-        legend_rows = ['<div class="legitem"><span class="mk">No TIFF channels found</span></div>']
-
-    legend_html = "".join(legend_rows)
-
-    html = """<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TMA Viewer</title>
-<style>
-  :root {
-    --bg: """ + BG + """;
-    --gap: """ + str(GAP) + """px;
-    --tile: """ + str(TILE) + """px;
-  }
-  html, body {
-    margin: 0;
-    height: 100%;
-    background: var(--bg);
-    color: #e7e7ea;
-    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-  }
-  .wrap {
-    height: 100%;
-    overflow: auto;
-    padding: var(--gap);
-    box-sizing: border-box;
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(""" + str(cols) + """, var(--tile));
-    grid-auto-rows: var(--tile);
-    gap: var(--gap);
-    align-content: start;
-    justify-content: start;
-  }
-  .tile {
-    position: relative;
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 10px;
-    overflow: hidden;
-  }
-  .tile.empty {
-    background: transparent;
-    border: 1px dashed rgba(255,255,255,0.10);
-  }
-  .tile.missing {
-    background: rgba(255,255,255,0.02);
-    border: 1px dashed rgba(255,255,255,0.25);
-  }
-  .stack {
-    position: absolute;
-    inset: 0;
-    background: #000;
-  }
-  .layer {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    object-position: center center;
-    image-rendering: auto;
-  }
-  .ann {
-    opacity: 1.0;
-    mix-blend-mode: screen;
-  }
-  .lbl {
-    position: absolute;
-    left: 8px;
-    bottom: 8px;
-    font-size: 12px;
-    padding: 4px 7px;
-    border-radius: 8px;
-    background: rgba(0,0,0,0.55);
-    border: 1px solid rgba(255,255,255,0.14);
-    user-select: none;
-    pointer-events: none;
-  }
-  .missingtxt {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    color: #ddd;
-    font-size: 14px;
-    padding: 12px;
-  }
-  #legend_toggle {
-    position: fixed;
-    right: 10px;
-    bottom: 10px;
-    z-index: 100;
-    width: 22px;
-    height: 22px;
-    border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.20);
-    background: rgba(0,0,0,0.6);
-    color: #fff;
-    cursor: pointer;
-    font-size: 11px;
-    padding: 0;
-  }
-  #legend_panel {
-    position: fixed;
-    right: 10px;
-    bottom: 38px;
-    z-index: 99;
-    max-width: min(340px, 45vw);
-    max-height: 45vh;
-    overflow: auto;
-    padding: 8px;
-    border-radius: 10px;
-    border: 1px solid rgba(255,255,255,0.14);
-    background: rgba(0,0,0,0.55);
-    display: none;
-  }
-  #legend_panel.open {
-    display: block;
-  }
-  .legitem {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    padding: 3px 2px;
-  }
-  .sw {
-    width: 12px;
-    height: 12px;
-    border-radius: 3px;
-    border: 1px solid rgba(255,255,255,0.18);
-    flex: 0 0 auto;
-  }
-</style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="grid">
-      """ + "".join(tiles_html) + """
-    </div>
-  </div>
-
-  <button id="legend_toggle" type="button">L</button>
-  <div id="legend_panel">""" + legend_html + """</div>
-
-<script>
-  (function() {
-    var btn = document.getElementById('legend_toggle');
-    var panel = document.getElementById('legend_panel');
-    btn.addEventListener('click', function() {
-      panel.classList.toggle('open');
-    });
-  })();
-</script>
-</body>
-</html>
-"""
-
-    out_html = os.path.join(OUTDIR, "viewer.html")
-    with open(out_html, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    print("Wrote:", out_html)
-    print("Assets in:", ASSETSDIR)
-
-
-def build_catalog(catalog, outdir=None, norm_kw=None):
+def write_viewer_plan(catalog, outdir=None, norm_kw=None):
+    if str(outdir or "").strip() == "":
+        raise ValueError("viewer output root is required")
     run_name_hint = str(catalog.get("run_name_hint", "") or catalog.get("dataset_label", "") or catalog.get("viewer_filename_base", "")).strip()
-    registry, run_dir, registry_path = prepare_run_context(outdir=outdir, norm_kw=norm_kw, run_name_hint=run_name_hint)
+    paths, registry = prepare_run_paths(outdir, run_name_hint=run_name_hint)
+    run_dir = paths["run_dir"]
+    source_specs = list(catalog.get("asset_input_specs", []) or [])
+    recorded_specs = list(registry.get("source_specs", []) or [])
+    if len(source_specs) > 0 and recorded_specs != source_specs:
+        registry["assets"] = {}
     if norm_kw is None:
         norm_kw = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0)
-
-    built_core_tiles = build_core_tiles_for_catalog(catalog, registry, norm_kw)
-    built_figure_entries = build_figure_entries_for_catalog(catalog, registry, norm_kw)
-    viewer_data = make_viewer_data(catalog, built_core_tiles, figure_entries=built_figure_entries)
-    prune_registry_missing_files(registry)
-    write_viewer_run(run_dir, registry_path, registry, viewer_data)
-    return viewer_data
+    report = {
+        "status": "building",
+        "run_dir": os.path.abspath(run_dir),
+        "features": {
+            "core_images": {"status": "pending"},
+            "figures": {"status": "pending", "requested": len(list(catalog.get("figure_entries", []) or [])), "written": 0, "skipped": []},
+            "roi": {"status": "pending"},
+            "thresholds": {"status": "pending"},
+            "subsets": {"status": "pending"},
+        },
+        "warnings": [],
+        "errors": [],
+    }
+    report_path = os.path.join(run_dir, BUILD_REPORT_FN)
+    ready_path = os.path.join(run_dir, READY_FN)
+    try:
+        built_core_tiles = build_core_tiles_for_catalog(catalog, registry, norm_kw, paths)
+        report["features"]["core_images"] = {
+            "status": "ready",
+            "scene_count": len(built_core_tiles),
+        }
+        built_figure_entries = build_figure_entries_for_catalog(catalog, registry, norm_kw, paths, report=report)
+        roi_cores = dict(catalog.get("roi_data", {}).get("cores", {}) or {})
+        report["features"]["roi"] = {
+            "status": "ready" if len(roi_cores) > 0 else "unavailable",
+            "scene_count": len(roi_cores),
+        }
+        threshold_store = dict(catalog.get("threshold_store", {}) or {})
+        report["features"]["thresholds"] = {
+            "status": "ready" if len(threshold_store) > 0 else "unavailable",
+        }
+        subset_options = dict(catalog.get("subset_options", {}) or {})
+        report["features"]["subsets"] = {
+            "status": "ready" if len(subset_options) > 0 else "unavailable",
+            "view_count": len(subset_options),
+        }
+        catalog["feature_status"] = report["features"]
+        output_catalog = dict(catalog)
+        output_catalog["subset_overlays"] = materialize_subset_overlays_for_run(
+            run_dir,
+            catalog.get("subset_overlays", {}),
+        )
+        viewer_data = make_viewer_data(output_catalog, built_core_tiles, figure_entries=built_figure_entries)
+        registry["source_specs"] = source_specs
+        prune_registry_missing_files(registry, run_dir)
+        written = write_viewer_run(paths, registry, viewer_data)
+        report["status"] = "ready"
+        report["viewer_data_path"] = written["viewer_data_path"]
+        report["html_path"] = written["html_path"]
+        save_json(report_path, report)
+        with open(ready_path, "w", encoding="utf-8") as f:
+            f.write("ready\n")
+        return {
+            "status": "ready",
+            "viewer_data": viewer_data,
+            "viewer_data_path": written["viewer_data_path"],
+            "html_path": written["html_path"],
+            "roi_runtime_path": written["roi_runtime_path"],
+            "threshold_runtime_path": written["threshold_runtime_path"],
+            "build_report_path": os.path.abspath(report_path),
+            "run_dir": os.path.abspath(run_dir),
+        }
+    except Exception as exc:
+        report["status"] = "failed"
+        report["errors"].append(str(exc))
+        try:
+            save_json(report_path, report)
+        except Exception:
+            pass
+        raise
 
 
 def derive_run_dir_base(name_hint):
@@ -666,34 +216,28 @@ def make_new_run_dir(runs_dir, name_hint=None):
     return run_dir
 
 
-def prepare_run_context(outdir=None, norm_kw=None, run_name_hint=None):
-    global ROOTDIR
-    global OUTDIR
-    global ASSETSDIR
-    if outdir is None:
-        root = ROOTDIR
-    else:
-        root = outdir
-    ROOTDIR = os.path.abspath(root)
-    safe_mkdir(ROOTDIR)
-
-    pool_dir = os.path.join(ROOTDIR, POOL_DIRNAME)
+def prepare_run_paths(out_root, run_name_hint=None):
+    root_dir = os.path.abspath(str(out_root))
+    safe_mkdir(root_dir)
+    pool_dir = os.path.join(root_dir, POOL_DIRNAME)
     safe_mkdir(pool_dir)
     safe_mkdir(os.path.join(pool_dir, "source"))
     safe_mkdir(os.path.join(pool_dir, "channels"))
 
-    runs_dir = os.path.join(ROOTDIR, RUNS_DIRNAME)
+    runs_dir = os.path.join(root_dir, RUNS_DIRNAME)
     safe_mkdir(runs_dir)
     run_dir = make_new_run_dir(runs_dir, name_hint=run_name_hint)
-
-    OUTDIR = run_dir
-    ASSETSDIR = pool_dir
 
     registry_path = os.path.join(pool_dir, POOL_REGISTRY_FN)
     registry = load_json(registry_path, default={"version": 1, "assets": {}})
     if "assets" not in registry:
         registry["assets"] = {}
-    return registry, run_dir, registry_path
+    return {
+        "root_dir": root_dir,
+        "run_dir": run_dir,
+        "pool_dir": pool_dir,
+        "registry_path": registry_path,
+    }, registry
 
 
 def materialize_roi_data_for_run(run_dir, roi_data):
@@ -718,6 +262,18 @@ def materialize_roi_data_for_run(run_dir, roi_data):
     for core in cores:
         payload = dict(cores.get(core, {}) or {})
         rows = list(payload.pop("rows", []) or [])
+        overlay_sources = list(payload.pop("default_overlay_sources", []) or [])
+        payload["default_overlay_layers"] = [
+            os.path.relpath(str(path), run_dir).replace("\\", "/")
+            for path in overlay_sources
+            if os.path.isfile(str(path))
+        ]
+        boundary_source = str(payload.pop("cell_boundaries_source", "") or "").strip()
+        payload["cell_boundaries_rel"] = (
+            os.path.relpath(boundary_source, run_dir).replace("\\", "/")
+            if boundary_source != "" and os.path.isfile(boundary_source)
+            else ""
+        )
         base = safe_tag(str(core), 80)
         if base == "" or base == "x":
             base = "core"
@@ -734,6 +290,32 @@ def materialize_roi_data_for_run(run_dir, roi_data):
         payload["payload_rel"] = os.path.relpath(payload_path, run_dir).replace("\\", "/")
         payload["row_count"] = len(rows)
         out["cores"][str(core)] = payload
+    return out
+
+
+def materialize_subset_overlays_for_run(run_dir, subset_overlays):
+    """Convert cached subset-overlay files to browser-safe run-relative paths."""
+    out = {}
+    for view_id, groups in dict(subset_overlays or {}).items():
+        view_out = {}
+        for group_id, subsets in dict(groups or {}).items():
+            group_out = {}
+            for subset_id, cores in dict(subsets or {}).items():
+                core_out = {}
+                for core_id, source_paths in dict(cores or {}).items():
+                    rel_paths = [
+                        os.path.relpath(str(path), run_dir).replace("\\", "/")
+                        for path in list(source_paths or [])
+                        if os.path.isfile(str(path))
+                    ]
+                    if len(rel_paths) > 0:
+                        core_out[str(core_id)] = rel_paths
+                if len(core_out) > 0:
+                    group_out[str(subset_id)] = core_out
+            if len(group_out) > 0:
+                view_out[str(group_id)] = group_out
+        if len(view_out) > 0:
+            out[str(view_id)] = view_out
     return out
 
 
@@ -756,8 +338,10 @@ def materialize_figure_entries_for_run(run_dir, viewer_data):
     return viewer_data
 
 
-def write_viewer_run(run_dir, registry_path, registry, viewer_data):
-    prune_registry_missing_files(registry)
+def write_viewer_run(paths, registry, viewer_data):
+    run_dir = paths["run_dir"]
+    registry_path = paths["registry_path"]
+    prune_registry_missing_files(registry, run_dir)
     save_json(registry_path, registry)
     viewer_data["roi_data"] = materialize_roi_data_for_run(run_dir, viewer_data.get("roi_data", {}))
     viewer_data = materialize_figure_entries_for_run(run_dir, viewer_data)
@@ -779,7 +363,14 @@ def write_viewer_run(run_dir, registry_path, registry, viewer_data):
     print("Wrote:", thresh_runtime_path)
     print("Wrote:", viewer_path)
     print("Wrote:", registry_path)
-    print("Assets in pool:", ASSETSDIR)
+    print("Assets in pool:", paths["pool_dir"])
+    return {
+        "html_path": os.path.abspath(html_path),
+        "roi_runtime_path": os.path.abspath(roi_runtime_path),
+        "threshold_runtime_path": os.path.abspath(thresh_runtime_path),
+        "viewer_data_path": os.path.abspath(viewer_path),
+        "registry_path": os.path.abspath(registry_path),
+    }
 
 
 def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
@@ -788,11 +379,6 @@ def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
         "generated_at": catalog.get("generated_at", datetime.utcnow().isoformat() + "Z"),
         "dataset_label": catalog.get("dataset_label", ""),
         "viewer_filename_base": catalog.get("viewer_filename_base", ""),
-        "seed_viewer_label": catalog.get("seed_viewer_label", ""),
-        "seed_viewer_path": catalog.get("seed_viewer_path", ""),
-        "seed_core_match_count": catalog.get("seed_core_match_count", 0),
-        "seed_core_total": catalog.get("seed_core_total", 0),
-        "seed_core_match_fraction": catalog.get("seed_core_match_fraction", 0.0),
         "core_tiles": built_core_tiles,
         "figure_entries": figure_entries or [],
         "figure_render_limit": int(FIGURE_RENDER_LIMIT),
@@ -806,7 +392,8 @@ def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
         "groupings": catalog.get("groupings", {}),
         "view_sets": catalog.get("view_sets", []),
         "default_view_id": catalog.get("default_view_id", ""),
-        "asset_type_catalog": catalog.get("asset_type_catalog", {})
+        "asset_type_catalog": catalog.get("asset_type_catalog", {}),
+        "feature_status": catalog.get("feature_status", {}),
     }
 
 
@@ -823,8 +410,10 @@ def load_json(path, default=None):
 
 
 def save_json(path, obj):
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = str(path) + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
+    os.replace(tmp_path, path)
 
 
 def safe_tag(s, max_len=80):
@@ -854,8 +443,8 @@ def file_sig(path):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def rel_from_out(abs_path):
-    return os.path.relpath(abs_path, OUTDIR).replace("\\", "/")
+def rel_from_run(abs_path, run_dir):
+    return os.path.relpath(abs_path, run_dir).replace("\\", "/")
 
 
 def canonical_core_tag(core_name):
@@ -880,6 +469,8 @@ def infer_tma_tag(path):
 
 
 def source_path_text(source):
+    if isinstance(source, dict) and str(source.get("path", "")).strip() != "":
+        return str(source.get("path"))
     if is_channel_source_spec(source):
         try:
             return str(image_sources.coerce_channel_source(source).path)
@@ -893,6 +484,8 @@ def source_abspath(source):
 
 
 def source_json(source):
+    if isinstance(source, dict) and str(source.get("source_kind", "")) == "cached_png":
+        return dict(source)
     if is_channel_source_spec(source):
         try:
             return image_sources.channel_source_to_json(source)
@@ -924,7 +517,7 @@ def stage_source_file(src_path, out_path, mode=None):
     return "copy"
 
 
-def ensure_source_asset(path, registry, subdir="source", core_name=""):
+def ensure_source_asset(path, registry, paths, subdir="source", core_name=""):
     ap = os.path.abspath(path)
     ext = os.path.splitext(ap)[1].lower()
     if ext == "":
@@ -940,7 +533,7 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
     assets = registry["assets"]
     if key in assets:
         rel = assets[key].get("rel", "")
-        abs_existing = os.path.normpath(os.path.join(OUTDIR, rel))
+        abs_existing = os.path.normpath(os.path.join(paths["run_dir"], rel))
         if rel != "" and os.path.exists(abs_existing):
             if slide_scene != "":
                 assets[key]["slide_scene"] = slide_scene
@@ -956,11 +549,11 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
     parts.append(tag)
     parts.append(sig[:12])
     fn = "__".join(parts) + ext
-    out_dir = os.path.join(ASSETSDIR, subdir)
+    out_dir = os.path.join(paths["pool_dir"], subdir)
     safe_mkdir(out_dir)
     out_abs = os.path.join(out_dir, fn)
     stage_mode = stage_source_file(ap, out_abs)
-    rel = rel_from_out(out_abs)
+    rel = rel_from_run(out_abs, paths["run_dir"])
 
     assets[key] = {
         "kind": "source",
@@ -974,7 +567,7 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
     return rel, key
 
 
-def ensure_figure_asset(path, registry):
+def ensure_figure_asset(path, registry, paths):
     """Copy one figure into the shared asset pool so the viewer is portable."""
     ap = os.path.abspath(path)
     if not os.path.isfile(ap):
@@ -985,25 +578,30 @@ def ensure_figure_asset(path, registry):
     assets = registry["assets"]
     if key in assets:
         rel = assets[key].get("rel", "")
-        abs_existing = os.path.normpath(os.path.join(OUTDIR, rel))
+        abs_existing = os.path.normpath(os.path.join(paths["run_dir"], rel))
         if rel != "" and os.path.isfile(abs_existing) and os.path.getsize(abs_existing) > 0:
             return rel, key
 
     tag = safe_tag(os.path.splitext(os.path.basename(ap))[0], 48)
-    out_dir = os.path.join(ASSETSDIR, "figures")
+    out_dir = os.path.join(paths["pool_dir"], "figures")
     safe_mkdir(out_dir)
     out_abs = os.path.join(out_dir, "figure__" + tag + "__" + sig[:12] + ext)
-    if atomic_write_with_retry is not None:
-        atomic_write_with_retry(
-            out_abs,
-            lambda tmp_path: shutil.copy2(ap, tmp_path),
-            description="figure asset copy",
-            require_nonempty=True,
-        )
-        stage_mode = "copy"
-    else:
-        stage_mode = stage_source_file(ap, out_abs, mode="copy")
-    rel = rel_from_out(out_abs)
+    tmp_abs = out_abs + ".tmp"
+    try:
+        if os.path.exists(tmp_abs):
+            os.remove(tmp_abs)
+        shutil.copy2(ap, tmp_abs)
+        if (not os.path.isfile(tmp_abs)) or os.path.getsize(tmp_abs) <= 0:
+            raise OSError("copied figure is empty: " + ap)
+        os.replace(tmp_abs, out_abs)
+    finally:
+        try:
+            if os.path.exists(tmp_abs):
+                os.remove(tmp_abs)
+        except OSError:
+            pass
+    stage_mode = "copy"
+    rel = rel_from_run(out_abs, paths["run_dir"])
     assets[key] = {
         "kind": "figure",
         "rel": rel,
@@ -1015,6 +613,10 @@ def ensure_figure_asset(path, registry):
 
 
 def marker_from_tiff_path(path):
+    if isinstance(path, dict):
+        for label in (path.get("marker", ""), path.get("channel_name", "")):
+            if str(label).strip() != "":
+                return str(label).strip()
     if is_channel_source_spec(path):
         try:
             source = image_sources.coerce_channel_source(path)
@@ -1091,7 +693,7 @@ def color_for_marker(marker):
     return CHANNEL_COLORS[idx]
 
 
-def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
+def ensure_channel_asset(tiff_path, marker, registry, norm_kw, paths, core_name=""):
     sig = file_sig(tiff_path)
     core_tag = canonical_core_tag(core_name)
     slide_scene = str(core_name or "").strip()
@@ -1104,7 +706,7 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
     assets = registry["assets"]
     if key in assets:
         rel = assets[key].get("rel", "")
-        abs_existing = os.path.normpath(os.path.join(OUTDIR, rel))
+        abs_existing = os.path.normpath(os.path.join(paths["run_dir"], rel))
         if rel != "" and os.path.exists(abs_existing):
             return rel, key
 
@@ -1114,8 +716,8 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
         arr = np.squeeze(arr)
         if arr.ndim != 2:
             arr = arr[..., 0]
-    except Exception:
-        arr = np.zeros((256, 256), dtype=np.uint8)
+    except Exception as exc:
+        raise RuntimeError("Required viewer channel could not be read: " + str(tiff_path)) from exc
 
     arr = np.asarray(arr).astype(np.float32)
     if arr.max() > 255:
@@ -1130,7 +732,7 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
     parts.append(mark_key)
     parts.append(hashlib.sha1(key.encode("utf-8")).hexdigest()[:12])
     fn = "__".join(parts) + ".png"
-    out_dir = os.path.join(ASSETSDIR, "channels")
+    out_dir = os.path.join(paths["pool_dir"], "channels")
     safe_mkdir(out_dir)
     out_abs = os.path.join(out_dir, fn)
     if (not os.path.exists(out_abs)) or os.path.getsize(out_abs) <= 0:
@@ -1139,11 +741,12 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
                 out_abs,
                 lambda tmp_path: Image.fromarray(g, mode="L").save(tmp_path, format="PNG"),
                 description="channel PNG write",
+                max_minutes=0,
                 require_nonempty=True,
             )
         else:
             Image.fromarray(g, mode="L").save(out_abs)
-    rel = rel_from_out(out_abs)
+    rel = rel_from_run(out_abs, paths["run_dir"])
 
     assets[key] = {
         "kind": "channel",
@@ -1161,7 +764,7 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, core_name=""):
     return rel, key
 
 
-def ensure_composite_asset(tile_spec, registry, norm_kw):
+def ensure_composite_asset(tile_spec, registry, norm_kw, paths):
     tiffs = list(tile_spec.get("channel_sources", []) or []) + list(tile_spec.get("tiff_paths", []) or [])
     overlays = list(tile_spec.get("overlay_paths", []))
     core_name = str(tile_spec.get("core", ""))
@@ -1178,7 +781,7 @@ def ensure_composite_asset(tile_spec, registry, norm_kw):
     overlay_rels = []
     i = 0
     while i < len(overlays):
-        rel, _key = ensure_source_asset(overlays[i], registry, subdir="source", core_name=core_name)
+        rel, _key = ensure_source_asset(overlays[i], registry, paths, subdir="source", core_name=core_name)
         overlay_rels.append(rel)
         i += 1
 
@@ -1189,7 +792,7 @@ def ensure_composite_asset(tile_spec, registry, norm_kw):
         mk = marker_labels[i]
         # Use original TIFF path as source for normalization cache generation.
         # No TIFF staging/linking is needed for runtime rendering.
-        rel, _ckey = ensure_channel_asset(tiffs[i], mk, registry, norm_kw, core_name=core_name)
+        rel, _ckey = ensure_channel_asset(tiffs[i], mk, registry, norm_kw, paths, core_name=core_name)
         channels.append({
             "marker": mk,
             "rel": rel
@@ -1224,54 +827,7 @@ def ensure_composite_asset(tile_spec, registry, norm_kw):
     return None, key, overlay_rels, channels
 
 
-def make_rgb_from_tiffs(tiffs, norm_kw=None):
-    if norm_kw is None:
-        norm_kw = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0)
-
-    ch_cols = [
-        (255, 60, 60),
-        (60, 255, 60),
-        (80, 140, 255),
-        (255, 170, 50),
-        (200, 80, 230),
-        (70, 220, 220),
-    ]
-
-    if len(tiffs) == 0:
-        return np.zeros((64, 64, 3), dtype=np.uint8)
-
-    pathsD = {}
-    viz = dict(
-        marker_colors={},
-        legend_order=[],
-        norm_default=norm_kw,
-        bg_p=60,
-        thr=5,
-        per_marker={},
-        final_gamma=1.0,
-    )
-
-    i = 0
-    while i < len(tiffs):
-        fp = tiffs[i]
-        mk = marker_from_tiff_path(fp)
-        pathsD[mk] = fp
-        viz["marker_colors"][mk] = {"color": ch_cols[i % len(ch_cols)], "w": 1.0}
-        viz["legend_order"].append(mk)
-        i += 1
-
-    rgb_u8 = build_cycif_composite_rgb(pathsD, viz)
-    if rgb_u8 is not None:
-        return rgb_u8
-
-    try:
-        arr = safe_imread(tiffs[0], Norm=True, **norm_kw)
-        return np.stack([arr, arr, arr], axis=2).astype(np.uint8)
-    except Exception:
-        return np.zeros((256, 256, 3), dtype=np.uint8)
-
-
-def build_core_tiles_for_catalog(catalog, registry, norm_kw):
+def build_core_tiles_for_catalog(catalog, registry, norm_kw, paths):
     out = {}
     core_tiles = catalog.get("core_tiles", {})
     for core in core_tiles:
@@ -1280,14 +836,22 @@ def build_core_tiles_for_catalog(catalog, registry, norm_kw):
         i = 0
         while i < len(specs):
             spec = specs[i]
-            tile = build_render_tile_from_spec(spec, registry, norm_kw)
+            tile = build_render_tile_from_spec(spec, registry, norm_kw, paths)
+            if tile.get("tile_kind") == "missing":
+                raise RuntimeError("Required viewer image is missing for slide_scene: " + str(core))
+            if tile.get("tile_kind") == "composite" and len(list(tile.get("channels", []) or [])) == 0:
+                raise RuntimeError("Required viewer image has no readable channels for slide_scene: " + str(core))
+            if tile.get("tile_kind") == "figure" and str(tile.get("base_rel", "") or "").strip() == "":
+                raise RuntimeError("Required viewer image could not be staged for slide_scene: " + str(core))
             rendered.append(tile)
             i += 1
+        if len(rendered) == 0:
+            raise RuntimeError("Required viewer image list is empty for slide_scene: " + str(core))
         out[core] = rendered
     return out
 
 
-def build_figure_entries_for_catalog(catalog, registry, norm_kw):
+def build_figure_entries_for_catalog(catalog, registry, norm_kw, paths, report=None):
     out = []
     entries = list(catalog.get("figure_entries", []) or [])
     if len(entries) > 0:
@@ -1297,9 +861,15 @@ def build_figure_entries_for_catalog(catalog, registry, norm_kw):
     while i < len(entries):
         spec = dict(entries[i])
         try:
-            tile = build_render_tile_from_spec(spec, registry, norm_kw)
+            tile = build_render_tile_from_spec(spec, registry, norm_kw, paths)
         except OSError as exc:
             skipped += 1
+            if isinstance(report, dict):
+                figures = report.setdefault("features", {}).setdefault("figures", {})
+                figures.setdefault("skipped", []).append({
+                    "path": str(spec.get("figure_path", "")),
+                    "error": str(exc),
+                })
             if skipped <= 3:
                 print("Viewer: skipping unavailable figure:", spec.get("figure_path", ""), "-", exc)
             i += 1
@@ -1314,62 +884,14 @@ def build_figure_entries_for_catalog(catalog, registry, norm_kw):
         i += 1
     if skipped > 0:
         print("Viewer: skipped", skipped, "unavailable figure asset(s).")
+    if isinstance(report, dict):
+        figures = report.setdefault("features", {}).setdefault("figures", {})
+        figures["status"] = "ready" if skipped == 0 else "degraded"
+        figures["written"] = len(out)
     return out
 
 
-def extend_asset_type_catalog_from_tiles(asset_types, tiles):
-    if not isinstance(asset_types, dict):
-        asset_types = {}
-    tile_list = list(tiles or [])
-    i = 0
-    while i < len(tile_list):
-        tile = dict(tile_list[i])
-        tid = str(tile.get("asset_type_id", "")).strip()
-        tlab = str(tile.get("asset_type_label", tid)).strip()
-        if tid != "" and tid not in asset_types:
-            asset_types[tid] = tlab
-        i += 1
-    return asset_types
-
-
-def build_subset_overlays_for_catalog(catalog, registry):
-    out = {}
-    overlay_map = catalog.get("subset_overlays", {})
-    for view_id in overlay_map:
-        view_payload = overlay_map.get(view_id, {})
-        if not isinstance(view_payload, dict):
-            continue
-        built_view = {}
-        for subset_group in view_payload:
-            group_payload = view_payload.get(subset_group, {})
-            if not isinstance(group_payload, dict):
-                continue
-            built_group = {}
-            for subset_id in group_payload:
-                core_map = group_payload.get(subset_id, {})
-                if not isinstance(core_map, dict):
-                    continue
-                built_core_map = {}
-                for core in core_map:
-                    paths = list(core_map.get(core, []))
-                    rels = []
-                    i = 0
-                    while i < len(paths):
-                        rel, _key = ensure_source_asset(paths[i], registry, subdir="source", core_name=core)
-                        rels.append(rel)
-                        i += 1
-                    if len(rels) > 0:
-                        built_core_map[str(core)] = rels
-                if len(built_core_map) > 0:
-                    built_group[str(subset_id)] = built_core_map
-            if len(built_group) > 0:
-                built_view[str(subset_group)] = built_group
-        if len(built_view) > 0:
-            out[str(view_id)] = built_view
-    return out
-
-
-def build_render_tile_from_spec(spec, registry, norm_kw):
+def build_render_tile_from_spec(spec, registry, norm_kw, paths):
     tile_kind = spec.get("tile_kind", "missing")
     core = str(spec.get("core", ""))
     slide_scene = str(spec.get("slide_scene", "") or core).strip()
@@ -1382,7 +904,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw):
 
     source_count = len(spec.get("channel_sources", []) or []) + len(spec.get("tiff_paths", []) or [])
     if tile_kind == "composite" and source_count > 0:
-        base_rel, cache_key, overlay_rels, channels = ensure_composite_asset(spec, registry, norm_kw)
+        base_rel, cache_key, overlay_rels, channels = ensure_composite_asset(spec, registry, norm_kw, paths)
         return {
             "tile_kind": "composite",
             "core": core,
@@ -1400,7 +922,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw):
 
     fig = spec.get("figure_path", None)
     if fig is not None and str(fig) != "":
-        base_rel, cache_key = ensure_figure_asset(fig, registry)
+        base_rel, cache_key = ensure_figure_asset(fig, registry, paths)
         return {
             "tile_kind": "figure",
             "core": core,
@@ -1440,203 +962,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw):
     }
 
 
-def build_viewer_from_seed(seed_viewer, catalog_patch=None, outdir=None, norm_kw=None):
-    if seed_viewer is None or not isinstance(seed_viewer, dict):
-        seed_viewer = {}
-    patch = catalog_patch if isinstance(catalog_patch, dict) else {}
-    run_name_hint = str(
-        patch.get("run_name_hint", "")
-        or patch.get("dataset_label", "")
-        or patch.get("viewer_filename_base", "")
-        or seed_viewer.get("dataset_label", "")
-        or seed_viewer.get("viewer_filename_base", "")
-    ).strip()
-    registry, run_dir, registry_path = prepare_run_context(outdir=outdir, norm_kw=norm_kw, run_name_hint=run_name_hint)
-    if norm_kw is None:
-        norm_kw = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0)
-
-    viewer_data = copy.deepcopy(seed_viewer)
-    viewer_data["figure_render_limit"] = int(FIGURE_RENDER_LIMIT)
-    figure_entries = build_figure_entries_for_catalog({"figure_entries": patch.get("figure_entries", [])}, registry, norm_kw)
-    subset_overlays = build_subset_overlays_for_catalog({"subset_overlays": patch.get("subset_overlays", {})}, registry)
-    viewer_data.pop("selection_figures", None)
-    viewer_data["figure_entries"] = figure_entries
-    if "subset_options" in patch:
-        viewer_data["subset_options"] = patch.get("subset_options", {})
-    viewer_data["subset_overlays"] = subset_overlays
-
-    for key in [
-        "generated_at",
-        "core_meta",
-        "groupings",
-        "view_sets",
-        "default_view_id",
-        "dataset_label",
-        "viewer_filename_base",
-        "seed_viewer_label",
-        "seed_viewer_path",
-        "seed_core_match_count",
-        "seed_core_total",
-        "seed_core_match_fraction",
-        "overlay_backend",
-        "roi_data",
-        "roi_mailbox",
-        "threshold_store",
-    ]:
-        if key in patch:
-            viewer_data[key] = patch[key]
-
-    asset_types = viewer_data.setdefault("asset_type_catalog", {})
-    extend_asset_type_catalog_from_tiles(asset_types, figure_entries)
-
-    write_viewer_run(run_dir, registry_path, registry, viewer_data)
-    return viewer_data
-
-
-def merge_viewer_data(old_viewer, catalog, built_core_tiles):
-    if old_viewer is None or not isinstance(old_viewer, dict):
-        base = {
-            "version": 1,
-            "generated_at": catalog.get("generated_at", ""),
-            "core_tiles": {},
-            "core_meta": {},
-            "groupings": {},
-            "view_sets": [],
-            "default_view_id": "",
-            "asset_type_catalog": {}
-        }
-    else:
-        base = old_viewer
-
-    merge_dict_of_lists(base.setdefault("core_tiles", {}), built_core_tiles)
-    merge_nested_dict(base.setdefault("core_meta", {}), catalog.get("core_meta", {}))
-    merge_groupings(base.setdefault("groupings", {}), catalog.get("groupings", {}))
-    merge_view_sets(base, catalog.get("view_sets", []))
-
-    asset_types = base.setdefault("asset_type_catalog", {})
-    for k in catalog.get("asset_type_catalog", {}):
-        if k not in asset_types:
-            asset_types[k] = catalog["asset_type_catalog"][k]
-
-    base["generated_at"] = catalog.get("generated_at", base.get("generated_at", ""))
-    if base.get("default_view_id", "") == "":
-        base["default_view_id"] = catalog.get("default_view_id", "")
-    return base
-
-
-def merge_dict_of_lists(dst, src):
-    for k in src:
-        # For any core rebuilt in this run, replace its tile list wholesale.
-        # This avoids stale tiles from prior schema versions lingering in output.
-        dst[k] = list(src[k])
-
-
-def merge_tile_key(t):
-    core = str(t.get("core", ""))
-    tid = str(t.get("asset_type_id", ""))
-    ck = str(t.get("cache_key", ""))
-    if ck != "" and ck != "None":
-        return core + "|" + tid + "|" + ck
-    return tile_signature(t)
-
-
-def tile_is_better(new_t, old_t):
-    old_ch = old_t.get("channels", [])
-    new_ch = new_t.get("channels", [])
-    if len(new_ch) > len(old_ch):
-        return True
-    if old_t.get("base_rel", None) in [None, ""] and new_t.get("base_rel", None) not in [None, ""]:
-        return True
-    if len(new_t.get("overlay_rels", [])) > len(old_t.get("overlay_rels", [])):
-        return True
-    return False
-
-
-def tile_signature(t):
-    core = str(t.get("core", ""))
-    tid = str(t.get("asset_type_id", ""))
-    base = str(t.get("base_rel", ""))
-    ov = "|".join(sorted(list(t.get("overlay_rels", []))))
-    ch = []
-    chans = t.get("channels", [])
-    i = 0
-    while i < len(chans):
-        ch.append(str(chans[i].get("marker", "")) + ":" + str(chans[i].get("rel", "")))
-        i += 1
-    chs = "|".join(sorted(ch))
-    return core + "|" + tid + "|" + base + "|" + ov + "|" + chs
-
-
-def collect_referenced_asset_rels(viewer_data):
-    rels = set()
-    if not isinstance(viewer_data, dict):
-        return rels
-
-    core_tiles = viewer_data.get("core_tiles", {})
-    if not isinstance(core_tiles, dict):
-        return rels
-
-    for core in core_tiles:
-        arr = core_tiles.get(core, [])
-        i = 0
-        while i < len(arr):
-            t = arr[i]
-            base_rel = t.get("base_rel", None)
-            if isinstance(base_rel, str) and base_rel.strip() != "":
-                rels.add(base_rel.replace("\\", "/"))
-
-            ovs = t.get("overlay_rels", [])
-            j = 0
-            while j < len(ovs):
-                rel = ovs[j]
-                if isinstance(rel, str) and rel.strip() != "":
-                    rels.add(rel.replace("\\", "/"))
-                j += 1
-
-            chans = t.get("channels", [])
-            j = 0
-            while j < len(chans):
-                rel = chans[j].get("rel", None)
-                if isinstance(rel, str) and rel.strip() != "":
-                    rels.add(rel.replace("\\", "/"))
-                j += 1
-            i += 1
-    return rels
-
-
-def prune_unreferenced_assets(outdir, viewer_data):
-    assets_root = os.path.join(outdir, "assets")
-    if not os.path.isdir(assets_root):
-        return
-
-    keep_rels = collect_referenced_asset_rels(viewer_data)
-
-    for root, _dirs, files in os.walk(assets_root):
-        i = 0
-        while i < len(files):
-            fp = os.path.join(root, files[i])
-            rel = os.path.relpath(fp, outdir).replace("\\", "/")
-            if rel not in keep_rels:
-                try:
-                    os.remove(fp)
-                except Exception:
-                    pass
-            i += 1
-
-    # remove empty directories under assets
-    for root, dirs, _files in os.walk(assets_root, topdown=False):
-        i = 0
-        while i < len(dirs):
-            d = os.path.join(root, dirs[i])
-            try:
-                if len(os.listdir(d)) == 0:
-                    os.rmdir(d)
-            except Exception:
-                pass
-            i += 1
-
-
-def prune_registry_missing_files(registry):
+def prune_registry_missing_files(registry, run_dir):
     if not isinstance(registry, dict):
         return
     assets = registry.get("assets", {})
@@ -1648,7 +974,7 @@ def prune_registry_missing_files(registry):
         rel = assets[k].get("rel", None)
         if not isinstance(rel, str) or rel.strip() == "":
             continue
-        abs_path = os.path.normpath(os.path.join(OUTDIR, rel))
+        abs_path = os.path.normpath(os.path.join(run_dir, rel))
         if not os.path.exists(abs_path):
             drop.append(k)
 
@@ -1658,51 +984,6 @@ def prune_registry_missing_files(registry):
             del assets[drop[i]]
         except Exception:
             pass
-        i += 1
-
-
-def merge_nested_dict(dst, src):
-    for k in src:
-        if k not in dst:
-            dst[k] = dict(src[k])
-            continue
-        for k2 in src[k]:
-            dst[k][k2] = src[k][k2]
-
-
-def merge_groupings(dst, src):
-    for group in src:
-        if group not in dst:
-            dst[group] = {}
-        for val in src[group]:
-            if val not in dst[group]:
-                dst[group][val] = list(src[group][val])
-            else:
-                existing = set(dst[group][val])
-                arr = src[group][val]
-                i = 0
-                while i < len(arr):
-                    c = arr[i]
-                    if c not in existing:
-                        dst[group][val].append(c)
-                        existing.add(c)
-                    i += 1
-
-
-def merge_view_sets(base, view_sets):
-    dst = base.setdefault("view_sets", [])
-    seen = set()
-    i = 0
-    while i < len(dst):
-        seen.add(dst[i].get("id", ""))
-        i += 1
-    i = 0
-    while i < len(view_sets):
-        v = view_sets[i]
-        vid = v.get("id", "")
-        if vid not in seen:
-            dst.append(v)
-            seen.add(vid)
         i += 1
 
 
@@ -6672,11 +5953,3 @@ window.addEventListener('error', function(evt) {
     with open(out_html, "w", encoding="utf-8") as f:
         f.write(html)
     return out_html
-
-
-if __name__ == "__main__":
-    grid2 = [
-        [{"coreA": [r"im1.tiff", r"im2.tiff"]}, {"CT coreA": [r"figA.png"]}, None],
-        [{"coreB missing tiff": []}, {"CT coreB missing fig": []}, None],
-    ]
-    build(grid2)
