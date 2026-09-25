@@ -21,6 +21,7 @@ if str(SUPPORT_DIR) not in sys.path:
     sys.path.insert(0, str(SUPPORT_DIR))
 
 from ingest_sources import expand_source_spec, has_glob_magic, join_source_specs, split_source_specs
+from registration_paths import trim_mihc_roi_output_root
 from shared_utils import checkChange, load_project_config_values, save_project_config_updates
 
 
@@ -200,9 +201,20 @@ def _prompt_source_specs(
                 known.add(key)
 
 
-def _prompt_output_root(default_root: Path, *, input_fn: Callable[..., str], print_fn: Callable[..., None]) -> Path:
+def _prompt_output_root(
+    default_root: Path,
+    *,
+    input_fn: Callable[..., str],
+    print_fn: Callable[..., None],
+    slide_folders: list[Path] | None = None,
+) -> Path:
     raw = str(checkChange(str(default_root), "registration output root", input_fn=input_fn)).strip()
     path = Path(raw or default_root).expanduser()
+    if slide_folders is not None:
+        trimmed = trim_mihc_roi_output_root(path, [folder.name for folder in slide_folders])
+        if trimmed != path:
+            print_fn("registration output root trimmed to batch root:", trimmed)
+            path = trimmed
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -337,7 +349,12 @@ def run_mihc_interactive(
         print_fn=print_fn,
     )
     default_output = Path(config.get(OUTPUT_CONFIG_KEY, project_root / "registration_output"))
-    output_root = _prompt_output_root(default_output, input_fn=input_fn, print_fn=print_fn)
+    output_root = _prompt_output_root(
+        default_output,
+        input_fn=input_fn,
+        print_fn=print_fn,
+        slide_folders=slide_folders if mode == "mihc_xml" else None,
+    )
     fixed_marker = _prompt_fixed_marker(str(config.get(FIXED_MARKER_CONFIG_KEY, "CD3")), input_fn=input_fn)
     print_fn("planned slide folders:", len(slide_folders))
     for folder in slide_folders:

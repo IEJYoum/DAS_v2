@@ -11,6 +11,7 @@ import gc
 import math
 import re
 import stat
+import sys
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -21,6 +22,13 @@ import numpy as np  # noqa: F401 - imported now because later passes use numpy a
 import tifffile as tiff
 import zarr  # noqa: F401 - fail fast for tifffile SVS region reads.
 from PIL import Image  # noqa: F401 - imported now because later passes write overlays.
+
+
+DAS_ROOT = Path(__file__).resolve().parents[1]
+SUPPORT_DIR = DAS_ROOT / "support"
+if str(SUPPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(SUPPORT_DIR))
+from registration_paths import REG_DAS, trim_mihc_roi_output_root
 
 import realign_mihc_test  # noqa: F401 - fail fast on registration engine deps.
 
@@ -37,7 +45,6 @@ ROI_INTENSITY_WEIGHT = 0.0
 ROI_GRADIENT_WEIGHT = 1.0
 ROI_CONSIDER_MSE = False
 ROI_CONSIDER_CORRELATION = True
-REGISTERED_REGIONS = "Registered_Regions"
 SKIP_SLIDE_DIRS = {"registration_check"}
 TRANSIENT_ERRNOS = {5, 22, 116}
 IO_RETRY_COUNT = 10
@@ -274,7 +281,7 @@ def output_name(path, roi):
 
 
 def output_path_for(output_root, slide_name, roi, path):
-    return output_root / slide_name / REGISTERED_REGIONS / roi / output_name(path, roi)
+    return output_root / slide_name / REG_DAS / roi / output_name(path, roi)
 
 
 def row_key(row):
@@ -939,12 +946,16 @@ def discover_slide(slide_dir, output_root, fixed_marker):
     return rows
 
 
+def discover_slide_dirs(run_root):
+    return [run_root] if len(sorted_files(run_root, ".svs")) > 0 else sorted_child_dirs(run_root)
+
+
 def discover_manifest(run_root, output_root, fixed_marker):
     rows = []
     failures = []
     # A literal slide folder is a valid one-slide batch.  A parent folder keeps
     # the established behavior of scanning its immediate slide subfolders.
-    slide_dirs = [run_root] if len(sorted_files(run_root, ".svs")) > 0 else sorted_child_dirs(run_root)
+    slide_dirs = discover_slide_dirs(run_root)
     for slide_dir in slide_dirs:
         if slide_dir.name.lower() in SKIP_SLIDE_DIRS:
             continue
@@ -1361,6 +1372,14 @@ def main(run_root=None, output_root=None, fixed_marker=None, dry_run=False, max_
         output_root = Path(output_root)
     if fixed_marker is None:
         fixed_marker = FIXED_MARKER
+
+    trimmed_output_root = trim_mihc_roi_output_root(
+        output_root,
+        [slide_dir.name for slide_dir in discover_slide_dirs(run_root)],
+    )
+    if trimmed_output_root != output_root:
+        print("output root trimmed to batch root:", trimmed_output_root)
+        output_root = trimmed_output_root
 
     debug_root = output_root.parent
     debug_path = next_debug_path(debug_root)

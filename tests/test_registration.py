@@ -12,6 +12,7 @@ DATA_EXTRACTION = ROOT / "data_extraction"
 if str(DATA_EXTRACTION) not in sys.path:
     sys.path.insert(0, str(DATA_EXTRACTION))
 import registration
+from registration_paths import REG_DAS, trim_mihc_roi_output_root
 
 
 class RegistrationTests(unittest.TestCase):
@@ -85,6 +86,40 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(captured["folders"], [slide.resolve()])
             self.assertEqual(captured["fixed_marker"], "CD3")
             self.assertEqual(captured["output_root"], (project / "registration_output").resolve())
+
+    def test_roi_output_root_trims_slide_and_reg_das_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_root = Path(tmp) / "Reg"
+            selected = batch_root / "SlideA" / REG_DAS / "SlideA" / REG_DAS / "ROI01"
+
+            self.assertEqual(
+                trim_mihc_roi_output_root(selected, ["SlideA"]),
+                batch_root,
+            )
+
+    def test_xml_output_prompt_saves_trimmed_batch_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            slide = project / "SlideA"
+            selected = project / "Reg" / "SlideA" / REG_DAS / "ROI01"
+            slide.mkdir(parents=True)
+            (slide / "fixed_CD3.svs").touch()
+            (slide / "regions.xml").touch()
+            answers = iter(["2", "use", "", "change", str(selected), "use", "y"])
+            captured = {}
+
+            def fake_input(*_args, **_kwargs):
+                return next(answers)
+
+            def fake_run(folders, output_root, fixed_marker, *, print_fn):
+                captured["output_root"] = output_root
+                return True
+
+            with mock.patch.object(registration, "run_mihc_xml", side_effect=fake_run):
+                completed = registration.main(project_folder=project, input_fn=fake_input)
+
+            self.assertTrue(completed)
+            self.assertEqual(captured["output_root"], (project / "Reg").resolve())
 
 
 if __name__ == "__main__":
