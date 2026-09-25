@@ -771,9 +771,15 @@ def maybe_apply_panel_workbook(root, scene_groups):
     return updated
 
 
-def collect_inputs():
+def collect_inputs(root=None):
     cwd = os.getcwd().replace("\\", "/")
-    if folder_has_supported_files(cwd):
+    if root is not None:
+        root = str(root).strip()
+        if root == "":
+            root = cwd
+        if not folder_has_supported_files(root):
+            raise ValueError("could not find .czi or .tif files in folder: " + str(root))
+    elif folder_has_supported_files(cwd):
         while True:
             root = str(local_check_change(cwd, "folder with .czi or .tif files to register")).strip()
             if root == "":
@@ -2606,19 +2612,25 @@ def run_scene(root, slide_scene, files):
     return save_scene(root, slide_scene, entries, ref_index, shifts, runtime_min)
 
 
-def main():
-    workflow = choose_registration_workflow()
-    if workflow == "mihc":
-        from realign_mihc_bridge import main as run_mihc_registration
-        return run_mihc_registration()
-    root, scene_groups, chosen_scenes = collect_inputs()
-    prompt_registration_settings()
+def run_cycif(root=None, configure=True):
+    """Run CycIF registration with optional source collection supplied by DAS."""
+    root, scene_groups, chosen_scenes = collect_inputs(root=root)
+    if configure:
+        prompt_registration_settings()
     scene_rows = []
     for slide_scene in chosen_scenes:
         scene_rows.append(run_scene(root, slide_scene, scene_groups[slide_scene]))
     if len(scene_rows) > 0:
         save_parent_qc(root, scene_rows)
     return True
+
+
+def main():
+    workflow = choose_registration_workflow()
+    if workflow == "mihc":
+        from realign_mihc_bridge import main as run_mihc_registration
+        return run_mihc_registration()
+    return run_cycif()
 
 
 if __name__ == "__main__":

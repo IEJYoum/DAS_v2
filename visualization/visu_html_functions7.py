@@ -37,6 +37,7 @@ ROOTDIR = OUTDIR
 BG = "#141418"
 GAP = 8
 TILE = 520
+FIGURE_RENDER_LIMIT = 100
 ASSET_REGISTRY_FN = "asset_registry.json"
 VIEWER_DATA_FN = "viewer_data.json"
 RUNS_DIRNAME = "viewer_runs"
@@ -794,6 +795,7 @@ def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
         "seed_core_match_fraction": catalog.get("seed_core_match_fraction", 0.0),
         "core_tiles": built_core_tiles,
         "figure_entries": figure_entries or [],
+        "figure_render_limit": int(FIGURE_RENDER_LIMIT),
         "subset_options": catalog.get("subset_options", {}),
         "subset_overlays": catalog.get("subset_overlays", {}),
         "overlay_backend": catalog.get("overlay_backend", {}),
@@ -900,11 +902,11 @@ def source_json(source):
     return None
 
 
-def stage_source_file(src_path, out_path):
+def stage_source_file(src_path, out_path, mode=None):
     if os.path.lexists(out_path):
         return "existing"
 
-    mode = str(SOURCE_STAGE_MODE).strip().lower()
+    mode = str(SOURCE_STAGE_MODE if mode is None else mode).strip().lower()
     if mode != "copy":
         try:
             os.link(src_path, out_path)
@@ -968,6 +970,46 @@ def ensure_source_asset(path, registry, subdir="source", core_name=""):
         "core": core_tag,
         "tag": tag,
         "storage_mode": stage_mode
+    }
+    return rel, key
+
+
+def ensure_figure_asset(path, registry):
+    """Copy one figure into the shared asset pool so the viewer is portable."""
+    ap = os.path.abspath(path)
+    if not os.path.isfile(ap):
+        raise FileNotFoundError("figure source not found: " + ap)
+    ext = os.path.splitext(ap)[1].lower() or ".bin"
+    sig = file_sig(ap)
+    key = "figure|" + sig
+    assets = registry["assets"]
+    if key in assets:
+        rel = assets[key].get("rel", "")
+        abs_existing = os.path.normpath(os.path.join(OUTDIR, rel))
+        if rel != "" and os.path.isfile(abs_existing) and os.path.getsize(abs_existing) > 0:
+            return rel, key
+
+    tag = safe_tag(os.path.splitext(os.path.basename(ap))[0], 48)
+    out_dir = os.path.join(ASSETSDIR, "figures")
+    safe_mkdir(out_dir)
+    out_abs = os.path.join(out_dir, "figure__" + tag + "__" + sig[:12] + ext)
+    if atomic_write_with_retry is not None:
+        atomic_write_with_retry(
+            out_abs,
+            lambda tmp_path: shutil.copy2(ap, tmp_path),
+            description="figure asset copy",
+            require_nonempty=True,
+        )
+        stage_mode = "copy"
+    else:
+        stage_mode = stage_source_file(ap, out_abs, mode="copy")
+    rel = rel_from_out(out_abs)
+    assets[key] = {
+        "kind": "figure",
+        "rel": rel,
+        "src_path": ap,
+        "tag": tag,
+        "storage_mode": stage_mode,
     }
     return rel, key
 
@@ -1248,10 +1290,20 @@ def build_core_tiles_for_catalog(catalog, registry, norm_kw):
 def build_figure_entries_for_catalog(catalog, registry, norm_kw):
     out = []
     entries = list(catalog.get("figure_entries", []) or [])
+    if len(entries) > 0:
+        print("Viewer: staging", len(entries), "portable figure asset(s).")
+    skipped = 0
     i = 0
     while i < len(entries):
         spec = dict(entries[i])
-        tile = build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=True)
+        try:
+            tile = build_render_tile_from_spec(spec, registry, norm_kw)
+        except OSError as exc:
+            skipped += 1
+            if skipped <= 3:
+                print("Viewer: skipping unavailable figure:", spec.get("figure_path", ""), "-", exc)
+            i += 1
+            continue
         tile["path"] = str(spec.get("path", spec.get("figure_path", "")))
         tile["view_group"] = str(spec.get("view_group", ""))
         tile["view_value"] = str(spec.get("view_value", ""))
@@ -1260,6 +1312,8 @@ def build_figure_entries_for_catalog(catalog, registry, norm_kw):
         tile["search_text"] = str(spec.get("search_text", "")).lower()
         out.append(tile)
         i += 1
+    if skipped > 0:
+        print("Viewer: skipped", skipped, "unavailable figure asset(s).")
     return out
 
 
@@ -1315,14 +1369,7 @@ def build_subset_overlays_for_catalog(catalog, registry):
     return out
 
 
-def local_file_url(path):
-    try:
-        return Path(os.path.abspath(path)).as_uri()
-    except Exception:
-        return ""
-
-
-def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=False):
+def build_render_tile_from_spec(spec, registry, norm_kw):
     tile_kind = spec.get("tile_kind", "missing")
     core = str(spec.get("core", ""))
     slide_scene = str(spec.get("slide_scene", "") or core).strip()
@@ -1353,10 +1400,7 @@ def build_render_tile_from_spec(spec, registry, norm_kw, prefer_external_figure=
 
     fig = spec.get("figure_path", None)
     if fig is not None and str(fig) != "":
-        cache_key = None
-        base_rel = local_file_url(fig) if prefer_external_figure else ""
-        if base_rel == "":
-            base_rel, cache_key = ensure_source_asset(fig, registry, subdir="source", core_name=core)
+        base_rel, cache_key = ensure_figure_asset(fig, registry)
         return {
             "tile_kind": "figure",
             "core": core,
@@ -1412,6 +1456,7 @@ def build_viewer_from_seed(seed_viewer, catalog_patch=None, outdir=None, norm_kw
         norm_kw = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0)
 
     viewer_data = copy.deepcopy(seed_viewer)
+    viewer_data["figure_render_limit"] = int(FIGURE_RENDER_LIMIT)
     figure_entries = build_figure_entries_for_catalog({"figure_entries": patch.get("figure_entries", [])}, registry, norm_kw)
     subset_overlays = build_subset_overlays_for_catalog({"subset_overlays": patch.get("subset_overlays", {})}, registry)
     viewer_data.pop("selection_figures", None)
@@ -2253,6 +2298,7 @@ def write_catalog_viewer_html(outdir, viewer_data, html_name="viewer.html"):
 <script>
 const VIEWER = """ + viewer_json + """;
 const SLOT_COLORS = """ + slot_colors_json + """;
+const FIGURE_RENDER_LIMIT = Math.max(1, Number(VIEWER.figure_render_limit || 100));
 const ALL_SUBSET_ID = 'all_cells';
 const NONE_SUBSET_ID = '__none__';
 const ALL_SUBSET_GROUP = '__all_cells__';
@@ -2826,6 +2872,26 @@ function buildCompositeSquareGrid(cores, view, subsetOpt) {
 
 function collectActiveFigureTiles() {
   return filterFigureEntries({includeType: true, includeAllOnly: true});
+}
+
+function appendDeferredFigureLinks(container, tiles) {
+  if (!tiles || tiles.length === 0) return;
+  const details = h('details', {'class': 'figure-links'});
+  details.appendChild(h('summary', null, `Open ${tiles.length} remaining figure link${tiles.length === 1 ? '' : 's'}`));
+  let populated = false;
+  details.addEventListener('toggle', () => {
+    if (!details.open || populated) return;
+    populated = true;
+    const list = h('div', {'class': 'figure-link-list'});
+    for (const tile of tiles) {
+      const href = String(tile.base_rel || '').trim();
+      if (!href) continue;
+      const link = h('a', {'href': href, 'target': '_blank', 'rel': 'noopener'}, tile.display_label || tile.label || tile.filename || 'figure');
+      list.appendChild(link);
+    }
+    details.appendChild(list);
+  });
+  container.appendChild(details);
 }
 
 function renderAssetTypeChecks() {
@@ -3446,7 +3512,8 @@ function renderActiveView() {
     for (const cell of r) coreGrid.appendChild(makeTileEl(cell, view, subsetOpt));
   }
 
-  const figTiles = collectActiveFigureTiles();
+  const allFigureTiles = collectActiveFigureTiles();
+  const figTiles = allFigureTiles.slice(0, FIGURE_RENDER_LIMIT);
   const figGrid = document.getElementById('figureGrid');
   figGrid.innerHTML = '';
   if (figTiles.length === 0) {
@@ -3455,6 +3522,10 @@ function renderActiveView() {
   } else {
     figGrid.style.gridTemplateColumns = '1fr';
     for (const tile of figTiles) figGrid.appendChild(makeTileEl(tile, view, subsetOpt));
+    if (allFigureTiles.length > figTiles.length) {
+      figGrid.appendChild(h('div', {'class': 'empty-note'}, `Showing ${figTiles.length} of ${allFigureTiles.length} figures. The rest are available as links.`));
+      appendDeferredFigureLinks(figGrid, allFigureTiles.slice(figTiles.length));
+    }
   }
 
   const slotSummary = slotMarkers.map((m, i) => `S${i + 1}:${m || '-'}`).join(' ');
@@ -3467,7 +3538,7 @@ function renderActiveView() {
   const subsetNote = activeFigureSubsetFilters.size > 0 ? String(activeFigureSubsetFilters.size) : 'all';
   const sourceNote = activeFigureSourceFilters.size > 0 ? String(activeFigureSourceFilters.size) : 'all';
   const queryNote = String(figureTagQuery || '').trim() !== '' ? ' | query: ' + String(figureTagQuery || '').trim() : '';
-  document.getElementById('figureMeta').textContent = `figure tiles: ${figTiles.length} | views: ${viewNote} | subsets: ${subsetNote} | sources: ${sourceNote}${queryNote}${autoNote}${allOnly ? ' | _all only' : ''}`;
+  document.getElementById('figureMeta').textContent = `figure tiles: ${figTiles.length}/${allFigureTiles.length} | views: ${viewNote} | subsets: ${subsetNote} | sources: ${sourceNote}${queryNote}${autoNote}${allOnly ? ' | _all only' : ''}`;
 }
 
 function sortedGroups() {

@@ -942,7 +942,10 @@ def discover_slide(slide_dir, output_root, fixed_marker):
 def discover_manifest(run_root, output_root, fixed_marker):
     rows = []
     failures = []
-    for slide_dir in sorted_child_dirs(run_root):
+    # A literal slide folder is a valid one-slide batch.  A parent folder keeps
+    # the established behavior of scanning its immediate slide subfolders.
+    slide_dirs = [run_root] if len(sorted_files(run_root, ".svs")) > 0 else sorted_child_dirs(run_root)
+    for slide_dir in slide_dirs:
         if slide_dir.name.lower() in SKIP_SLIDE_DIRS:
             continue
         try:

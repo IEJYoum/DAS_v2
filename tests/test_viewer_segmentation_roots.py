@@ -13,6 +13,7 @@ VIEWER_DIR = Path(controler.__file__).resolve().parent / "visualization"
 if str(VIEWER_DIR) not in sys.path:
     sys.path.insert(0, str(VIEWER_DIR))
 import call_visu_html_7 as viewer
+import visu_html_functions7 as viewer_html
 
 
 class ViewerSegmentationRootTests(unittest.TestCase):
@@ -53,6 +54,38 @@ class ViewerSegmentationRootTests(unittest.TestCase):
             self.assertEqual(
                 viewer._find_seg_file_multi(roots, "BTK153ROI02"),
                 str(label2),
+            )
+
+    def test_sam_segmentation_matching_uses_full_slide_scene_not_roi_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            color_decon = Path(tmp) / "ColorDecon"
+            first = color_decon / "BTK153" / "Processed" / "ROI01"
+            second = color_decon / "BTK162" / "Processed" / "ROI01"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            first_label = first / "label_BTK153_ROI01.tif"
+            second_label = second / "label_BTK162_ROI01.tif"
+            first_label.touch()
+            second_label.touch()
+
+            roots = [str(first), str(second)]
+
+            self.assertEqual(
+                viewer._find_seg_file_multi(roots, "BTK162ROI01"),
+                str(second_label),
+            )
+
+    def test_single_generic_tiff_is_not_reused_for_other_slide_scenes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            label = Path(tmp) / "BTK153ROI01_CellSegmentationBasins.tif"
+            label.touch()
+
+            self.assertEqual(
+                viewer._find_seg_file_multi([str(label)], "BTK153ROI01"),
+                str(label),
+            )
+            self.assertIsNone(
+                viewer._find_seg_file_multi([str(label)], "BTK162ROI01"),
             )
 
     def test_prompt_accepts_glob_and_saves_only_resolved_roots(self):
@@ -113,6 +146,51 @@ class ViewerSegmentationRootTests(unittest.TestCase):
         )
 
         self.assertTrue(context["per_slide_scene_viewers"])
+
+    def test_figure_discovery_caches_descendant_walk_and_deduplicates_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "class").mkdir()
+            (root / "class" / "plot.png").touch()
+            cache = {}
+            with mock.patch.object(viewer.os, "walk", wraps=viewer.os.walk) as walk:
+                first = viewer.candidate_descendant_figure_roots(
+                    str(root),
+                    [{"value": "class"}],
+                    cache=cache,
+                )
+                second = viewer.candidate_descendant_figure_roots(
+                    str(root),
+                    [{"value": "class"}],
+                    cache=cache,
+                )
+
+            self.assertEqual(len(first), 1)
+            self.assertEqual(first, second)
+            self.assertEqual(walk.call_count, 1)
+
+            path = str((root / "class" / "plot.png").resolve())
+            entries = viewer.dedupe_figure_entries_by_path(
+                [
+                    {"path": path, "label": "subset", "subset_group": "class", "subset_value": "T cell"},
+                    {"path": path, "label": "all", "subset_group": "", "subset_value": ""},
+                ]
+            )
+            self.assertEqual(entries, [{"path": path, "label": "all", "subset_group": "", "subset_value": ""}])
+
+    def test_figure_assets_are_copied_to_portable_relative_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.png"
+            source.write_bytes(b"png bytes")
+            registry, run_dir, _registry_path = viewer_html.prepare_run_context(outdir=str(root / "viewer"))
+
+            rel, _key = viewer_html.ensure_figure_asset(str(source), registry)
+
+            staged = Path(run_dir, rel)
+            self.assertTrue(staged.is_file())
+            self.assertFalse(rel.startswith("file:"))
+            self.assertEqual(staged.read_bytes(), source.read_bytes())
 
 
 if __name__ == "__main__":

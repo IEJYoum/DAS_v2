@@ -820,7 +820,9 @@ def prompt_project_viewer_context(meta, obs=None):
     figure_folder = prompt_required_project_path(
         figure_current,
         "figures folder",
-        create=True,
+        create=False,
+        allow_blank=True,
+        must_exist=True,
         hint=resolve_project_figure_folder(data_folder),
     )
     segmentation_roots = prompt_segmentation_roots(
@@ -1216,7 +1218,7 @@ def candidate_all_data_family_figure_roots(figure_folder):
     return out
 
 
-def candidate_descendant_figure_roots(figure_folder, selection_stack, max_depth=6):
+def candidate_descendant_figure_roots(figure_folder, selection_stack, max_depth=6, cache=None):
     if figure_folder in [None, ""] or len(selection_stack) == 0:
         return []
     root = os.path.abspath(os.path.normpath(str(figure_folder)))
@@ -1232,30 +1234,39 @@ def candidate_descendant_figure_roots(figure_folder, selection_stack, max_depth=
     if len(target_tokens) == 0:
         return []
 
+    cache_key = (root, int(max_depth))
+    descendants = None
+    if isinstance(cache, dict):
+        descendants = cache.get(cache_key)
+    if descendants is None:
+        descendants = []
+        for dirpath, dirnames, _filenames in os.walk(root):
+            rel = os.path.relpath(dirpath, root)
+            depth = 0 if rel in [".", ""] else len([p for p in rel.split(os.sep) if p not in ["", "."]])
+            if depth > int(max_depth):
+                dirnames[:] = []
+                continue
+            if depth > 0:
+                base = os.path.basename(dirpath)
+                token = _canonical_figure_match_token(base)
+                descendants.append((token, os.path.abspath(os.path.normpath(dirpath)), depth))
+            if depth >= int(max_depth):
+                dirnames[:] = []
+        if isinstance(cache, dict):
+            cache[cache_key] = descendants
+
     out = []
     seen = set()
-    for dirpath, dirnames, _filenames in os.walk(root):
-        rel = os.path.relpath(dirpath, root)
-        depth = 0 if rel in [".", ""] else len([p for p in rel.split(os.sep) if p not in ["", "."]])
-        if depth > int(max_depth):
-            dirnames[:] = []
-            continue
-        if depth > 0:
-            base = os.path.basename(dirpath)
-            token = _canonical_figure_match_token(base)
-            if token in target_tokens:
-                abs_path = os.path.abspath(os.path.normpath(dirpath))
-                if abs_path not in seen:
-                    seen.add(abs_path)
-                    out.append(
-                        {
-                            "path": abs_path,
-                            "label": "figures " + tail_path_label(abs_path, depth=4),
-                            "rank": 20 + depth,
-                        }
-                    )
-        if depth >= int(max_depth):
-            dirnames[:] = []
+    for token, abs_path, depth in descendants:
+        if token in target_tokens and abs_path not in seen:
+            seen.add(abs_path)
+            out.append(
+                {
+                    "path": abs_path,
+                    "label": "figures " + tail_path_label(abs_path, depth=4),
+                    "rank": 20 + depth,
+                }
+            )
     return out
 
 
@@ -1480,7 +1491,7 @@ def prompt_required_project_path(current_value, label, *, create=False, allow_bl
             if hint != "":
                 extras.append("hint: " + hint)
             if allow_blank:
-                extras.append("blank = centroid fallback")
+                extras.append("blank = skip")
             if len(extras) > 0:
                 prompt += " [" + "; ".join(extras) + "]"
             prompt += ": "
@@ -2133,7 +2144,7 @@ def resolve_view_figure_roots(group, value, meta):
     return resolve_selection_figure_roots({"group": group, "value": value}, meta)
 
 
-def resolve_selection_figure_roots(view, meta, subset_option=None):
+def resolve_selection_figure_roots(view, meta, subset_option=None, descendant_cache=None):
     candidates = []
     seen = set()
     figure_folder = str(meta.get("figure_folder", "")).strip()
@@ -2160,7 +2171,11 @@ def resolve_selection_figure_roots(view, meta, subset_option=None):
                     root_prefix=root_info.get("root_prefix", ""),
                 )
                 i += 1
-        descendant_roots = candidate_descendant_figure_roots(figure_folder, selection_stack)
+        descendant_roots = candidate_descendant_figure_roots(
+            figure_folder,
+            selection_stack,
+            cache=descendant_cache,
+        )
         i = 0
         while i < len(descendant_roots):
             root_info = descendant_roots[i]
@@ -2228,8 +2243,13 @@ def dedupe_discovered_figures(entries):
     return out
 
 
-def discover_view_figure_specs(view, meta, scan_cache, subset_option=None):
-    roots = resolve_selection_figure_roots(view, meta, subset_option=subset_option)
+def discover_view_figure_specs(view, meta, scan_cache, subset_option=None, descendant_cache=None):
+    roots = resolve_selection_figure_roots(
+        view,
+        meta,
+        subset_option=subset_option,
+        descendant_cache=descendant_cache,
+    )
     found = []
     i = 0
     while i < len(roots):
@@ -2290,12 +2310,23 @@ def _figure_root_signature(roots):
     return tuple(out)
 
 
-def discover_view_figure_specs_cached(view, meta, scan_cache, spec_cache, subset_option=None):
-    roots = resolve_selection_figure_roots(view, meta, subset_option=subset_option)
+def discover_view_figure_specs_cached(view, meta, scan_cache, spec_cache, subset_option=None, descendant_cache=None):
+    roots = resolve_selection_figure_roots(
+        view,
+        meta,
+        subset_option=subset_option,
+        descendant_cache=descendant_cache,
+    )
     sig = _figure_root_signature(roots)
     if isinstance(spec_cache, dict) and sig in spec_cache:
         return [dict(item) for item in list(spec_cache[sig])]
-    specs = discover_view_figure_specs(view, meta, scan_cache, subset_option=subset_option)
+    specs = discover_view_figure_specs(
+        view,
+        meta,
+        scan_cache,
+        subset_option=subset_option,
+        descendant_cache=descendant_cache,
+    )
     if isinstance(spec_cache, dict):
         spec_cache[sig] = [dict(item) for item in list(specs)]
     return specs
@@ -2449,7 +2480,13 @@ def derive_viewer_filename_base(dataset_label):
 
 def _find_seg_file(segpath, slide_scene, suffix=SEG_SUFFIX, depth=0, max_depth=2):
     if segpath and os.path.isfile(segpath):
-        return segpath
+        # A single supplied TIFF belongs to one scene, never every scene.
+        # Convention-specific direct files are handled before this generic
+        # fallback in _find_seg_file_multi.
+        prefix = str(slide_scene).strip().lower() + "_"
+        if prefix != "_" and os.path.basename(str(segpath)).lower().startswith(prefix):
+            return segpath
+        return None
     if segpath and os.path.isdir(segpath):
         prefix = str(slide_scene) + "_"
         names = []
@@ -2498,20 +2535,6 @@ def _find_seg_file(segpath, slide_scene, suffix=SEG_SUFFIX, depth=0, max_depth=2
                 ),
             )
             return os.path.join(segpath, fallback[0])
-        # ROI convention: seg files named label_*_ROI{nn}.tif
-        roi_m = re.search(r"(?i)ROI0*(\d{1,3})", str(slide_scene))
-        if roi_m is not None:
-            roi_tag = "ROI" + roi_m.group(1).zfill(2)
-            label_hits = []
-            for fn in names:
-                fnl = fn.lower()
-                if fnl.startswith("label_") and roi_tag.lower() in fnl and fnl.endswith((".tif", ".tiff")):
-                    label_hits.append(fn)
-            if len(label_hits) == 1:
-                return os.path.join(segpath, label_hits[0])
-            if len(label_hits) > 1:
-                label_hits.sort(key=len)
-                return os.path.join(segpath, label_hits[0])
         subdirs = []
         i = 0
         while i < len(names):
@@ -2533,9 +2556,6 @@ def _find_seg_file_multi(segpaths, slide_scene, suffix=SEG_SUFFIX):
     roots = list(segpaths or [])
     i = 0
     while i < len(roots):
-        found = _find_seg_file(roots[i], slide_scene, suffix=suffix)
-        if found is not None:
-            return found
         if callable(convention_resolve_sam_viewer_assets):
             try:
                 assets = convention_resolve_sam_viewer_assets(roots[i], slide_scene)
@@ -2544,6 +2564,11 @@ def _find_seg_file_multi(segpaths, slide_scene, suffix=SEG_SUFFIX):
                     return candidate
             except Exception:
                 pass
+        # Generic matching may only use the complete slide_scene prefix.
+        # Do not substitute a same-numbered ROI from another slide.
+        found = _find_seg_file(roots[i], slide_scene, suffix=suffix)
+        if found is not None:
+            return found
         i += 1
     return None
 
@@ -4184,6 +4209,44 @@ def build_figure_entries_from_specs(specs, view, subset_option=None):
     return out
 
 
+def preflight_segmentation_map(seed_viewer, meta=None):
+    """Resolve label TIFFs once, keyed only by the complete slide_scene value."""
+    seg_map = build_segmentation_map_from_seed_viewer(seed_viewer, meta)
+    scenes = viewer_slide_scene_values(seed_viewer)
+    missing = [scene for scene in scenes if scene not in seg_map]
+    return seg_map, scenes, missing
+
+
+def dedupe_figure_entries_by_path(entries):
+    """Keep one catalog entry per source figure, preferring the broadest scope."""
+    kept = {}
+    order = []
+    for entry in list(entries or []):
+        item = dict(entry)
+        path = str(item.get("path", item.get("figure_path", ""))).strip()
+        if path == "":
+            path = "__missing__|" + str(item.get("label", ""))
+        key = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        priority = (
+            0 if str(item.get("subset_group", "")).strip() == "" else 1,
+            0 if str(item.get("subset_value", "")).strip() == "" else 1,
+        )
+        existing = kept.get(key)
+        if existing is None:
+            item["_figure_scope_priority"] = priority
+            kept[key] = item
+            order.append(key)
+        elif priority < existing.get("_figure_scope_priority", (1, 1)):
+            item["_figure_scope_priority"] = priority
+            kept[key] = item
+    out = []
+    for key in order:
+        item = dict(kept[key])
+        item.pop("_figure_scope_priority", None)
+        out.append(item)
+    return out
+
+
 def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions, segmentation_by_slide_scene=None):
     ifprog.tick_progress("Project viewer: building subset options and overlays.")
     print("Project viewer: building subset options and overlays.")
@@ -4207,11 +4270,18 @@ def build_project_figure_artifacts(view_sets, subset_options, meta):
     print("Project viewer: discovering figures and writing HTML.")
     scan_cache = {}
     spec_cache = {}
+    descendant_cache = {}
     figure_entries = []
     i = 0
     while i < len(view_sets):
         view = view_sets[i]
-        base_specs = discover_view_figure_specs_cached(view, meta, scan_cache, spec_cache)
+        base_specs = discover_view_figure_specs_cached(
+            view,
+            meta,
+            scan_cache,
+            spec_cache,
+            descendant_cache=descendant_cache,
+        )
         if len(base_specs) > 0:
             figure_entries.extend(build_figure_entries_from_specs(base_specs, view))
         j = 0
@@ -4224,12 +4294,22 @@ def build_project_figure_artifacts(view_sets, subset_options, meta):
             view_options = list(view_payload or [])
         while j < len(view_options):
             subset_option = view_options[j]
-            specs = discover_view_figure_specs_cached(view, meta, scan_cache, spec_cache, subset_option=subset_option)
+            specs = discover_view_figure_specs_cached(
+                view,
+                meta,
+                scan_cache,
+                spec_cache,
+                subset_option=subset_option,
+                descendant_cache=descendant_cache,
+            )
             if len(specs) > 0:
                 figure_entries.extend(build_figure_entries_from_specs(specs, view, subset_option=subset_option))
             j += 1
         i += 1
-    return figure_entries
+    deduped = dedupe_figure_entries_by_path(figure_entries)
+    if len(deduped) != len(figure_entries):
+        print("Project viewer: deduplicated figures", len(figure_entries), "to", len(deduped), "unique source files.")
+    return deduped
 
 
 def assemble_project_catalog(core_tiles, patch, figure_entries, subset_options, subset_overlays):
@@ -4282,7 +4362,9 @@ def build_project_catalog_from_base_viewer(base_viewer, obs, dfxy, meta, out_roo
     view_sets = patch.get("view_sets", [])
     core_names = [str(x) for x in core_tiles.keys()]
     core_positions = build_project_core_positions(obs, core_names)
-    segmentation_by_slide_scene = build_segmentation_map_from_seed_viewer(base_viewer, meta)
+    segmentation_by_slide_scene = meta.get("_segmentation_by_slide_scene") if isinstance(meta, dict) else None
+    if not isinstance(segmentation_by_slide_scene, dict):
+        segmentation_by_slide_scene = build_segmentation_map_from_seed_viewer(base_viewer, meta)
 
     subset_options, subset_overlays, overlay_report = build_project_subset_artifacts(
         base_viewer,
@@ -4596,6 +4678,44 @@ def run_context_mode(df, obs, dfxy, resolved=None, roi_mailbox=None):
         )
         print("Skipped slide_scene values:", ", ".join(missing_scenes[:12]))
         build_df, build_obs, build_dfxy = filter_tables_to_slide_scenes(df, obs, dfxy, covered_scenes)
+
+    # Resolve each segmentation mask before expensive overlay generation.  A
+    # missing exact scene match is allowed only after the user explicitly
+    # accepts centroid-only overlays for those scenes.
+    if len(segmentation_roots) > 0:
+        segmentation_by_slide_scene, map_scenes, unresolved_scenes = preflight_segmentation_map(base_viewer, meta)
+        print("Viewer segmentation preflight: full slide_scene matches.")
+        for scene in map_scenes:
+            source = str(segmentation_by_slide_scene.get(scene, "") or "").strip()
+            print("-", scene, "->", source if source != "" else "UNRESOLVED")
+        if len(unresolved_scenes) > 0:
+            print("WARNING: no segmentation label TIFF matched:", ", ".join(unresolved_scenes[:12]))
+            if len(unresolved_scenes) > 12:
+                print("WARNING:", len(unresolved_scenes) - 12, "additional slide_scene values are unresolved.")
+            raw = str(
+                cvh_input(
+                    "Continue with centroid-only overlays for unresolved slide_scene values? (y/n) [n]: ",
+                    default="n",
+                    prompt_meta={
+                        "options": [
+                            {
+                                "value": "n",
+                                "label": "Stop",
+                                "description": "Return without starting viewer generation.",
+                            },
+                            {
+                                "value": "y",
+                                "label": "Continue",
+                                "description": "Use centroid-only overlays for unresolved scenes.",
+                            },
+                        ]
+                    },
+                )
+            ).strip().lower()
+            if raw not in ["y", "yes", "continue"]:
+                print("Viewer generation cancelled before overlay rendering.")
+                return None
+        meta["_segmentation_by_slide_scene"] = segmentation_by_slide_scene
 
     per_roi = False
     unique_scenes = []

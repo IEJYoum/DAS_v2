@@ -1446,7 +1446,11 @@ def startup_image_registration(state: SessionState) -> None:
     builtins.print = io.legacy_print
     try:
         os.chdir(str(state.build_folder))
-        result = importlib.import_module("realign_v1").main()
+        result = importlib.import_module("registration").main(
+            project_folder=state.project_root,
+            input_fn=io.iget,
+            print_fn=io.legacy_print,
+        )
         registration_completed = result is not False
     finally:
         builtins.input = old_input
