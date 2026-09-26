@@ -590,7 +590,7 @@ def ensure_figure_asset(path, registry, paths):
     try:
         if os.path.exists(tmp_abs):
             os.remove(tmp_abs)
-        shutil.copy2(ap, tmp_abs)
+        shutil.copyfile(ap, tmp_abs)
         if (not os.path.isfile(tmp_abs)) or os.path.getsize(tmp_abs) <= 0:
             raise OSError("copied figure is empty: " + ap)
         os.replace(tmp_abs, out_abs)

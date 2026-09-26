@@ -201,6 +201,15 @@ class ViewerOutputContractTests(unittest.TestCase):
             report = json.loads((run_dir / "build_report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["features"]["figures"]["status"], "degraded")
 
+    def test_figure_staging_does_not_copy_filesystem_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(viewer_html.shutil, "copy2", side_effect=PermissionError("metadata denied")):
+                viewer_data, run_dir = self._build_tiny_viewer(root)
+
+            self.assertEqual(viewer_data["figure_entries_count"], 1)
+            self.assertTrue((run_dir / viewer_data["figure_entries_rel"]).is_file())
+
     def test_required_channel_failure_never_marks_run_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
