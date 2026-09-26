@@ -21,13 +21,13 @@ import imagecodecs  # noqa: F401 - fail fast for JPEG SVS/TIFF support.
 import numpy as np  # noqa: F401 - imported now because later passes use numpy arrays.
 import tifffile as tiff
 import zarr  # noqa: F401 - fail fast for tifffile SVS region reads.
-from PIL import Image  # noqa: F401 - imported now because later passes write overlays.
 
 
 DAS_ROOT = Path(__file__).resolve().parents[1]
 SUPPORT_DIR = DAS_ROOT / "support"
 if str(SUPPORT_DIR) not in sys.path:
     sys.path.insert(0, str(SUPPORT_DIR))
+from registration_debug import compose_fixed_moving_overlay, save_debug_png
 from registration_paths import REG_DAS, trim_mihc_roi_output_root
 
 import realign_mihc_test  # noqa: F401 - fail fast on registration engine deps.
@@ -38,7 +38,7 @@ OUTPUT_ROOT = RUN_ROOT / "Registration_Check" / "Reg_IY" / "Run"
 DEBUG_ROOT = RUN_ROOT / "Registration_Check" / "Reg_IY"
 DEBUG_TXT_NAME = "register_ROIs_mIHC_debug.txt"
 FIXED_MARKER = "CD3"
-BUFFER_PIXELS = 1000
+BUFFER_PIXELS = 2000
 SHIFT_WARNING_PIXELS = 200
 MISSING_TARGET_PIXEL_PENALTY = 1.0
 ROI_INTENSITY_WEIGHT = 0.0
@@ -49,6 +49,9 @@ SKIP_SLIDE_DIRS = {"registration_check"}
 TRANSIENT_ERRNOS = {5, 22, 116}
 IO_RETRY_COUNT = 10
 IO_RETRY_WAIT_SECONDS = 30
+MAKE_DEBUG_OVERLAYS = True
+DEBUG_OVERLAY_MAX_DIM = 1000
+DEBUG_OVERLAY_DIR_NAME = "_debug"
 
 DEBUG_COLUMNS = [
     "slide",
@@ -68,6 +71,8 @@ DEBUG_COLUMNS = [
     "final_loss",
     "warning",
     "output_path",
+    "overlay_path",
+    "overlay_error",
     "reason",
 ]
 
@@ -250,7 +255,7 @@ def crop_roi_from_padded(image, row):
     x0 = int(row["roi_col"]) - int(row["padded_col"])
     y1 = y0 + int(row["roi_h"])
     x1 = x0 + int(row["roi_w"])
-    return np.ascontiguousarray(image[y0:y1, x0:x1, :])
+    return np.ascontiguousarray(image[y0:y1, x0:x1])
 
 
 def write_rgb_tiff(path, image):
@@ -286,6 +291,46 @@ def output_path_for(output_root, slide_name, roi, path):
 
 def row_key(row):
     return row["slide"] + "/" + row["roi"] + "/" + Path(row["svs_path"]).name
+
+
+def debug_overlay_path_for(row):
+    output_path = Path(row["output_path"])
+    return output_path.parent.parent / DEBUG_OVERLAY_DIR_NAME / row["roi"] / (output_path.stem + "_overlay.png")
+
+
+def write_moving_debug_overlay(row, fixed_k, transformed_rgb):
+    """Write an optional final ROI overlay without affecting registration."""
+    if not MAKE_DEBUG_OVERLAYS:
+        return
+    moving_k = None
+    fixed_roi = None
+    moving_roi = None
+    try:
+        moving_k = realign_mihc_test.rgb_to_k_channel(transformed_rgb)
+        fixed_roi = crop_roi_from_padded(fixed_k, row)
+        moving_roi = crop_roi_from_padded(moving_k, row)
+        overlay = compose_fixed_moving_overlay(
+            fixed_roi,
+            moving_roi,
+            max_dim=DEBUG_OVERLAY_MAX_DIM,
+        )
+        output_path = debug_overlay_path_for(row)
+        if save_debug_png(output_path, overlay):
+            row["overlay_path"] = str(output_path)
+            row["overlay_error"] = ""
+            print("  overlay:", output_path.name)
+        else:
+            row["overlay_path"] = ""
+            row["overlay_error"] = "debug overlay could not be written"
+    except Exception as exc:
+        row["overlay_path"] = ""
+        row["overlay_error"] = type(exc).__name__ + ": " + str(exc)
+        print("  overlay failed:", type(exc).__name__, str(exc))
+    finally:
+        del moving_k
+        del fixed_roi
+        del moving_roi
+        gc.collect()
 
 
 def read_padded_row_rgb(row):
@@ -929,6 +974,8 @@ def discover_slide(slide_dir, output_root, fixed_marker):
                 "output_path": str(out_path),
                 "status": status,
                 "reason": reason,
+                "fit_dy": "",
+                "fit_dx": "",
                 "dy": "",
                 "dx": "",
                 "subpixel_dy": "",
@@ -942,6 +989,11 @@ def discover_slide(slide_dir, output_root, fixed_marker):
                 "final_loss": "",
                 "final_overlap": "",
                 "warning": "",
+                "roi_reference_marker": "",
+                "roi_reference_dy": "",
+                "roi_reference_dx": "",
+                "overlay_path": "",
+                "overlay_error": "",
             })
     return rows
 
@@ -989,9 +1041,79 @@ def fixed_row_for_group(group):
     return matches[0]
 
 
-def update_row_from_transform(row, transform):
-    row["dy"] = format_shift(transform["dy"])
-    row["dx"] = format_shift(transform["dx"])
+def reference_row_for_group(group, roi_reference_marker):
+    marker = str(roi_reference_marker or "").strip()
+    if marker == "":
+        return fixed_row_for_group(group)
+    matches = [row for row in group if marker_matches(Path(row["svs_path"]), marker)]
+    if len(matches) != 1:
+        names = [Path(row["svs_path"]).name for row in matches]
+        raise ValueError("expected exactly one ROI reference marker " + marker + ", found " + str(len(matches)) + ": " + str(names))
+    return matches[0]
+
+
+def fit_roi_reference_translation(fixed_k, reference_row):
+    """Fit only the optional output-frame translation to the fixed channel."""
+    if reference_row["role"] == "fixed":
+        return 0.0, 0.0
+    reference_rgb = None
+    reference_k = None
+    try:
+        reference_rgb = read_padded_row_rgb(reference_row)
+        if reference_rgb.shape[:2] != fixed_k.shape:
+            raise ValueError("ROI reference padded shape " + str(reference_rgb.shape) + " != fixed shape " + str(fixed_k.shape))
+        reference_k = realign_mihc_test.rgb_to_k_channel(reference_rgb)
+        dy, dx = fit_translation_scaled_roi(
+            fixed_k,
+            reference_k,
+            1.0,
+            target_from_row(reference_row),
+            "ROI reference " + row_key(reference_row),
+        )
+        print("  ROI reference translation to fixed:", (dy, dx))
+        return float(dy), float(dx)
+    finally:
+        del reference_rgb
+        del reference_k
+        gc.collect()
+
+
+def transform_plane_translation(image, dy, dx):
+    return realign_mihc_test.apply_final_transform_to_canvas(
+        image,
+        dy,
+        dx,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0,
+        image.shape,
+        image.shape,
+        0,
+        0,
+    )
+
+
+def apply_roi_reference_metadata(group, reference_row, frame_dy, frame_dx):
+    marker = reference_row["marker"] or Path(reference_row["svs_path"]).stem
+    for row in group:
+        row["roi_reference_marker"] = marker
+        row["roi_reference_dy"] = format_shift(frame_dy)
+        row["roi_reference_dx"] = format_shift(frame_dx)
+
+
+def update_row_from_transform(row, transform, output_dy=None, output_dx=None):
+    raw_dy = float(transform["dy"])
+    raw_dx = float(transform["dx"])
+    if output_dy is None:
+        output_dy = raw_dy
+    if output_dx is None:
+        output_dx = raw_dx
+    row["fit_dy"] = format_shift(raw_dy)
+    row["fit_dx"] = format_shift(raw_dx)
+    row["dy"] = format_shift(output_dy)
+    row["dx"] = format_shift(output_dx)
     row["subpixel_dy"] = format_shift(transform["subpixel_dy"])
     row["subpixel_dx"] = format_shift(transform["subpixel_dx"])
     row["image_scale"] = format_float(transform["image_scale"])
@@ -1002,7 +1124,7 @@ def update_row_from_transform(row, transform):
     row["initial_overlap"] = str(transform["initial_overlap"])
     row["final_loss"] = format_float(transform["final_loss"])
     row["final_overlap"] = str(transform["final_overlap"])
-    row["warning"] = shift_warning(transform["dy"], transform["dx"])
+    row["warning"] = shift_warning(output_dy, output_dx)
 
 
 def update_row_for_native_crop_fallback(row, exc):
@@ -1015,6 +1137,8 @@ def update_row_for_native_crop_fallback(row, exc):
         + ": "
         + str(exc)
     )
+    row["fit_dy"] = ""
+    row["fit_dx"] = ""
     row["dy"] = "0"
     row["dx"] = "0"
     row["subpixel_dy"] = "0"
@@ -1046,15 +1170,33 @@ def update_row_for_skip_reg_native_crop(row):
     row["warning"] = "SKIP_REG_NATIVE_CROP_WRITTEN"
 
 
-def register_fixed_row(row, fixed_rgb):
+def register_fixed_row(row, fixed_rgb, frame_dy=0.0, frame_dx=0.0):
     output_path = Path(row["output_path"])
     print("write fixed:", row_key(row))
-    cropped = crop_roi_from_padded(fixed_rgb, row)
+    output_dy = -float(frame_dy)
+    output_dx = -float(frame_dx)
+    transformed = None
+    if output_dy == 0.0 and output_dx == 0.0:
+        cropped = crop_roi_from_padded(fixed_rgb, row)
+    else:
+        transformed = transform_rgb(
+            fixed_rgb,
+            output_dy,
+            output_dx,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            fixed_rgb.shape[:2],
+        )
+        cropped = crop_roi_from_padded(transformed, row)
     write_rgb_tiff(output_path, cropped)
     row["status"] = "REGISTERED_FIXED"
     row["reason"] = ""
-    row["dy"] = "0"
-    row["dx"] = "0"
+    row["fit_dy"] = "0"
+    row["fit_dx"] = "0"
+    row["dy"] = format_shift(output_dy)
+    row["dx"] = format_shift(output_dx)
     row["subpixel_dy"] = "0"
     row["subpixel_dx"] = "0"
     row["image_scale"] = "1.000000"
@@ -1063,10 +1205,46 @@ def register_fixed_row(row, fixed_rgb):
     row["shear_y_deg"] = "0.000000"
     row["initial_loss"] = ""
     row["final_loss"] = ""
-    row["warning"] = ""
+    row["warning"] = shift_warning(output_dy, output_dx)
+    del transformed
+    del cropped
+    gc.collect()
 
 
-def register_moving_row(row, fixed_rgb, fixed_k):
+def write_roi_reference_row(row, reference_dy, reference_dx):
+    """Write the chosen ROI-coordinate source without re-registering it."""
+    output_path = Path(row["output_path"])
+    print("write ROI reference:", row_key(row))
+    reference_rgb = None
+    cropped = None
+    try:
+        reference_rgb = read_padded_row_rgb(row)
+        cropped = crop_roi_from_padded(reference_rgb, row)
+        write_rgb_tiff(output_path, cropped)
+        row["status"] = "REGISTERED"
+        row["reason"] = "ROI coordinate reference; native crop written"
+        row["fit_dy"] = format_shift(reference_dy)
+        row["fit_dx"] = format_shift(reference_dx)
+        row["dy"] = "0"
+        row["dx"] = "0"
+        row["subpixel_dy"] = "0"
+        row["subpixel_dx"] = "0"
+        row["image_scale"] = "1.000000"
+        row["rotation_deg"] = "0.000000"
+        row["shear_x_deg"] = "0.000000"
+        row["shear_y_deg"] = "0.000000"
+        row["initial_loss"] = ""
+        row["final_loss"] = ""
+        row["initial_overlap"] = ""
+        row["final_overlap"] = ""
+        row["warning"] = ""
+    finally:
+        del reference_rgb
+        del cropped
+        gc.collect()
+
+
+def register_moving_row(row, fixed_rgb, fixed_k, output_fixed_k, frame_dy=0.0, frame_dx=0.0):
     output_path = Path(row["output_path"])
     print("register:", row_key(row))
     moving_rgb = None
@@ -1079,7 +1257,9 @@ def register_moving_row(row, fixed_rgb, fixed_k):
             raise ValueError("moving padded shape " + str(moving_rgb.shape) + " != fixed padded shape " + str(fixed_rgb.shape))
         moving_k = realign_mihc_test.rgb_to_k_channel(moving_rgb)
         transform = fit_transform(fixed_k, moving_k, row)
-        update_row_from_transform(row, transform)
+        output_dy = float(transform["dy"]) - float(frame_dy)
+        output_dx = float(transform["dx"]) - float(frame_dx)
+        update_row_from_transform(row, transform, output_dy, output_dx)
         if float(transform["final_loss"]) > float(transform["initial_loss"]):
             raise ValueError(
                 "final loss increased: initial="
@@ -1093,8 +1273,8 @@ def register_moving_row(row, fixed_rgb, fixed_k):
             )
         transformed = transform_rgb(
             moving_rgb,
-            transform["dy"],
-            transform["dx"],
+            output_dy,
+            output_dx,
             transform["rotation_deg"],
             transform["shear_x_deg"],
             transform["shear_y_deg"],
@@ -1105,6 +1285,7 @@ def register_moving_row(row, fixed_rgb, fixed_k):
         write_rgb_tiff(output_path, cropped)
         row["status"] = "REGISTERED"
         row["reason"] = ""
+        write_moving_debug_overlay(row, output_fixed_k, transformed)
         print("  wrote:", output_path.name, "dy=" + row["dy"], "dx=" + row["dx"])
         if row["warning"] != "":
             print("  warning:", row["warning"])
@@ -1141,18 +1322,31 @@ def write_skip_reg_native_crop(row):
         gc.collect()
 
 
-def register_roi_group(group, max_outputs, processed_count, skip_reg=False):
+def register_roi_group(group, max_outputs, processed_count, skip_reg=False, roi_reference_marker=""):
     fixed_row = fixed_row_for_group(group)
     fixed_rgb = None
     fixed_k = None
+    output_fixed_k = None
     try:
-        if fixed_row["status"] == "NEEDS_REGISTRATION":
-            fixed_rgb = read_padded_row_rgb(fixed_row)
-            register_fixed_row(fixed_row, fixed_rgb)
-        if not skip_reg:
-            if fixed_rgb is None:
-                fixed_rgb = read_padded_row_rgb(fixed_row)
+        fixed_rgb = read_padded_row_rgb(fixed_row)
+        if skip_reg:
+            reference_row = fixed_row
+            frame_dy = 0.0
+            frame_dx = 0.0
+            if str(roi_reference_marker or "").strip() != "":
+                print("  skip-reg: ROI reference correction not applied")
+        else:
             fixed_k = realign_mihc_test.rgb_to_k_channel(fixed_rgb)
+            reference_row = reference_row_for_group(group, roi_reference_marker)
+            frame_dy, frame_dx = fit_roi_reference_translation(fixed_k, reference_row)
+            if frame_dy == 0.0 and frame_dx == 0.0:
+                output_fixed_k = fixed_k
+            else:
+                output_fixed_k = transform_plane_translation(fixed_k, -frame_dy, -frame_dx)
+        apply_roi_reference_metadata(group, reference_row, frame_dy, frame_dx)
+
+        if fixed_row["status"] == "NEEDS_REGISTRATION":
+            register_fixed_row(fixed_row, fixed_rgb, frame_dy, frame_dx)
 
         for row in group:
             if row["status"] != "NEEDS_REGISTRATION":
@@ -1165,8 +1359,10 @@ def register_roi_group(group, max_outputs, processed_count, skip_reg=False):
             try:
                 if skip_reg:
                     write_skip_reg_native_crop(row)
+                elif row is reference_row:
+                    write_roi_reference_row(row, frame_dy, frame_dx)
                 else:
-                    register_moving_row(row, fixed_rgb, fixed_k)
+                    register_moving_row(row, fixed_rgb, fixed_k, output_fixed_k, frame_dy, frame_dx)
                 processed_count = processed_count + 1
             except Exception as exc:
                 row["status"] = "FAILED_REGISTRATION"
@@ -1176,11 +1372,12 @@ def register_roi_group(group, max_outputs, processed_count, skip_reg=False):
     finally:
         del fixed_rgb
         del fixed_k
+        del output_fixed_k
         gc.collect()
     return processed_count
 
 
-def register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root, fixed_marker, failures, skip_reg=False):
+def register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root, fixed_marker, failures, skip_reg=False, roi_reference_marker=""):
     processed_count = 0
     groups = row_groups(rows)
     for key in sorted(groups):
@@ -1190,18 +1387,18 @@ def register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root,
                 if row["status"] == "NEEDS_REGISTRATION":
                     row["status"] = "SKIP_MAX_OUTPUTS"
                     row["reason"] = "max output limit reached"
-            lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg)
+            lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg, roi_reference_marker)
             write_debug_path(debug_path, lines)
             continue
         try:
-            processed_count = register_roi_group(groups[key], max_outputs, processed_count, skip_reg)
+            processed_count = register_roi_group(groups[key], max_outputs, processed_count, skip_reg, roi_reference_marker)
         except Exception as exc:
             for row in groups[key]:
                 if row["status"] == "NEEDS_REGISTRATION":
                     row["status"] = "FAILED_ROI"
                     row["reason"] = type(exc).__name__ + ": " + str(exc)
             print("roi failed:", key[0], key[1], type(exc).__name__, str(exc))
-        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg)
+        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg, roi_reference_marker)
         write_debug_path(debug_path, lines)
 
 
@@ -1227,7 +1424,7 @@ def status_count_lines(rows):
     return lines
 
 
-def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_status, skip_reg=False):
+def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_status, skip_reg=False, roi_reference_marker=""):
     lines = [
         "register_ROIs_mIHC",
         "status\t" + run_status,
@@ -1235,6 +1432,7 @@ def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_stat
         "run_root\t" + str(run_root),
         "output_root\t" + str(output_root),
         "fixed_marker\t" + fixed_marker,
+        "requested_roi_reference_marker\t" + (str(roi_reference_marker).strip() or fixed_marker),
         "skip_registration\t" + str(skip_reg),
         "buffer_pixels\t" + str(BUFFER_PIXELS),
         "shift_warning_pixels\t" + str(SHIFT_WARNING_PIXELS),
@@ -1263,7 +1461,7 @@ def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_stat
     lines.extend([
         "",
         "[manifest]",
-        "slide\troi\tmarker\trole\tstatus\tdy\tdx\tsubpixel_dy\tsubpixel_dx\timage_scale\trotation_deg\tshear_x_deg\tshear_y_deg\tinitial_loss\tfinal_loss\tinitial_overlap\tfinal_overlap\twarning\troi_row\troi_col\troi_h\troi_w\tpadded_row\tpadded_col\tpadded_h\tpadded_w\tsvs_shape\tsvs_dtype\tsvs_compression\tsvs_pages\tsvs_path\tfixed_svs_path\txml_path\toutput_path\treason",
+        "slide\troi\tmarker\trole\tstatus\tfit_dy\tfit_dx\tdy\tdx\tsubpixel_dy\tsubpixel_dx\timage_scale\trotation_deg\tshear_x_deg\tshear_y_deg\tinitial_loss\tfinal_loss\tinitial_overlap\tfinal_overlap\twarning\troi_reference_marker\troi_reference_dy\troi_reference_dx\troi_row\troi_col\troi_h\troi_w\tpadded_row\tpadded_col\tpadded_h\tpadded_w\tsvs_shape\tsvs_dtype\tsvs_compression\tsvs_pages\tsvs_path\tfixed_svs_path\txml_path\toutput_path\toverlay_path\toverlay_error\treason",
     ])
     for row in rows:
         lines.append(
@@ -1276,6 +1474,10 @@ def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_stat
             + row["role"]
             + "\t"
             + row["status"]
+            + "\t"
+            + row.get("fit_dy", "")
+            + "\t"
+            + row.get("fit_dx", "")
             + "\t"
             + row["dy"]
             + "\t"
@@ -1302,6 +1504,12 @@ def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_stat
             + row["final_overlap"]
             + "\t"
             + row["warning"]
+            + "\t"
+            + row.get("roi_reference_marker", "")
+            + "\t"
+            + row.get("roi_reference_dy", "")
+            + "\t"
+            + row.get("roi_reference_dx", "")
             + "\t"
             + row["roi_row"]
             + "\t"
@@ -1335,6 +1543,10 @@ def manifest_lines(run_root, output_root, fixed_marker, rows, failures, run_stat
             + "\t"
             + row["output_path"]
             + "\t"
+            + row.get("overlay_path", "")
+            + "\t"
+            + row.get("overlay_error", "")
+            + "\t"
             + row["reason"]
         )
     return lines
@@ -1361,7 +1573,7 @@ def print_summary(rows, failures):
     print("failed discovery:", len(failures))
 
 
-def main(run_root=None, output_root=None, fixed_marker=None, dry_run=False, max_outputs=None, skip_reg=False):
+def main(run_root=None, output_root=None, fixed_marker=None, roi_reference_marker="", dry_run=False, max_outputs=None, skip_reg=False):
     if run_root is None:
         run_root = RUN_ROOT
     else:
@@ -1372,6 +1584,7 @@ def main(run_root=None, output_root=None, fixed_marker=None, dry_run=False, max_
         output_root = Path(output_root)
     if fixed_marker is None:
         fixed_marker = FIXED_MARKER
+    roi_reference_marker = str(roi_reference_marker or "").strip()
 
     trimmed_output_root = trim_mihc_roi_output_root(
         output_root,
@@ -1386,15 +1599,25 @@ def main(run_root=None, output_root=None, fixed_marker=None, dry_run=False, max_
     rows, failures = discover_manifest(run_root, output_root, fixed_marker)
     print_summary(rows, failures)
     if dry_run:
-        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "dry_run", skip_reg)
+        lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "dry_run", skip_reg, roi_reference_marker)
         write_debug_path(debug_path, lines)
         print("dry run: no registered TIFFs written")
         return rows, failures
 
-    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg)
+    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "running", skip_reg, roi_reference_marker)
     write_debug_path(debug_path, lines)
-    register_manifest_rows(rows, max_outputs, debug_path, run_root, output_root, fixed_marker, failures, skip_reg)
-    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "Done!", skip_reg)
+    register_manifest_rows(
+        rows,
+        max_outputs,
+        debug_path,
+        run_root,
+        output_root,
+        fixed_marker,
+        failures,
+        skip_reg,
+        roi_reference_marker,
+    )
+    lines = manifest_lines(run_root, output_root, fixed_marker, rows, failures, "Done!", skip_reg, roi_reference_marker)
     write_debug_path(debug_path, lines)
     print_summary(rows, failures)
     print("Done!")
@@ -1406,6 +1629,7 @@ if __name__ == "__main__":
     parser.add_argument("--run-root", type=Path, default=None, help="Folder containing slide folders.")
     parser.add_argument("--output-root", type=Path, default=None, help="Mirrored Reg_IY/Run output folder.")
     parser.add_argument("--fixed-marker", default=None, help="Fixed marker token. Default CD3.")
+    parser.add_argument("--roi-reference-marker", default="", help="Optional output ROI frame marker. Blank keeps the fixed-marker frame.")
     parser.add_argument("--dry-run", action="store_true", help="Discover planned outputs without writing TIFFs.")
     parser.add_argument("--max-outputs", type=int, default=None, help="Stop after this many attempted TIFF outputs.")
     parser.add_argument("--skip-reg", action="store_true", help="For missing moving outputs, write native ROI crops instead of fitting registration.")
@@ -1414,6 +1638,7 @@ if __name__ == "__main__":
         run_root=args.run_root,
         output_root=args.output_root,
         fixed_marker=args.fixed_marker,
+        roi_reference_marker=args.roi_reference_marker,
         dry_run=args.dry_run,
         max_outputs=args.max_outputs,
         skip_reg=args.skip_reg,

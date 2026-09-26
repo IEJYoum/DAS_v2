@@ -1,12 +1,19 @@
 """Make small PNG overlays to inspect registered images."""
 
 import stat
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import tifffile as tiff
-from PIL import Image
+
+
+DAS_ROOT = Path(__file__).resolve().parents[1]
+SUPPORT_DIR = DAS_ROOT / "support"
+if str(SUPPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(SUPPORT_DIR))
+from registration_debug import compose_fixed_moving_overlay, save_debug_png
 
 
 REGISTERED_DIR = Path(
@@ -166,13 +173,15 @@ def normalize_for_png(image):
 
 
 def overlay_rgb(fixed, moving):
-    fixed_png = normalize_for_png(fixed)
-    moving_png = normalize_for_png(moving)
-    rgb = np.zeros((fixed_png.shape[0], fixed_png.shape[1], 3), dtype=np.uint8)
-    rgb[:, :, 0] = moving_png
-    rgb[:, :, 1] = np.maximum(fixed_png, moving_png)
-    rgb[:, :, 2] = fixed_png
-    return rgb
+    # Keep the established mIHC colours: fixed cyan, moving yellow.
+    return compose_fixed_moving_overlay(
+        fixed,
+        moving,
+        max_dim=None,
+        normalizer=normalize_for_png,
+        fixed_color=(0, 1, 1),
+        moving_color=(1, 1, 0),
+    )
 
 
 def png_name_for(path):
@@ -208,7 +217,8 @@ def main(registered_dir=None):
         rgb = overlay_rgb(fixed, moving)
         output_path = output_dir / png_name_for(path)
         print("  writing:", output_path.name)
-        _retry_io("Image.save", output_path, lambda op=output_path: Image.fromarray(rgb).save(op))
+        # Overlays are optional QC. A locked PNG must not stop a completed run.
+        save_debug_png(output_path, rgb)
 
     print("done")
 

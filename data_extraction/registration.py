@@ -227,6 +227,10 @@ def _prompt_fixed_marker(default_marker: str, *, input_fn: Callable[..., str]) -
     return marker or default_marker
 
 
+def _prompt_roi_reference_marker(input_fn: Callable[..., str]) -> str:
+    return _ask(input_fn, "ROI reference marker [blank = fixed marker]: ")
+
+
 def _stream_subprocess(command: list[str], *, cwd: Path, print_fn: Callable[..., None]) -> bool:
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
@@ -282,7 +286,14 @@ def run_mihc_whole(slide_folders: list[Path], output_root: Path, fixed_marker: s
     return success
 
 
-def run_mihc_xml(slide_folders: list[Path], output_root: Path, fixed_marker: str, *, print_fn: Callable[..., None] = print) -> bool:
+def run_mihc_xml(
+    slide_folders: list[Path],
+    output_root: Path,
+    fixed_marker: str,
+    *,
+    roi_reference_marker: str = "",
+    print_fn: Callable[..., None] = print,
+) -> bool:
     """Run the unchanged XML ROI engine once per slide folder."""
     missing = _missing_xml_dependencies()
     if missing:
@@ -302,6 +313,8 @@ def run_mihc_xml(slide_folders: list[Path], output_root: Path, fixed_marker: str
             str(output_root),
             "--fixed-marker",
             fixed_marker,
+            "--roi-reference-marker",
+            roi_reference_marker,
         ]
         success = _stream_subprocess(command, cwd=MIHC_XML_SCRIPT.parent, print_fn=print_fn) and success
     return success
@@ -356,11 +369,16 @@ def run_mihc_interactive(
         slide_folders=slide_folders if mode == "mihc_xml" else None,
     )
     fixed_marker = _prompt_fixed_marker(str(config.get(FIXED_MARKER_CONFIG_KEY, "CD3")), input_fn=input_fn)
+    roi_reference_marker = ""
+    if mode == "mihc_xml":
+        roi_reference_marker = _prompt_roi_reference_marker(input_fn)
     print_fn("planned slide folders:", len(slide_folders))
     for folder in slide_folders:
         print_fn("  ", folder)
     print_fn("output root:", output_root)
     print_fn("fixed/reference marker:", fixed_marker)
+    if mode == "mihc_xml":
+        print_fn("ROI output frame:", roi_reference_marker or fixed_marker)
     if not _ask_yes_no(input_fn, "run registration now", default=True):
         return False
 
@@ -373,7 +391,13 @@ def run_mihc_interactive(
         },
     )
     if mode == "mihc_xml":
-        return run_mihc_xml(slide_folders, output_root, fixed_marker, print_fn=print_fn)
+        return run_mihc_xml(
+            slide_folders,
+            output_root,
+            fixed_marker,
+            roi_reference_marker=roi_reference_marker,
+            print_fn=print_fn,
+        )
     return run_mihc_whole(slide_folders, output_root, fixed_marker, print_fn=print_fn)
 
 

@@ -36,6 +36,12 @@ from image_conventions import (
     marker_slot_count,
     read_czi_channel_names,
 )
+from registration_debug import (
+    append_debug_text,
+    compose_fixed_moving_overlay,
+    save_debug_png,
+    write_debug_text,
+)
 from shared_utils import checkChange
 
 try:
@@ -227,9 +233,6 @@ def registration_settings_text():
     return "\n".join(lines)
 
 
-_WRITE_WARNING_KEYS = set()
-
-
 def _safe_token(value):
     text = str(value or "").strip()
     text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
@@ -237,51 +240,24 @@ def _safe_token(value):
 
 
 def _safe_write_text(path, text):
-    path = Path(path)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(text), encoding="utf-8")
-        return True
-    except (PermissionError, OSError) as exc:
-        key = str(path)
-        if key not in _WRITE_WARNING_KEYS:
-            _WRITE_WARNING_KEYS.add(key)
-            print("debug text not updated; file may be open/locked:", path, exc)
-            _flush_session_log()
-        return False
+    saved = write_debug_text(path, text)
+    if not saved:
+        _flush_session_log()
+    return saved
 
 
 def _safe_append_text(path, text):
-    path = Path(path)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(str(text))
-            if not str(text).endswith("\n"):
-                handle.write("\n")
-        return True
-    except (PermissionError, OSError) as exc:
-        key = str(path) + "::append"
-        if key not in _WRITE_WARNING_KEYS:
-            _WRITE_WARNING_KEYS.add(key)
-            print("debug log not updated; file may be open/locked:", path, exc)
-            _flush_session_log()
-        return False
+    saved = append_debug_text(path, text)
+    if not saved:
+        _flush_session_log()
+    return saved
 
 
 def _safe_save_png(path, rgb):
-    path = Path(path)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        plt.imsave(str(path), np.clip(rgb, 0.0, 1.0))
-        return True
-    except (PermissionError, OSError) as exc:
-        key = str(path) + "::png"
-        if key not in _WRITE_WARNING_KEYS:
-            _WRITE_WARNING_KEYS.add(key)
-            print("debug overlay not updated; file may be open/locked:", path, exc)
-            _flush_session_log()
-        return False
+    saved = save_debug_png(path, rgb)
+    if not saved:
+        _flush_session_log()
+    return saved
 
 
 def _flush_session_log():
@@ -355,29 +331,11 @@ def _progress_overlay_rgb(
         base_shift=(0, 0),
         order=1,
     ).astype(np.float32)
-    fixed_show = _normalize_for_overlay(fixed_small)
-    moving_show = _normalize_for_overlay(moving_shifted)
-    rgb = np.zeros((fixed_show.shape[0], fixed_show.shape[1], 3), dtype=np.float32)
-    rgb[:, :, 0] = fixed_show
-    rgb[:, :, 1] = moving_show
-    rgb[:, :, 2] = moving_show
-    return rgb
-
-
-def _normalize_for_overlay(image):
-    arr = np.asarray(image, dtype=np.float32)
-    finite = np.isfinite(arr)
-    if not finite.any():
-        return np.zeros(arr.shape, dtype=np.float32)
-    lo = float(np.percentile(arr[finite], 1))
-    hi = float(np.percentile(arr[finite], 99))
-    if hi <= lo:
-        hi = float(arr[finite].max())
-    if hi <= lo:
-        return np.zeros(arr.shape, dtype=np.float32)
-    out = (arr - lo) / (hi - lo)
-    out[~finite] = 0
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
+    return compose_fixed_moving_overlay(
+        fixed_small,
+        moving_shifted,
+        max_dim=None,
+    )
 
 
 def _resize_debug_panel(panel):

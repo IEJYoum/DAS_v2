@@ -67,16 +67,17 @@ class RegistrationTests(unittest.TestCase):
             slide.mkdir(parents=True)
             (slide / "fixed_CD3.svs").touch()
             (slide / "regions.xml").touch()
-            answers = iter(["2", "use", "", "use", "use", "y"])
+            answers = iter(["2", "use", "", "use", "use", "", "y"])
             captured = {}
 
             def fake_input(*_args, **_kwargs):
                 return next(answers)
 
-            def fake_run(folders, output_root, fixed_marker, *, print_fn):
+            def fake_run(folders, output_root, fixed_marker, *, roi_reference_marker, print_fn):
                 captured["folders"] = folders
                 captured["output_root"] = output_root
                 captured["fixed_marker"] = fixed_marker
+                captured["roi_reference_marker"] = roi_reference_marker
                 return True
 
             with mock.patch.object(registration, "run_mihc_xml", side_effect=fake_run):
@@ -85,7 +86,30 @@ class RegistrationTests(unittest.TestCase):
             self.assertTrue(completed)
             self.assertEqual(captured["folders"], [slide.resolve()])
             self.assertEqual(captured["fixed_marker"], "CD3")
+            self.assertEqual(captured["roi_reference_marker"], "")
             self.assertEqual(captured["output_root"], (project / "registration_output").resolve())
+
+    def test_xml_dispatch_passes_optional_roi_reference_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            slide = project / "SlideA"
+            slide.mkdir(parents=True)
+            (slide / "fixed_CD3.svs").touch()
+            (slide / "regions.xml").touch()
+            answers = iter(["2", "use", "", "use", "use", "HEM", "y"])
+            captured = {}
+
+            def fake_input(*_args, **_kwargs):
+                return next(answers)
+
+            def fake_run(folders, output_root, fixed_marker, *, roi_reference_marker, print_fn):
+                captured["roi_reference_marker"] = roi_reference_marker
+                return True
+
+            with mock.patch.object(registration, "run_mihc_xml", side_effect=fake_run):
+                self.assertTrue(registration.main(project_folder=project, input_fn=fake_input))
+
+            self.assertEqual(captured["roi_reference_marker"], "HEM")
 
     def test_roi_output_root_trims_slide_and_reg_das_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -105,13 +129,13 @@ class RegistrationTests(unittest.TestCase):
             slide.mkdir(parents=True)
             (slide / "fixed_CD3.svs").touch()
             (slide / "regions.xml").touch()
-            answers = iter(["2", "use", "", "change", str(selected), "use", "y"])
+            answers = iter(["2", "use", "", "change", str(selected), "use", "", "y"])
             captured = {}
 
             def fake_input(*_args, **_kwargs):
                 return next(answers)
 
-            def fake_run(folders, output_root, fixed_marker, *, print_fn):
+            def fake_run(folders, output_root, fixed_marker, *, roi_reference_marker, print_fn):
                 captured["output_root"] = output_root
                 return True
 
