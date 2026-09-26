@@ -228,7 +228,12 @@ def _prompt_fixed_marker(default_marker: str, *, input_fn: Callable[..., str]) -
 
 
 def _prompt_roi_reference_marker(input_fn: Callable[..., str]) -> str:
-    return _ask(input_fn, "ROI reference marker [blank = fixed marker]: ")
+    """Use the XML suffix by default; it records the coordinate-frame stain."""
+    marker = _ask(
+        input_fn,
+        "ROI reference marker [XML filename marker; type fixed for fixed marker]: ",
+    )
+    return marker or "xml"
 
 
 def _stream_subprocess(command: list[str], *, cwd: Path, print_fn: Callable[..., None]) -> bool:
@@ -291,7 +296,7 @@ def run_mihc_xml(
     output_root: Path,
     fixed_marker: str,
     *,
-    roi_reference_marker: str = "",
+    roi_reference_marker: str = "xml",
     print_fn: Callable[..., None] = print,
 ) -> bool:
     """Run the unchanged XML ROI engine once per slide folder."""
@@ -378,7 +383,12 @@ def run_mihc_interactive(
     print_fn("output root:", output_root)
     print_fn("fixed/reference marker:", fixed_marker)
     if mode == "mihc_xml":
-        print_fn("ROI output frame:", roi_reference_marker or fixed_marker)
+        if roi_reference_marker.casefold() == "xml":
+            print_fn("ROI output frame: marker named by each XML filename")
+        elif roi_reference_marker.casefold() == "fixed":
+            print_fn("ROI output frame:", fixed_marker)
+        else:
+            print_fn("ROI output frame:", roi_reference_marker)
     if not _ask_yes_no(input_fn, "run registration now", default=True):
         return False
 

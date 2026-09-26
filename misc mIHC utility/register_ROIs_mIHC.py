@@ -28,7 +28,7 @@ SUPPORT_DIR = DAS_ROOT / "support"
 if str(SUPPORT_DIR) not in sys.path:
     sys.path.insert(0, str(SUPPORT_DIR))
 from registration_debug import compose_fixed_moving_overlay, save_debug_png
-from registration_paths import REG_DAS, trim_mihc_roi_output_root
+from registration_paths import trim_mihc_roi_output_root
 
 import realign_mihc_test  # noqa: F401 - fail fast on registration engine deps.
 
@@ -52,6 +52,8 @@ IO_RETRY_WAIT_SECONDS = 30
 MAKE_DEBUG_OVERLAYS = True
 DEBUG_OVERLAY_MAX_DIM = 1000
 DEBUG_OVERLAY_DIR_NAME = "_debug"
+ROI_REFERENCE_FROM_XML = "xml"
+ROI_REFERENCE_FIXED = "fixed"
 
 DEBUG_COLUMNS = [
     "slide",
@@ -286,7 +288,7 @@ def output_name(path, roi):
 
 
 def output_path_for(output_root, slide_name, roi, path):
-    return output_root / slide_name / REG_DAS / roi / output_name(path, roi)
+    return output_root / slide_name / roi / output_name(path, roi)
 
 
 def row_key(row):
@@ -1041,9 +1043,21 @@ def fixed_row_for_group(group):
     return matches[0]
 
 
-def reference_row_for_group(group, roi_reference_marker):
+def resolve_roi_reference_marker(group, roi_reference_marker):
+    """Resolve the optional output frame without changing the registration fit."""
     marker = str(roi_reference_marker or "").strip()
-    if marker == "":
+    if marker.casefold() == ROI_REFERENCE_FROM_XML:
+        xml_path = Path(fixed_row_for_group(group)["xml_path"])
+        marker = marker_name(xml_path)
+        if marker == "":
+            raise ValueError("could not derive ROI reference marker from XML filename: " + str(xml_path))
+        print("  ROI reference marker from XML:", marker)
+    return marker
+
+
+def reference_row_for_group(group, roi_reference_marker):
+    marker = resolve_roi_reference_marker(group, roi_reference_marker)
+    if marker == "" or marker.casefold() == ROI_REFERENCE_FIXED:
         return fixed_row_for_group(group)
     matches = [row for row in group if marker_matches(Path(row["svs_path"]), marker)]
     if len(matches) != 1:
@@ -1573,7 +1587,7 @@ def print_summary(rows, failures):
     print("failed discovery:", len(failures))
 
 
-def main(run_root=None, output_root=None, fixed_marker=None, roi_reference_marker="", dry_run=False, max_outputs=None, skip_reg=False):
+def main(run_root=None, output_root=None, fixed_marker=None, roi_reference_marker=ROI_REFERENCE_FROM_XML, dry_run=False, max_outputs=None, skip_reg=False):
     if run_root is None:
         run_root = RUN_ROOT
     else:
@@ -1629,7 +1643,11 @@ if __name__ == "__main__":
     parser.add_argument("--run-root", type=Path, default=None, help="Folder containing slide folders.")
     parser.add_argument("--output-root", type=Path, default=None, help="Mirrored Reg_IY/Run output folder.")
     parser.add_argument("--fixed-marker", default=None, help="Fixed marker token. Default CD3.")
-    parser.add_argument("--roi-reference-marker", default="", help="Optional output ROI frame marker. Blank keeps the fixed-marker frame.")
+    parser.add_argument(
+        "--roi-reference-marker",
+        default=ROI_REFERENCE_FROM_XML,
+        help="Output ROI frame marker. Default xml uses the final XML filename token; fixed keeps the fixed-marker frame.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Discover planned outputs without writing TIFFs.")
     parser.add_argument("--max-outputs", type=int, default=None, help="Stop after this many attempted TIFF outputs.")
     parser.add_argument("--skip-reg", action="store_true", help="For missing moving outputs, write native ROI crops instead of fitting registration.")

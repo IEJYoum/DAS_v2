@@ -12,7 +12,7 @@ DATA_EXTRACTION = ROOT / "data_extraction"
 if str(DATA_EXTRACTION) not in sys.path:
     sys.path.insert(0, str(DATA_EXTRACTION))
 import registration
-from registration_paths import REG_DAS, trim_mihc_roi_output_root
+from registration_paths import trim_mihc_roi_output_root
 
 
 class RegistrationTests(unittest.TestCase):
@@ -86,7 +86,7 @@ class RegistrationTests(unittest.TestCase):
             self.assertTrue(completed)
             self.assertEqual(captured["folders"], [slide.resolve()])
             self.assertEqual(captured["fixed_marker"], "CD3")
-            self.assertEqual(captured["roi_reference_marker"], "")
+            self.assertEqual(captured["roi_reference_marker"], "xml")
             self.assertEqual(captured["output_root"], (project / "registration_output").resolve())
 
     def test_xml_dispatch_passes_optional_roi_reference_marker(self):
@@ -111,10 +111,10 @@ class RegistrationTests(unittest.TestCase):
 
             self.assertEqual(captured["roi_reference_marker"], "HEM")
 
-    def test_roi_output_root_trims_slide_and_reg_das_suffix(self):
+    def test_roi_output_root_trims_slide_and_roi_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
             batch_root = Path(tmp) / "Reg"
-            selected = batch_root / "SlideA" / REG_DAS / "SlideA" / REG_DAS / "ROI01"
+            selected = batch_root / "SlideA" / "ROI01"
 
             self.assertEqual(
                 trim_mihc_roi_output_root(selected, ["SlideA"]),
@@ -125,7 +125,7 @@ class RegistrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             slide = project / "SlideA"
-            selected = project / "Reg" / "SlideA" / REG_DAS / "ROI01"
+            selected = project / "Reg" / "SlideA" / "ROI01"
             slide.mkdir(parents=True)
             (slide / "fixed_CD3.svs").touch()
             (slide / "regions.xml").touch()

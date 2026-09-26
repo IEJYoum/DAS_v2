@@ -31,6 +31,7 @@ def make_row(marker: str, role: str = "moving") -> dict[str, str]:
         "marker": marker,
         "role": role,
         "svs_path": str(Path("C:/SlideA") / (marker + ".svs")),
+        "xml_path": str(Path("C:/SlideA") / "KB_AG_KPC_GAB053_D10_C04R1_CD45.xml"),
         "output_path": str(Path("C:/out") / (marker + ".tif")),
         "roi_row": "1",
         "roi_col": "1",
@@ -72,7 +73,22 @@ class RoiReferenceFrameTests(unittest.TestCase):
         group = [fixed, hem]
 
         self.assertIs(ROI.reference_row_for_group(group, ""), fixed)
+        self.assertIs(ROI.reference_row_for_group(group, "fixed"), fixed)
         self.assertIs(ROI.reference_row_for_group(group, "HEM"), hem)
+
+    def test_reference_marker_uses_xml_filename_suffix(self):
+        fixed = make_row("CD3", "fixed")
+        cd45 = make_row("CD45")
+        group = [fixed, cd45]
+
+        self.assertEqual(ROI.resolve_roi_reference_marker(group, "xml"), "CD45")
+        self.assertIs(ROI.reference_row_for_group(group, "xml"), cd45)
+
+    def test_roi_output_path_has_no_reg_das_directory(self):
+        root = Path("C:/Reg_IY2")
+        output = ROI.output_path_for(root, "GAB053-ISI", "ROI01", Path("C:/slide/CD3.svs"))
+
+        self.assertEqual(output, root / "GAB053-ISI" / "ROI01" / "reg_CD3_ROI01.tif")
 
     def test_moving_output_subtracts_reference_translation(self):
         row = make_row("CD8")
