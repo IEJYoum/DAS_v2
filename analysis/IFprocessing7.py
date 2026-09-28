@@ -1645,12 +1645,37 @@ def _create_resources_shortcut(source_path,keywords,canonical_stem):
         print("WARNING: could not create resources shortcut for",source_path,":",e)
 
 
+def _parse_gate_conditions(gate):
+    tokens = [t for t in str(gate).split("_") if t != ""]
+    return({tok[:-1]:tok[-1] for tok in tokens})
+
+
+def _find_overlapping_gates(rows):
+    #non-blocking equivalent of the R reference's gating_qc.R combos_overlap/
+    #find_overlapping_gates: flags Include_Label rules that could both match the
+    #same cell, but only warns - never stops. This pipeline resolves overlap by
+    #file-order priority (later rows win, see _applyGatingConfig) rather than
+    #requiring strict mutual exclusivity, so overlapping catch-all rows are a
+    #deliberately supported case, not an error.
+    overlaps = []
+    for i in range(len(rows)):
+        for j in range(i+1,len(rows)):
+            cls_i,conds_i = rows[i]
+            cls_j,conds_j = rows[j]
+            shared = set(conds_i) & set(conds_j)
+            if all(conds_i[m] == conds_j[m] for m in shared):
+                overlaps.append((cls_i,cls_j))
+    return(overlaps)
+
+
 def _applyGatingConfig(obs,path):
     #default must be a non-empty string, not "" (e.g. spatialLite indexes ty[0], which breaks on "")
     gate_df = pd.read_csv(path)
     obs["Celltype: Gating"] = "unclassified"
     obs["Subtype: Gating"] = "unclassified"
-    funcCols = {}
+    has_cells = "Cells_func" in obs.columns
+
+    rows = []
     for _,row in gate_df.iterrows():
         included = str(row.get("Include_Label","")).strip()
         if included not in ("1","1.0"):
@@ -1659,14 +1684,22 @@ def _applyGatingConfig(obs,path):
         parent = str(row.get("Include_Parent","")).strip()
         if parent == "" or parent.lower() == "nan":
             parent = cls
-        gate = str(row.get("Gate","")).strip()
-        tokens = [t for t in gate.split("_") if t != ""]
-        if tokens and tokens[0].lower() == "cellsp":
-            tokens = tokens[1:]
+        conds = _parse_gate_conditions(row.get("Gate",""))
+        rows.append((cls,parent,conds))
+
+    overlaps = _find_overlapping_gates([(cls,conds) for cls,parent,conds in rows])
+    if overlaps:
+        print("NOTE: these Include_Label rules can match the same cell; later rows win by file order:")
+        for a,b in overlaps:
+            print("  -",a,"<->",b)
+
+    funcCols = {}
+    for cls,parent,conds in rows:
         mask = pd.Series(True,index=obs.index)
         valid = True
-        for tok in tokens:
-            marker,sign = tok[:-1],tok[-1]
+        for marker,sign in conds.items():
+            if marker == "Cells" and not has_cells:
+                continue #no Cells/size data for this project; skip rather than fail the whole rule
             if marker not in funcCols:
                 func_col = None
                 for col in obs.columns:
@@ -1691,15 +1724,22 @@ def _applyGatingConfig(obs,path):
 
 
 def _applyArtifactGate(obs,gate):
-    funcCols = [col for col in obs.columns if str(col).endswith("_func")]
+    #matches the R reference's flag_artifacts()/classify_cells(): cells positive on
+    #>= round(gate * n_markers) of thresholded markers (Cells/size excluded, same as
+    #her threshold_tbl$marker != "Cells") are forced to "Artifact", overriding
+    #whatever population they otherwise matched. Celltype: Gating goes back to
+    #"unclassified" (our sentinel for her parent_class <- NA_character_), matching
+    #her leaving the parent class unset for artifacts.
+    funcCols = [col for col in obs.columns if str(col).endswith("_func") and col != "Cells_func"]
     if len(funcCols) == 0:
         print("WARNING: no thresholded marker columns found for artifact gate")
         return(obs)
-    posFrac = (obs.loc[:,funcCols].astype(str) == "+").sum(axis=1)/len(funcCols)
-    key = posFrac > gate
-    obs.loc[key,"Celltype: Gating"] = "NA"
-    obs.loc[key,"Subtype: Gating"] = "artifact"
-    print("artifact gate",gate,"using",len(funcCols),"markers:",int(key.sum()),"cells")
+    nPos = (obs.loc[:,funcCols].astype(str) == "+").sum(axis=1)
+    cutoff = int(round(gate*len(funcCols)))
+    key = nPos >= cutoff
+    obs.loc[key,"Celltype: Gating"] = "unclassified"
+    obs.loc[key,"Subtype: Gating"] = "Artifact"
+    print("artifact gate",gate,"(cutoff",cutoff,"of",len(funcCols),"markers):",int(key.sum()),"cells")
     return(obs)
 
 

@@ -980,8 +980,10 @@ def applyManualThresholdsCSV(df,obs,path,subtract=False):
         print("using threshold ROI labels from:",index_col)
         thresh = thresh.set_index(index_col).transpose().reset_index().rename(columns={"index":"Markers"})
     thresh = thresh.set_index("Markers")
-    if "Cells" in thresh.index:
-        thresh = thresh.drop(index="Cells")
+    #note: "Cells" (cell area/size) is intentionally NOT dropped here - it gets its
+    #own Cells_func column like any other marker, since the gating strategy (see
+    #_applyGatingConfig in IFprocessing7.py) treats "Cellsp"/"Cellsn" gate tokens as
+    #a real minimum-size requirement, matching the R reference pipeline's evaluate_gate()
     threshCols = list(thresh.columns.astype(str))
     threshColSet = set(threshCols)
     #fallback for threshold columns carrying a prefix obs slide_scene values don't
