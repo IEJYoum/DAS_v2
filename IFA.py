@@ -688,13 +688,13 @@ def loadingMenu(df=9,obs=9,dfxy=9):
         nxy['DAPI_Y'] = dfxy.iloc[:,0]
         dfxy = nxy
     op = ["save","drop cells with less than N% of data",
-          "edit observations","drop columns based on key string","import biomarkers / sample annotations table","combine obs from prepared data",
+          "edit observations","drop columns based on key string","import biomarkers","import observations",
           "save unique list of obs for making import table","rename column",
           "combine another prepared dataset (and handle mixed partitions)","handle mixed partitons in existing data",
           "scale data (z-score, etc)","autoclean NA values","edit observation labels","fillna","annotate cells that agree in other annotation categories",
           "sum columns","reconstruct index"]
     fn = [save,dropCells,editObs,dropCols,importBiom,
-          combineObs,saveObs,renCol,combineData,doPart,scale,autoClean,editLabels,fillNA,agreeThresh,
+          importObservations,saveObs,renCol,combineData,doPart,scale,autoClean,editLabels,fillNA,agreeThresh,
           sumcols,reconstructIndex]
     df,obs,dfxy,*log = menu(op,fn,df,obs,dfxy)
     print(df.shape,obs.shape,dfxy.shape)
@@ -1131,11 +1131,149 @@ def combineObs(df,obs,dfxy):
     return(df,obs,dfxy)
 
 def importBiom(df,obs,dfxy):
-    """Bridge import path: either import obs annotations from file or biomarker columns from another df."""
-    if logInput("import sample annotations from table? (y)") == "y":
-        return(importObs(df,obs,dfxy))
+    """Import biomarker columns from another prepared dataframe."""
     return(impB(df,obs,dfxy))
 
+
+
+def importObservations(df,obs,dfxy):
+    """Observation import hub; keeps Data editing menu positions stable."""
+    op = ["from prepared data","from annotation .csv","from Sam classes"]
+    fn = [combineObs,importObs,importSamClasses]
+    return(menu(op,fn,df,obs,dfxy))
+
+
+def _column_casefold(df,names):
+    wanted = set([str(name).strip().lower() for name in names])
+    for col in df.columns:
+        if str(col).strip().lower() in wanted:
+            return(col)
+    return(None)
+
+
+def _index_object_numbers(index):
+    raw = pd.Series(index,index=np.arange(len(index)),dtype=object).astype(str)
+    return(pd.to_numeric(raw.str.rsplit("_",n=1).str[-1],errors="coerce"))
+
+
+def _sam_scene_from_filename(path,scenes):
+    name = Path(str(path)).stem.lower()
+    matches = [scene for scene in scenes if str(scene).lower() in name]
+    return(matches[0] if len(matches) == 1 else None)
+
+
+def importSamClasses(df,obs,dfxy):
+    """Import Sam class calls by slide_scene plus the integer at the end of each index."""
+    if "slide_scene" not in obs.columns:
+        print("SAM class import requires an obs column named slide_scene.")
+        return(df,obs,dfxy)
+    folder = str(logInput("folder containing Sam classified .csv files: ")).strip().strip('"')
+    if not os.path.isdir(folder):
+        print("SAM class import folder not found:",folder)
+        return(df,obs,dfxy)
+    paths = sorted([os.path.join(folder,name) for name in os.listdir(folder) if name.lower().endswith(".csv")])
+    if len(paths) == 0:
+        print("No .csv files found in:",folder)
+        return(df,obs,dfxy)
+
+    issues = []
+    scenes = sorted(list(set([str(scene) for scene in obs["slide_scene"].dropna() if str(scene).strip() not in ["","nan"]])))
+    index_numbers = _index_object_numbers(obs.index)
+    if int(index_numbers.isna().sum()) > 0:
+        issues.append(str(int(index_numbers.isna().sum()))+" triplet indices have no integer after their final underscore")
+    target_object_col = _column_casefold(obs,["ObjectNumber","Number_Object_Number"])
+    if target_object_col is not None:
+        target_numbers = pd.to_numeric(obs[target_object_col],errors="coerce").reset_index(drop=True)
+        disagree = target_numbers.notna() & index_numbers.notna() & (target_numbers != index_numbers)
+        if bool(disagree.any()):
+            examples = list(obs.index[disagree.to_numpy()][:5])
+            issues.append(str(int(disagree.sum()))+" "+str(target_object_col)+" values disagree with the index integer (examples: "+", ".join(map(str,examples))+")")
+
+    target_map = {}
+    duplicate_target_keys = 0
+    for pos in range(obs.shape[0]):
+        scene = str(obs["slide_scene"].iloc[pos]).strip()
+        number = index_numbers.iloc[pos]
+        if scene in ["","nan"] or pd.isna(number):
+            continue
+        key = scene+"\x1f"+str(int(number))
+        if key in target_map:
+            duplicate_target_keys += 1
+        else:
+            target_map[key] = pos
+    if duplicate_target_keys > 0:
+        issues.append(str(duplicate_target_keys)+" duplicate slide_scene/index-integer keys in the triplet")
+
+    staged = []
+    imported_files = 0
+    for path in paths:
+        scene = _sam_scene_from_filename(path,scenes)
+        if scene is None:
+            issues.append("could not uniquely match filename to slide_scene: "+os.path.basename(path))
+            continue
+        try:
+            source = pd.read_csv(path,low_memory=False)
+        except Exception as exc:
+            issues.append("could not read "+os.path.basename(path)+": "+str(exc))
+            continue
+        source_object_col = _column_casefold(source,["ObjectNumber","Number_Object_Number"])
+        if source_object_col is None:
+            issues.append("no ObjectNumber column in "+os.path.basename(path))
+            continue
+        source_cols = []
+        for col in source.columns:
+            low = str(col).strip().lower()
+            wanted = low in ["class","parent_class"] or low.endswith("_func") or low.endswith("_functional")
+            if wanted and _koei_obs_column(source,col):
+                source_cols.append(col)
+        if len(source_cols) == 0:
+            issues.append("no class, parent_class, or functional observation columns in "+os.path.basename(path))
+            continue
+
+        source_numbers = pd.to_numeric(source[source_object_col],errors="coerce")
+        if int(source_numbers.isna().sum()) > 0:
+            issues.append(str(int(source_numbers.isna().sum()))+" non-numeric ObjectNumber values in "+os.path.basename(path))
+        duplicate_source_numbers = source_numbers.duplicated(keep=False) & source_numbers.notna()
+        if bool(duplicate_source_numbers.any()):
+            issues.append(str(int(duplicate_source_numbers.sum()))+" duplicate ObjectNumber values in "+os.path.basename(path))
+        valid = source_numbers.notna() & ~duplicate_source_numbers
+        source_keys = scene+"\x1f"+source_numbers.loc[valid].astype(int).astype(str)
+        target_positions = source_keys.map(target_map)
+        matched = target_positions.notna()
+        if int((~matched).sum()) > 0:
+            issues.append(str(int((~matched).sum()))+" source cells not found in triplet for "+scene)
+        target_keys_for_scene = set([key for key in target_map if key.startswith(scene+"\x1f")])
+        if len(target_keys_for_scene-set(source_keys.tolist())) > 0:
+            issues.append(str(len(target_keys_for_scene-set(source_keys.tolist())))+" triplet cells absent from "+os.path.basename(path))
+        if bool(matched.any()):
+            rows = source.loc[target_positions.index[matched],source_cols].copy()
+            rows.index = target_positions.loc[matched].astype(int).to_numpy()
+            staged.append(rows)
+            imported_files += 1
+
+    if len(staged) == 0:
+        print("SAM class import found no matched cells.")
+        for issue in issues:
+            print("!!! SAM IMPORT MISMATCH:",issue)
+        return(df,obs,dfxy)
+    staged = pd.concat(staged,axis=0)
+    if int(staged.index.duplicated(keep=False).sum()) > 0:
+        issues.append(str(int(staged.index.duplicated(keep=False).sum()))+" cells were supplied by more than one classified file")
+        staged = staged.loc[~staged.index.duplicated(keep="first"),:]
+    if len(issues) > 0:
+        print("\n!!! SAM CLASS IMPORT MISMATCHES !!!")
+        for issue in issues:
+            print("!!!",issue)
+        if logInput("continue despite these mismatches? (y): ") != "y":
+            print("SAM class import cancelled; obs was not changed.")
+            return(df,obs,dfxy)
+
+    for col in staged.columns:
+        if col not in obs.columns:
+            obs[col] = ""
+        obs.iloc[staged.index,obs.columns.get_loc(col)] = staged[col].to_numpy()
+    print("Imported Sam classes from",imported_files,"files:",list(staged.columns),"| matched cells:",staged.shape[0])
+    return(df,obs,dfxy)
 
 
 def impB(df,obs,dfxy):
@@ -1901,11 +2039,17 @@ def _koei_obs_column(df, col):
     if col in KOEI_OBS_COLUMNS:
         return True
     ser = df.loc[:, col]
-    return (
+    if (
         pd.api.types.is_bool_dtype(ser)
         or pd.api.types.is_string_dtype(ser)
         or pd.api.types.is_object_dtype(ser)
-    )
+    ):
+        return True
+    low = str(col).strip().lower()
+    if low.endswith("_func") or low.endswith("_functional"):
+        return True
+    numeric = pd.to_numeric(ser, errors="coerce").dropna().unique()
+    return len(numeric) == 2 and set(numeric).issubset({0,1})
 
 def _koei_make_obs(df):
     """Auto-format the fixed Koei pipeline table without manual column prompts."""
