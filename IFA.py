@@ -1221,13 +1221,19 @@ def importSamClasses(df,obs,dfxy):
             issues.append("no ObjectNumber column in "+os.path.basename(path))
             continue
         source_cols = []
+        source_names = {}
         for col in source.columns:
             low = str(col).strip().lower()
-            wanted = low in ["class","parent_class"] or low.endswith("_func") or low.endswith("_functional")
+            normalized = low.replace(" ","_").replace("-","_")
+            wanted = normalized in ["class","parent_class","cell_class"] or normalized.endswith("_func") or normalized.endswith("_functional")
             if wanted and _koei_obs_column(source,col):
                 source_cols.append(col)
+                if normalized in ["class","cell_class"]:
+                    source_names[col] = "class"
+                elif normalized == "parent_class":
+                    source_names[col] = "parent_class"
         if len(source_cols) == 0:
-            issues.append("no class, parent_class, or functional observation columns in "+os.path.basename(path))
+            issues.append("no class, parent_class, or functional observation columns in "+os.path.basename(path)+" (headers: "+", ".join(map(str,list(source.columns)))+")")
             continue
 
         source_numbers = pd.to_numeric(source[source_object_col],errors="coerce")
@@ -1247,6 +1253,7 @@ def importSamClasses(df,obs,dfxy):
             issues.append(str(len(target_keys_for_scene-set(source_keys.tolist())))+" triplet cells absent from "+os.path.basename(path))
         if bool(matched.any()):
             rows = source.loc[target_positions.index[matched],source_cols].copy()
+            rows = rows.rename(columns=source_names)
             rows.index = target_positions.loc[matched].astype(int).to_numpy()
             staged.append(rows)
             imported_files += 1
@@ -2046,7 +2053,8 @@ def _koei_obs_column(df, col):
     ):
         return True
     low = str(col).strip().lower()
-    if low.endswith("_func") or low.endswith("_functional"):
+    normalized = low.replace(" ","_").replace("-","_")
+    if normalized in ["class","parent_class","cell_class"] or normalized.endswith("_func") or normalized.endswith("_functional"):
         return True
     numeric = pd.to_numeric(ser, errors="coerce").dropna().unique()
     return len(numeric) == 2 and set(numeric).issubset({0,1})

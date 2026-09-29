@@ -1005,7 +1005,7 @@ def applyManualThresholdsCSV(df,obs,path,subtract=False):
     if missingObs:
         print("WARNING: threshold slide_scene labels not found in obs:", missingObs)
     if missingThresh:
-        print("WARNING: obs slide_scene labels with no threshold column:", missingThresh)
+        print("WARNING: obs slide_scene labels with no threshold column; leaving their _func values blank:", missingThresh)
     markerCols = {}
     for biom in thresh.index:
         for col in df.columns:
@@ -1014,6 +1014,11 @@ def applyManualThresholdsCSV(df,obs,path,subtract=False):
                 break
     funcs = pd.DataFrame("-",index=obs.index,
                          columns=[biom+"_func" for biom in markerCols])
+    # A missing threshold column is not evidence that every marker is negative.
+    # Blank values keep later gating from assigning those slide_scenes a celltype.
+    noThresholdKey = ~cellScenes.isin(threshColSet)
+    if len(funcs.columns) > 0 and bool(noThresholdKey.any()):
+        funcs.loc[noThresholdKey,:] = ""
     for biom in thresh.index:
         if biom not in markerCols:
             print("WARNING: threshold marker not found in df:", biom)
@@ -3028,6 +3033,8 @@ def multiObMenu(obs,title='columns to include',required=False):
             else:
                 for c in ch:
                     outCols.append(obs.columns[int(c)])
+        except KeyboardInterrupt:
+            raise
         except:
             if len(outCols) > 0 or not required:
                 ch2 = input('done?')

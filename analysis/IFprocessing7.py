@@ -120,8 +120,13 @@ def _safe_token(text):
 def _load_scanpy_stack(action_label="this action"):
     return(load_scanpy_stack(action_label))
 
-def logInput(prompt):
-    inp = input(prompt)
+def logInput(prompt, default=None, prompt_meta=None):
+    try:
+        inp = input(prompt, default=default, prompt_meta=prompt_meta)
+    except TypeError:
+        inp = input(prompt)
+        if inp == '' and default is not None:
+            inp = default
     LOG.append([prompt,inp])
     return(inp)
 
@@ -374,7 +379,7 @@ def l_to_s(com,outs = ""):
 
 
 def checkChange(s,cat=''):
-    return(shared_check_change(s, cat or 'value'))
+    return(shared_check_change(s, cat or 'value', input_fn=logInput))
 
 
 def saveF(data,foln,filn,typ="png"):
@@ -1674,6 +1679,17 @@ def _applyGatingConfig(obs,path):
     obs["Celltype: Gating"] = "unclassified"
     obs["Subtype: Gating"] = "unclassified"
     has_cells = "Cells_func" in obs.columns
+    thresholded_cols = [col for col in obs.columns if str(col).endswith("_func")]
+    thresholded_cells = pd.Series(True,index=obs.index)
+    if len(thresholded_cols) > 0:
+        thresholded_cells = obs.loc[:,thresholded_cols].isin(["+","-"]).all(axis=1)
+        missing_threshold_cells = ~thresholded_cells
+        if bool(missing_threshold_cells.any()):
+            if "slide_scene" in obs.columns:
+                missing_scenes = sorted(list(obs.loc[missing_threshold_cells,"slide_scene"].astype(str).unique()))
+                print("WARNING: skipping celltype assignment for slide_scenes with missing thresholds:",missing_scenes)
+            else:
+                print("WARNING: skipping celltype assignment for",int(missing_threshold_cells.sum()),"cells with missing thresholds")
 
     rows = []
     for _,row in gate_df.iterrows():
@@ -1695,7 +1711,7 @@ def _applyGatingConfig(obs,path):
 
     funcCols = {}
     for cls,parent,conds in rows:
-        mask = pd.Series(True,index=obs.index)
+        mask = thresholded_cells.copy()
         valid = True
         for marker,sign in conds.items():
             if marker == "Cells" and not has_cells:
@@ -1746,18 +1762,22 @@ def _applyArtifactGate(obs,gate):
 def samType(dfs,com=[],cat=''):
     if len(com) == 0:
         gate_path,thresh_path = _find_resources_gating_files()
-        if gate_path is not None and thresh_path is not None:
+        if gate_path is not None:
             print("found gating config in resources folder:",gate_path)
-            print("found manual thresholds in resources folder:",thresh_path)
+            gate_path = checkChange(gate_path,'gating config csv path')
         else:
-            if gate_path is None:
-                gate_path = logInput('gating config csv path: ')
-                _create_resources_shortcut(gate_path,("gating","config"),"gating_config")
-            if thresh_path is None:
-                thresh_path = logInput('manual thresholds csv path: ')
-                _create_resources_shortcut(thresh_path,("threshold",),"manual_thresholds")
+            gate_path = logInput('gating config csv path: ')
+            _create_resources_shortcut(gate_path,("gating","config"),"gating_config")
+        if thresh_path is not None:
+            print("found manual thresholds in resources folder:",thresh_path)
+            thresh_path = checkChange(thresh_path,'manual thresholds csv path')
+        else:
+            thresh_path = logInput('manual thresholds csv path: ')
+            _create_resources_shortcut(thresh_path,("threshold",),"manual_thresholds")
         try:
             artifact_gate = float(logInput('artifact gate: fraction of positive markers required (default .8): '))
+        except KeyboardInterrupt:
+            raise
         except:
             artifact_gate = .8
         return([], [gate_path,thresh_path,artifact_gate])
