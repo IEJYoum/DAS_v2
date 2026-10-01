@@ -4735,6 +4735,9 @@ function knownRoiIds() {
   const store = thresholdStore();
   return Array.isArray(store && store.roi_ids) ? store.roi_ids.map(function(x) { return String(x || '').trim(); }).filter(function(x) { return x !== ''; }) : [];
 }
+function thresholdIdentityKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
 function resolveRoiId(rawRoi) {
   const raw = String(rawRoi || '').trim();
   if (!raw) return '';
@@ -4750,10 +4753,31 @@ function resolveRoiId(rawRoi) {
       if (roi === candidates[ci]) return roi;
     }
   }
-  const matches = roiIds.filter(function(roi) {
-    return candidates.some(function(c) { return c && roi.toLowerCase().endsWith(c.toLowerCase()); });
+  const normalizedCandidates = candidates.map(thresholdIdentityKey).filter(function(x) { return x !== ''; });
+  const normalizedMatches = roiIds.filter(function(roi) {
+    return normalizedCandidates.indexOf(thresholdIdentityKey(roi)) >= 0;
   });
-  return matches.length === 1 ? matches[0] : stripped;
+  if (normalizedMatches.length === 1) return normalizedMatches[0];
+  const matches = roiIds.filter(function(roi) {
+    const roiKey = thresholdIdentityKey(roi);
+    return normalizedCandidates.some(function(candidate) { return candidate && roiKey.endsWith(candidate); });
+  });
+  return matches.length === 1 ? matches[0] : '';
+}
+function resolveThresholdMarker(rawMarker) {
+  const raw = String(rawMarker || '').trim();
+  if (!raw) return '';
+  const markers = markerList();
+  const exact = markers.filter(function(marker) { return marker.toLowerCase() === raw.toLowerCase(); });
+  if (exact.length === 1) return exact[0];
+  const key = thresholdIdentityKey(raw);
+  const normalized = markers.filter(function(marker) { return thresholdIdentityKey(marker) === key; });
+  return normalized.length === 1 ? normalized[0] : '';
+}
+function thresholdCsvNumber(raw) {
+  if (String(raw == null ? '' : raw).trim() === '') return NaN;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : NaN;
 }
 function markerValueCaseInsensitive(byRoi, marker) {
   if (!byRoi || typeof byRoi !== 'object') return NaN;
@@ -4857,11 +4881,11 @@ function csvRowsFromText(text) {
 }
 function mergeThresholdTable(table) {
   const store = thresholdStore();
-  if (!store) return 0;
+  const result = {loaded: 0, rejected: 0};
+  if (!store) return result;
   if (!store.initial_thresholds || typeof store.initial_thresholds !== 'object') store.initial_thresholds = {};
   if (!store.saved_thresholds || typeof store.saved_thresholds !== 'object') store.saved_thresholds = {};
-  let updated = 0;
-  if (!Array.isArray(table) || table.length < 2) return updated;
+  if (!Array.isArray(table) || table.length < 2) return result;
   const header = table[0].map(function(x) { return String(x || '').trim(); });
   const first = header[0].toLowerCase();
   const second = header.length > 1 ? header[1].toLowerCase() : '';
@@ -4870,39 +4894,48 @@ function mergeThresholdTable(table) {
     const markerCol = second === 'markers' ? 1 : 0;
     const roiStart = markerCol + 1;
     for (let r = 1; r < table.length; r += 1) {
-      const marker = String((table[r] || [])[markerCol] || '').trim();
-      if (!marker || marker.toLowerCase() === 'area') continue;
+      const rawMarker = String((table[r] || [])[markerCol] || '').trim();
+      if (!rawMarker || rawMarker.toLowerCase() === 'area') continue;
+      const marker = resolveThresholdMarker(rawMarker);
       for (let c = roiStart; c < header.length; c += 1) {
         const roi = resolveRoiId(header[c]);
-        const v = Number((table[r] || [])[c]);
-        if (!roi || !Number.isFinite(v)) continue;
+        const v = thresholdCsvNumber((table[r] || [])[c]);
+        if (!Number.isFinite(v)) continue;
+        if (!roi || !marker) {
+          result.rejected += 1;
+          continue;
+        }
         if (!store.initial_thresholds[roi]) store.initial_thresholds[roi] = {};
         if (!store.saved_thresholds[roi]) store.saved_thresholds[roi] = {};
         store.initial_thresholds[roi][marker] = v;
         store.saved_thresholds[roi][marker] = v;
-        updated += 1;
+        result.loaded += 1;
       }
     }
-    return updated;
+    return result;
   }
   const imageCol = header.findIndex(function(x) { return x.toLowerCase() === 'image'; });
   if (imageCol >= 0) {
     for (let r = 1; r < table.length; r += 1) {
       const roi = resolveRoiId((table[r] || [])[imageCol]);
-      if (!roi) continue;
-      if (!store.initial_thresholds[roi]) store.initial_thresholds[roi] = {};
-      if (!store.saved_thresholds[roi]) store.saved_thresholds[roi] = {};
       for (let c = 0; c < header.length; c += 1) {
         if (c === imageCol || header[c] === '') continue;
-        const v = Number((table[r] || [])[c]);
+        const v = thresholdCsvNumber((table[r] || [])[c]);
         if (!Number.isFinite(v)) continue;
-        store.initial_thresholds[roi][header[c]] = v;
-        store.saved_thresholds[roi][header[c]] = v;
-        updated += 1;
+        const marker = resolveThresholdMarker(header[c]);
+        if (!roi || !marker) {
+          result.rejected += 1;
+          continue;
+        }
+        if (!store.initial_thresholds[roi]) store.initial_thresholds[roi] = {};
+        if (!store.saved_thresholds[roi]) store.saved_thresholds[roi] = {};
+        store.initial_thresholds[roi][marker] = v;
+        store.saved_thresholds[roi][marker] = v;
+        result.loaded += 1;
       }
     }
   }
-  return updated;
+  return result;
 }
 function loadedThresholdCountForCurrentRoi() {
   const store = thresholdStore();
@@ -5853,13 +5886,17 @@ function bindControls() {
           store.saved_thresholds = {};
           store.initial_thresholds = {};
         }
-        const n = mergeThresholdTable(csvRowsFromText(String(reader.result || '')));
+        const loadResult = mergeThresholdTable(csvRowsFromText(String(reader.result || '')));
         writeBrowserThresholdMemory();
         setThresholdForCurrentMarker();
         renderSavedThresholdTable();
         redrawAllSavedOverlays();
         drawScatter();
-        renderStatus('Loaded threshold values: ' + String(n) + '\\nCurrent ROI usable thresholds: ' + String(loadedThresholdCountForCurrentRoi()));
+        renderStatus(
+          'Loaded threshold values: ' + String(loadResult.loaded) +
+          '\\nRejected unmatched values: ' + String(loadResult.rejected) +
+          '\\nCurrent ROI usable thresholds: ' + String(loadedThresholdCountForCurrentRoi())
+        );
       } catch (err) {
         showError(String(err && err.message || err));
         renderStatus(String(err && err.message || err));
