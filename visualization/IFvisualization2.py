@@ -113,9 +113,9 @@ PROGRESS_ENABLED = False
 SILHOUETTE_EXACT_WARN_ROWS = 50000
 _MISSING_CLUSTER_LABELS = {'', 'nan', 'none', 'na', '<na>', 'null', '-'}
 CLUSTER_COLUMN_PATTERNS = {
-    '0': ('Kmeans', [re.compile(r'^Kmeans(?:_| )(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
-    '1': ('GMM', [re.compile(r'^GMM_(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
-    '2': ('Leiden', [re.compile(r'^Leiden_n(?P<value>\d+(?:\.\d+)?)(?:__.+)?$'), re.compile(r'^Leiden_(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
+    '0': ('Kmeans', [re.compile(r'^(?:.+_)?Kmeans(?:_| )(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
+    '1': ('GMM', [re.compile(r'^(?:.+_)?GMM_(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
+    '2': ('Leiden', [re.compile(r'^(?:.+_)?Leiden_n(?P<value>\d+(?:\.\d+)?)(?:__.+)?$'), re.compile(r'^(?:.+_)?Leiden_(?P<value>\d+(?:\.\d+)?)(?:__.+)?$')]),
 }
 
 MSORD = [
@@ -871,6 +871,8 @@ def main(df,obs,dfxy,spath=None,catlist=None,commands=None,clean=True, lastRun =
     #obs = deleteTrailing(obs)  #used to be in boxplot function, I think it caused errors despite being run on a copy.. only matters when trailing chars like after agreethresh iirc. surprisingly slow.
     dfs = [df,obs,dfxy]
     odfs = copy.deepcopy(dfs)
+    if clean and df.isnull().values.any():
+        clean = _prompt_yes_no_default_yes('NaN values detected; autoclean? (y/n) [y]: ')
     if clean:
         #print(df.columns)
         #input()

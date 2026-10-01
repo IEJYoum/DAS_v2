@@ -56,6 +56,7 @@ from shared_utils import (
     load_project_config_values,
     save_project_config_updates,
 )
+from das_config import load_pixel_size_um
 from embedding_utils import load_scanpy_stack
 _IF_ANALYSIS_DIR = Path(__file__).resolve().parents[1]
 if str(_IF_ANALYSIS_DIR) not in sys.path:
@@ -68,8 +69,9 @@ SAVE = 'ask'
 SPATH = r'C:\Users\youm\Desktop\src\unsorted figs'
 PROJECT_CONFIG_FILE = "project_config.txt"
 CATN = ''
-PXSIZE = .325
+PXSIZE = load_pixel_size_um()
 PROGRESS_ENABLED = False
+CLUSTER_PREFIX = ''
 
 MANUALtHRESHOLDS = {
     'CD31':0,
@@ -521,11 +523,138 @@ def scaling(dfs,com,cat=''):
     return(dfs,com)
 
 def clustering(dfs,com,cat=''):
+    """Run clustering on all markers or one temporary keystring-selected subset."""
     op = ["K-Means","Leiden","n-cluster leiden","GMM","Torch centroid clustering"]
     fn = [kmeans,leiden,autoleiden,gmm,torchCluster]
     print('add method to automatically minimize ncl * variance-in-cluster/variance between, or d/dx varin/varbtween relative to other ncl (elbow method)')
-    dfs,com = menu(dfs,op,fn,com,cat)
-    return(dfs,com)
+    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
+    if len(com) == 0:
+        selected = _prompt_cluster_feature_subset(df)
+        if selected is None:
+            return([df,obs,dfxy],[])
+        cdf,prefix,subset_com = selected
+        cluster_com = []
+    else:
+        subset_com = _cluster_subset_command(com)
+        selected = _apply_cluster_feature_subset(df,subset_com)
+        if selected is None:
+            return([df,obs,dfxy],[])
+        cdf,prefix = selected
+        cluster_com = [
+            item for item in com
+            if isinstance(item,list) and not _is_cluster_subset_command(item)
+        ]
+
+    global CLUSTER_PREFIX
+    old_prefix = CLUSTER_PREFIX
+    CLUSTER_PREFIX = prefix
+    try:
+        out_dfs,out_com = menu([cdf,obs,dfxy],op,fn,cluster_com,cat)
+    finally:
+        CLUSTER_PREFIX = old_prefix
+    if len(com) == 0:
+        out_com = [subset_com] + out_com
+    out_obs = out_dfs[1] if len(out_dfs) > 1 else obs
+    return([df,out_obs,dfxy],out_com)
+
+
+def _cluster_key_matches(column,key):
+    column = str(column)
+    key = str(key)
+    if key.endswith('!'):
+        return(column == key[:-1])
+    return(key in column)
+
+
+def _is_cluster_subset_command(item):
+    return(
+        isinstance(item,list) and len(item) >= 2 and
+        str(item[0]) == 'cluster_feature_subset'
+    )
+
+
+def _cluster_subset_command(com):
+    for item in com:
+        if _is_cluster_subset_command(item):
+            return(item)
+    # Saved commands from before feature subsets have no selector entry.
+    return(['cluster_feature_subset','all',''])
+
+
+def _apply_cluster_feature_subset(df,subset_com):
+    mode = str(subset_com[1]) if len(subset_com) > 1 else 'all'
+    prefix = str(subset_com[2]) if len(subset_com) > 2 else ''
+    keys = [str(key) for key in subset_com[3:]]
+    if mode == 'all':
+        return(df,prefix)
+    matched = [
+        col for col in df.columns
+        if any(_cluster_key_matches(col,key) for key in keys)
+    ]
+    selected = matched if mode == 'include' else [col for col in df.columns if col not in matched]
+    if len(selected) == 0:
+        print('clustering cancelled: selected marker subset is empty')
+        return(None)
+    print('clustering on',len(selected),'of',df.shape[1],'marker columns')
+    return(df.loc[:,selected].copy(),prefix)
+
+
+def _prompt_cluster_feature_subset(df):
+    prompt_meta = {
+        'options': [
+            {'value': 'y', 'label': 'Yes', 'description': 'Choose marker columns by key string before clustering.'},
+            {'value': 'n', 'label': 'No', 'description': 'Cluster using every current marker column.'},
+        ]
+    }
+    raw = logInput(
+        'cluster on a subset of marker columns? (y/n) [n]: ',
+        default='n',
+        prompt_meta=prompt_meta,
+    )
+    if str(raw).strip().lower() not in ('y','yes','use','true','1'):
+        return(df,'',['cluster_feature_subset','all',''])
+
+    mode_meta = {
+        'options': [
+            {'value': 'include', 'label': 'Include matches', 'description': 'Cluster only marker columns matching one of the key strings.'},
+            {'value': 'drop', 'label': 'Drop matches', 'description': 'Cluster on every marker column except matching columns.'},
+        ]
+    }
+    mode = str(logInput(
+        'subset mode: include or drop [include]: ',
+        default='include',
+        prompt_meta=mode_meta,
+    )).strip().lower()
+    if mode not in ('include','drop'):
+        mode = 'include'
+    print(list(df.columns))
+    keys = []
+    while True:
+        key = str(logInput(
+            'marker key string (end ! for exact column; blank when done): '
+        )).strip()
+        if key == '':
+            break
+        keys.append(key)
+    if len(keys) == 0:
+        print('clustering cancelled: no marker key strings were supplied')
+        return(None)
+
+    raw_prefix = str(logInput(
+        'prefix for clustering output columns (blank cancels): '
+    )).strip()
+    if raw_prefix == '':
+        print('clustering cancelled: subset outputs need a prefix')
+        return(None)
+    prefix = _safe_token(raw_prefix)
+    if prefix != raw_prefix:
+        print('cluster prefix saved as:',prefix)
+    subset_com = ['cluster_feature_subset',mode,prefix] + keys
+    selected = _apply_cluster_feature_subset(df,subset_com)
+    if selected is None:
+        return(None)
+    cdf,_ = selected
+    return(cdf,prefix,subset_com)
 
 def batchCorrection(dfs,com=[],cat=''):
     print("batch-correction functions now live in scaling")
@@ -2375,6 +2504,9 @@ clustering
 '''
 
 def _scoped_cluster_output_name(base_name, cat):
+    prefix = str(CLUSTER_PREFIX or '').strip()
+    if prefix != '':
+        base_name = prefix+'_'+str(base_name)
     cat_text = str(cat or '').strip()
     scope_name = str(CATN or '').strip()
     if cat_text == '' or cat_text == 'all data' or scope_name == '' or scope_name == 'all data':

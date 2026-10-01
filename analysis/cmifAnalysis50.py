@@ -67,6 +67,7 @@ if _NEW_DAS_DIR not in sys.path:
     sys.path.append(_NEW_DAS_DIR)
 from embedding_utils import compute_embedding, load_scanpy_stack, plot_embedding
 from shared_utils import checkChange as shared_check_change
+from das_config import load_pixel_size_um
 
 DEVMODE = True
 
@@ -86,7 +87,7 @@ ODF = 9
 OOBS = 9
 OXY = 9
 
-PXSIZE = 0.325#0.65
+PXSIZE = load_pixel_size_um()
 
 
 #srun --pty --time=1-0 --mem=64G --gres=gpu:1 --partition=gpu bash -i

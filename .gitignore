@@ -2,4 +2,5 @@ __pycache__/
 *.pyc
 *.pyo
 deepcell_access_token.txt
+das_config.txt
 _usage_guides/machine_specific_DS_instructions.txt

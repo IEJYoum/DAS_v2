@@ -13,6 +13,7 @@ from __future__ import annotations
 import builtins
 import importlib
 import importlib.util
+import math
 import os
 import sys
 import traceback
@@ -51,6 +52,7 @@ from shared_utils import (
     write_key_value_config,
     write_figure_summary_companion,
 )
+from das_config import DAS_CONFIG_PATH, load_das_config, save_das_config_updates
 from state_log import (
     build_figure_id,
     build_param_code,
@@ -84,6 +86,7 @@ MASTER_CONFIG_PATH = (APP_STATE_DIR / PROJECT_CONFIG_FILE).resolve()
 SAFE_FALLBACK_PROJECT_ROOT = (APP_STATE_DIR / "fallback_project").resolve()
 FALLBACK_CONFIG_KEYS = ("fallback_data_folder", "fallback_project_folder", "safe_fallback_project_folder")
 TABULAR_IMPORT_SOURCE_CONFIG_KEY = "tabular_import_source"
+PIXEL_SIZE_CONFIG_KEY = "pixel_size_um"
 
 _LEGACY_IFA5 = None
 _FEATURE_EXTRACTION_IFA = None
@@ -114,6 +117,7 @@ class SessionState:
     segmentation_root: Optional[Path] = None
     suppress_plot_windows: bool = False
     runmode: str = DEFAULT_RUNMODE
+    pixel_size_um: Optional[float] = None
     home_df: Optional[pd.DataFrame] = None
     home_obs: Optional[pd.DataFrame] = None
     home_dfxy: Optional[pd.DataFrame] = None
@@ -220,6 +224,35 @@ def main_ds(
     return _run_session(state, close_ds_on_exit=True)
 
 
+def _configured_pixel_size_um() -> Optional[float]:
+    """Return the valid machine-local pixel size, or None when it is unset."""
+    text = str(load_das_config().get(PIXEL_SIZE_CONFIG_KEY, "")).strip()
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _load_or_prompt_pixel_size_um() -> float:
+    """Read the one machine-local spatial scale; prompt only when it is missing."""
+    value = _configured_pixel_size_um()
+    while value is None:
+        raw = io.iget("pixel size (um per pixel): ")
+        try:
+            candidate = float(str(raw).strip())
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is None or not math.isfinite(candidate) or candidate <= 0:
+            io.iprint("Pixel size must be a positive number, for example 0.325.")
+            continue
+        value = candidate
+        save_das_config_updates({PIXEL_SIZE_CONFIG_KEY: format(value, ".12g")})
+        io.iprint(f"Saved pixel size to {DAS_CONFIG_PATH}")
+    io.iprint(f"Pixel size: {format(value, '.12g')} um per pixel ({DAS_CONFIG_PATH})")
+    return value
+
+
 def _run_session(
     state: SessionState,
     *,
@@ -229,6 +262,7 @@ def _run_session(
     ds_close_reason = "completed"
     try:
         io.iprint("DAS_v2 controller")
+        state.pixel_size_um = _load_or_prompt_pixel_size_um()
         _first_run_base_folder_setup(state)
         previous_data_folder = state.data_folder
         _adopt_project_context(
@@ -1970,6 +2004,8 @@ def legacy_ifa5_context(
     suppress_plot_windows: Optional[bool] = None,
 ):
     module = load_legacy_ifa5()
+    if state.pixel_size_um is None:
+        state.pixel_size_um = _load_or_prompt_pixel_size_um()
     if suppress_plot_windows is None:
         suppress_plot_windows = bool(state.suppress_plot_windows)
     old_input = builtins.input
@@ -1982,6 +2018,8 @@ def legacy_ifa5_context(
     had_ifv_meta = hasattr(getattr(module, "ifv", None), "_new_das_meta") if getattr(module, "ifv", None) is not None else False
     old_ifv_meta = getattr(getattr(module, "ifv", None), "_new_das_meta", None)
     old_ifp_spath = getattr(getattr(module, "ifp", None), "SPATH", None)
+    old_ifp_pxsize = getattr(getattr(module, "ifp", None), "PXSIZE", None)
+    old_cm_pxsize = getattr(getattr(module, "cm", None), "PXSIZE", None)
     had_ifp_meta = hasattr(getattr(module, "ifp", None), "_new_das_meta") if getattr(module, "ifp", None) is not None else False
     old_ifp_meta = getattr(getattr(module, "ifp", None), "_new_das_meta", None)
     had_cvh_meta = hasattr(getattr(module, "cvh", None), "_new_das_meta") if getattr(module, "cvh", None) is not None else False
@@ -2100,6 +2138,9 @@ def legacy_ifa5_context(
     if getattr(module, "ifp", None) is not None:
         module.ifp.SPATH = str(state.figure_folder).replace("\\", "/")
         module.ifp._new_das_meta = legacy_meta
+        module.ifp.PXSIZE = float(state.pixel_size_um)
+    if getattr(module, "cm", None) is not None:
+        module.cm.PXSIZE = float(state.pixel_size_um)
     if getattr(module, "cvh", None) is not None:
         module.cvh._new_das_meta = legacy_meta
     if callable(old_navigate):
@@ -2141,6 +2182,10 @@ def legacy_ifa5_context(
                 pass
         if getattr(module, "ifp", None) is not None and old_ifp_spath is not None:
             module.ifp.SPATH = old_ifp_spath
+        if getattr(module, "ifp", None) is not None:
+            module.ifp.PXSIZE = old_ifp_pxsize
+        if getattr(module, "cm", None) is not None:
+            module.cm.PXSIZE = old_cm_pxsize
         if getattr(module, "ifp", None) is not None:
             try:
                 if had_ifp_meta:
