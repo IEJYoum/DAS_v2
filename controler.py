@@ -53,6 +53,7 @@ from shared_utils import (
     write_figure_summary_companion,
 )
 from das_config import DAS_CONFIG_PATH, load_das_config, save_das_config_updates
+from study_thresholds import merge_study_threshold_files, write_merged_study_thresholds
 from state_log import (
     build_figure_id,
     build_param_code,
@@ -123,6 +124,7 @@ class SessionState:
     home_dfxy: Optional[pd.DataFrame] = None
     home_logdf: Optional[pd.DataFrame] = None
     home_stem: Optional[str] = None
+    triplet_dirty: bool = False
 
     def state_code(self) -> str:
         return get_state_code(self.logdf)
@@ -1218,6 +1220,8 @@ def main_menu(state: SessionState) -> bool:
         "Support Vector Machine",
         "old analysis tool",
         "HTML visualization",
+        "check ROI mailbox",
+        "import study threshold updates",
     ]
     functions = [
         legacy_data_editing_menu,
@@ -1226,6 +1230,8 @@ def main_menu(state: SessionState) -> bool:
         open_svm_menu,
         open_old_tool_menu,
         open_html_menu,
+        check_roi_mailbox,
+        import_study_threshold_updates,
     ]
     idx = menu_index("Main Menu", options)
     io.flush_session_log()
@@ -1687,7 +1693,7 @@ def startup_feature_extraction(state: SessionState) -> None:
     if run_meta.get("combined_csv_path"):
         io.iprint(f"Loaded combined extracted table: {run_meta['combined_csv_path']}")
     _print_current_data_summary(state)
-    spine.capture_home_baseline(state)
+    spine.mark_triplet_dirty(state)
 
 
 def startup_spectral_flow_import(state: SessionState) -> None:
@@ -1866,7 +1872,7 @@ def startup_spectral_flow_import(state: SessionState) -> None:
     if audit_paths.get("spectral_eval_metrics_jsonl_path"):
         io.iprint(f"Saved spectral metrics: {audit_paths['spectral_eval_metrics_jsonl_path']}")
     _print_current_data_summary(state)
-    spine.capture_home_baseline(state)
+    spine.mark_triplet_dirty(state)
 
 
 def startup_load_prepared_data(state: SessionState) -> None:
@@ -1937,6 +1943,105 @@ def open_old_tool_menu(state: SessionState) -> None:
 
 def open_html_menu(state: SessionState) -> None:
     _run_legacy_html(state)
+
+
+def check_roi_mailbox(state: SessionState) -> None:
+    """Apply downloaded viewer ROI patches only when the user asks for them."""
+    if not isinstance(state.obs, pd.DataFrame):
+        io.iprint("No observation table is loaded.")
+        return
+    ifa5 = load_legacy_ifa5()
+    list_fn = getattr(ifa5, "_list_roi_mailbox_patch_paths", None)
+    ingest_fn = getattr(ifa5, "_check_and_ingest_roi_mailbox", None)
+    if not callable(list_fn) or not callable(ingest_fn):
+        raise RuntimeError("Legacy ROI mailbox helpers are unavailable.")
+
+    _root, mailbox_dir, patch_paths = list_fn(str(Path(state.data_folder).resolve()))
+    io.iprint(f"ROI mailbox: {mailbox_dir}")
+    if not patch_paths:
+        io.iprint("No ROI mailbox patch files found.")
+        return
+    io.iprint(f"ROI mailbox files ({len(patch_paths)}):")
+    for patch_path in patch_paths:
+        io.iprint("- " + str(patch_path))
+
+    old_shape = state.shape()
+    original_obs = state.obs
+    out = ingest_fn(original_obs, str(Path(state.data_folder).resolve()), log_fn=io.iprint)
+    if not isinstance(out, pd.DataFrame) or out.equals(original_obs):
+        io.iprint("ROI mailbox check completed; no observation labels changed.")
+        return
+
+    state.obs = normalize_primary_labels(out.astype(str))
+    state.logdf = log_action(
+        state.logdf,
+        module="IFA",
+        function="_check_and_ingest_roi_mailbox",
+        action_label="check_roi_mailbox",
+        params=_build_controller_action_params(
+            state,
+            outcome="roi_mailbox_applied",
+            extra={"mailbox_dir": str(mailbox_dir), "patch_paths": [str(path) for path in patch_paths]},
+        ),
+        in_shape=old_shape,
+        out_shape=state.shape(),
+        event_kind="obs_only",
+    )
+    spine.mark_triplet_dirty(state)
+    io.iprint(f"ROI mailbox labels applied | state={state.state_code()}")
+
+
+def import_study_threshold_updates(state: SessionState) -> None:
+    """Merge downloaded threshold updates into the one CSV SamType already reads."""
+    resources_dir = Path(state.data_folder).resolve() / "resources"
+    canonical_path = resources_dir / "studythresholds.csv"
+    source_paths: list[Path] = []
+    if canonical_path.is_file():
+        source_paths.append(canonical_path)
+        io.iprint(f"Using existing study thresholds as the base: {canonical_path}")
+
+    io.iprint("Enter threshold update CSV files in application order. Blank finishes the list.")
+    while True:
+        raw_path = io.iget("threshold update CSV path [blank = done]: ", default="").strip()
+        if raw_path == "":
+            break
+        path = Path(raw_path).expanduser()
+        if not path.is_file():
+            io.iprint(f"Threshold CSV not found: {path}")
+            continue
+        source_paths.append(path.resolve())
+
+    supplied_count = len(source_paths) - (1 if canonical_path.is_file() else 0)
+    if supplied_count <= 0:
+        io.iprint("No threshold update files selected; existing study thresholds were left unchanged.")
+        return
+    try:
+        merged, summary = merge_study_threshold_files(source_paths)
+        written = write_merged_study_thresholds(merged, canonical_path)
+    except Exception as exc:
+        io.iprint(f"Study threshold update import failed: {exc}")
+        return
+
+    state.logdf = log_action(
+        state.logdf,
+        module="support.study_thresholds",
+        function="merge_study_threshold_files",
+        action_label="import_study_threshold_updates",
+        params=_build_controller_action_params(
+            state,
+            outcome="study_thresholds_written",
+            extra={**summary, "destination": str(written)},
+        ),
+        in_shape=state.shape(),
+        out_shape=state.shape(),
+        event_kind="param_only",
+        advance_state=False,
+    )
+    io.iprint(
+        "Study thresholds written: "
+        + str(written)
+        + f" | sources={summary['source_count']} | overrides={summary['override_count']}"
+    )
 
 
 def load_legacy_ifa5():
@@ -2337,7 +2442,7 @@ def _run_tabular_ingest(state: SessionState) -> None:
     )
     _print_current_data_summary(state)
     _save_tabular_ingest_triplet_if_requested(state)
-    spine.capture_home_baseline(state)
+    spine.mark_triplet_dirty(state)
 
 
 def _save_tabular_ingest_triplet_if_requested(state: SessionState) -> None:
@@ -2463,7 +2568,7 @@ def _load_triplet_into_state(
     )
     _print_loaded_target_summary(summary_label, folder / stem)
     _print_current_data_summary(state, folder=folder)
-    spine.capture_home_baseline(state)
+    spine.mark_triplet_dirty(state)
     return True
 
 
@@ -2542,19 +2647,6 @@ def _run_legacy_html(state: SessionState) -> None:
     )
 
 
-def _ingest_legacy_roi_mailbox_before_action(state: SessionState) -> pd.DataFrame:
-    obs = state.obs
-    if not isinstance(obs, pd.DataFrame):
-        return obs
-    ifa5 = load_legacy_ifa5()
-
-    ingest_fn = getattr(ifa5, "_check_and_ingest_roi_mailbox", None)
-    if not callable(ingest_fn):
-        raise RuntimeError("Legacy ROI mailbox ingest helper is unavailable.")
-    out = ingest_fn(obs, str(Path(state.data_folder).resolve()), log_fn=io.iprint)
-    return out if isinstance(out, pd.DataFrame) else obs
-
-
 def _run_legacy_call(
     state: SessionState,
     *,
@@ -2565,11 +2657,6 @@ def _run_legacy_call(
     advance_state: Optional[bool] = None,
     reset_log: bool = False,
 ) -> Optional[dict]:
-    try:
-        state.obs = _ingest_legacy_roi_mailbox_before_action(state)
-    except Exception as exc:
-        io.iprint(f"ROI mailbox ingest failed before {action_label}: {exc}")
-        raise
     old_shape = state.shape()
     old_cols = [list(state.df.columns), list(state.obs.columns), list(state.dfxy.columns)]
     legacy_meta: dict = {}
@@ -2767,8 +2854,8 @@ def _run_legacy_call(
             )
     _print_obs_action_summary(legacy_meta)
     _print_current_data_summary(state, folder=effective_folder)
-    if action_label in {"RAT.main", "buildDataFrame"}:
-        spine.capture_home_baseline(state)
+    if event_kind in {"df_mutating", "obs_only"}:
+        spine.mark_triplet_dirty(state)
     return legacy_meta
 
 
@@ -2895,7 +2982,7 @@ def import_explicit_paths(state: SessionState) -> None:
     )
     io.iprint(f"Loaded explicit triplet paths: df={_normalize_path_text(df_path)} | obs={_normalize_path_text(obs_path)} | dfxy={_normalize_path_text(dfxy_path)}")
     _print_current_data_summary(state)
-    spine.capture_home_baseline(state)
+    spine.mark_triplet_dirty(state)
 
 
 def auto_clean_full(state: SessionState) -> None:

@@ -12,6 +12,12 @@ def capture_home_baseline(state) -> None:
     state.home_dfxy = state.dfxy.copy(deep=True)
     state.home_logdf = state.logdf.copy(deep=True)
     state.home_stem = str(state.stem)
+    state.triplet_dirty = False
+
+
+def mark_triplet_dirty(state) -> None:
+    """Request one fresh baseline after the current action returns home."""
+    state.triplet_dirty = True
 
 
 def restore_home_baseline(state) -> bool:
@@ -34,6 +40,7 @@ def restore_home_baseline(state) -> bool:
     state.dfxy = state.home_dfxy.copy(deep=True)
     state.logdf = state.home_logdf.copy(deep=True)
     state.stem = str(state.home_stem)
+    state.triplet_dirty = False
     return True
 
 
@@ -42,6 +49,10 @@ def run_session(state, *, startup_menu, main_menu):
     while True:
         try:
             keep_running = main_menu(state) if state.has_data() else startup_menu(state)
+            # Mutation actions only set a cheap flag.  The full defensive copy
+            # happens once, here, after their nested menus have returned home.
+            if getattr(state, "triplet_dirty", False):
+                capture_home_baseline(state)
             if not keep_running:
                 return state
         except KeyboardInterrupt:

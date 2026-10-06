@@ -46,6 +46,7 @@ from tqdm import tqdm
 import IFvisualization2 as ifv
 import if_progress as ifprog
 import subset_project_utils as spu
+from scipy.spatial import cKDTree
 from scipy.stats import zscore as ZSC
 
 _NEW_DAS_DIR = Path(__file__).resolve().parents[1] / "support"
@@ -776,27 +777,27 @@ def regionAverage(dfs,com=[],cat=''): #make only check same slidescene
     dfs,n = ifv.autoClean(dfs,['n'])
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     radius = com[1]
-    ndf = []
-    for us in obs["slide_scene"].unique():
+    n_cols = df.shape[1]
+    col_names = df.columns
+    all_indices = []
+    all_avgs = []
+    for us in tqdm(list(obs["slide_scene"].unique()), desc="regionAverage"):
         key0 = obs["slide_scene"] == us
         tdfxy = dfxy.loc[key0,:]
         tdf = df.loc[key0,:]
-        for i in tqdm(range(tdfxy.shape[0]),us):
-            #if i % 1000 == 500:
-            #    print(round(i/tdfxy.shape[0],2)*100,"% done with",us)
-            neighbors = []
-            x,y = tdfxy.iloc[i,0],tdfxy.iloc[i,1]
-            nx,ny = tdfxy.iloc[:,0],tdfxy.iloc[:,1]
-            distanceV = ((x-nx)**2+(y-ny)**2)**.5
-            key = distanceV < radius
-            neighbors = tdf.loc[key,:]
-            neighbors = neighbors.drop(pd.Series(tdfxy.index).iloc[i])
-            if neighbors.shape[0]> 1:
-                avg = neighbors.mean(axis=0)
-                ndf.append(pd.DataFrame(avg.values,index=df.columns,columns = [pd.Series(tdf.index).iloc[i]]).transpose())
+        coords = tdfxy.values.astype(float)
+        tdf_vals = tdf.values.astype(float)
+        tree = cKDTree(coords)
+        neighbor_lists = tree.query_ball_point(coords, radius)
+        indices = tdfxy.index
+        for i in range(len(neighbor_lists)):
+            nlist = [j for j in neighbor_lists[i] if j != i]
+            if len(nlist) > 1:
+                all_avgs.append(tdf_vals[nlist].mean(axis=0))
             else:
-                ndf.append(pd.DataFrame(columns =df.columns ,index=[pd.Series(tdf.index).iloc[i]] ))#
-    ndf = pd.concat(ndf,axis=0)
+                all_avgs.append(np.full(n_cols, np.nan))
+            all_indices.append(indices[i])
+    ndf = pd.DataFrame(np.array(all_avgs), index=all_indices, columns=col_names)
     print("ndf start",ndf,"ndf end")
     for biom in ndf.columns:
         print(biom,"biom")
@@ -829,49 +830,59 @@ def neighborhoodCount(dfs,com=[],cat=''):
             if inp == "":
                 break
             goodsts.append(inp)
-        return([], [tot, radii, ch, goodsts])
+        min_neighbors = 0
+        if tot != 'y':
+            try:
+                mn = input("minimum neighbors to compute fractions (blank for 0): ").strip()
+                if mn != '':
+                    min_neighbors = int(mn)
+            except:
+                pass
+        return([], [tot, radii, ch, goodsts, min_neighbors])
     obs = obs.astype(str)
     tot = com[1]
     radii = list(com[2])
     ch = int(com[3])
     goodsts = list(com[4])
+    min_neighbors = int(com[5]) if len(com) > 5 else 0
     uch = list(obs.iloc[:,ch].unique())
     obcol = obs.columns[ch]
     if len(goodsts) == 0:
         goodsts = uch
     for radius in radii:
-        for uc in uch:
-            df[uc+"_"+obcol+"_neighbors_"+str(radius*PXSIZE)] = 0
-        for us in obs["slide_scene"].unique():
+        col_names = [uc+"_"+obcol+"_neighbors_"+str(radius*PXSIZE) for uc in uch]
+        for cn in col_names:
+            df[cn] = 0
+        for us in tqdm(list(obs["slide_scene"].unique()), desc="neighborhoodCount"):
             key0 = obs["slide_scene"] == us
             tdfxy = dfxy.loc[key0,:]
             tobs = obs.loc[key0,:]
-            for i in range(tdfxy.shape[0]):
-                ind = tdfxy.index[i]
-                check = False
-                for gs in goodsts:
-                    if gs in str(tobs.loc[ind,obcol]):
-                        check = True
-                        break
-                if not check:
-                    continue
-                x,y = tdfxy.iloc[i,0],tdfxy.iloc[i,1]
-                nx,ny = tdfxy.iloc[:,0],tdfxy.iloc[:,1]
-                distanceV = ((x-nx)**2+(y-ny)**2)**.5
-                key = distanceV < radius
-                neighbors = tobs.loc[key,:]
-                neighbors = neighbors.drop(pd.Series(tdfxy.index).iloc[i])
-                nnei = neighbors.shape[0]
+            coords = tdfxy.values.astype(float)
+            # vectorized centroid mask
+            center_mask = pd.Series(False, index=tobs.index)
+            for gs in goodsts:
+                center_mask |= tobs[obcol].str.contains(gs, regex=False)
+            center_positions = np.where(center_mask.values)[0]
+            if len(center_positions) == 0:
+                continue
+            tree = cKDTree(coords)
+            neighbor_lists = tree.query_ball_point(coords[center_positions], radius)
+            type_codes = pd.Categorical(tobs[obcol], categories=uch).codes.values
+            n_types = len(uch)
+            for ci, pos_i in enumerate(center_positions):
+                ind = tobs.index[pos_i]
+                nlist = [j for j in neighbor_lists[ci] if j != pos_i]
+                nnei = len(nlist)
                 if nnei > 1:
-                    for uc in uch:
-                        inNei = neighbors.loc[neighbors.loc[:,obcol] == uc,obcol]
-                        if tot == 'y':
-                            df.loc[ind,uc+"_"+obcol+"_neighbors_"+str(radius*PXSIZE)] = inNei.shape[0]
-                        else:
-                            df.loc[ind,uc+"_"+obcol+"_neighbors_"+str(radius*PXSIZE)] = inNei.shape[0]/nnei
-                else:
-                    for uc in uch:
-                        df.loc[ind,uc+"_"+obcol+"_neighbors_"+str(radius*PXSIZE)] = 0
+                    counts = np.bincount(type_codes[nlist], minlength=n_types)
+                    if tot == 'y':
+                        for ti, cn in enumerate(col_names):
+                            df.loc[ind, cn] = int(counts[ti])
+                    elif nnei < min_neighbors:
+                        pass  # leave as 0
+                    else:
+                        for ti, cn in enumerate(col_names):
+                            df.loc[ind, cn] = counts[ti] / nnei
     return([df,obs,dfxy],[])
 
 
@@ -907,33 +918,32 @@ def neighborhoodEntropy(dfs,com=[],cat=''):
     for radius in radii:
         ecol = obcol+"_entropy_"+str(radius*PXSIZE)
         df[ecol] = 0
-        for us in tqdm(sorted(list(obs["slide_scene"].unique()))):
+        for us in tqdm(sorted(list(obs["slide_scene"].unique())), desc="entropy"):
             key0 = obs["slide_scene"] == us
             tdfxy = dfxy.loc[key0,:]
             tobs = obs.loc[key0,:]
-            for i in range(tdfxy.shape[0]):
-                ind = tdfxy.index[i]
-                check = False
-                for gs in goodsts:
-                    if gs in str(tobs.loc[ind,obcol]):
-                        check = True
-                        break
-                if not check:
-                    continue
-                x,y = tdfxy.iloc[i,0],tdfxy.iloc[i,1]
-                nx,ny = tdfxy.iloc[:,0],tdfxy.iloc[:,1]
-                distanceV = ((x-nx)**2+(y-ny)**2)**.5
-                key = distanceV < radius
-                neighbors = tobs.loc[key,:]
-                neighbors = neighbors.drop(pd.Series(tdfxy.index).iloc[i])
-                nnei = neighbors.shape[0]
+            coords = tdfxy.values.astype(float)
+            # vectorized centroid mask
+            center_mask = pd.Series(False, index=tobs.index)
+            for gs in goodsts:
+                center_mask |= tobs[obcol].str.contains(gs, regex=False)
+            center_positions = np.where(center_mask.values)[0]
+            if len(center_positions) == 0:
+                continue
+            tree = cKDTree(coords)
+            neighbor_lists = tree.query_ball_point(coords[center_positions], radius)
+            type_codes = pd.Categorical(tobs[obcol], categories=uch).codes.values
+            n_types = len(uch)
+            for ci, pos_i in enumerate(center_positions):
+                ind = tobs.index[pos_i]
+                nlist = [j for j in neighbor_lists[ci] if j != pos_i]
+                nnei = len(nlist)
                 entropy = 0
                 if nnei > 1:
-                    for uc in uch:
-                        inNei = neighbors.loc[neighbors.loc[:,obcol] == uc,obcol]
-                        Pi = inNei.shape[0]/nnei
-                        if Pi != 0:
-                            entropy -= Pi * math.log2(Pi)
+                    counts = np.bincount(type_codes[nlist], minlength=n_types)
+                    fracs = counts / nnei
+                    fracs = fracs[fracs > 0]
+                    entropy = -np.sum(fracs * np.log2(fracs))
                 df.loc[ind,ecol] = entropy
     return([df,obs,dfxy],[])
 
@@ -969,27 +979,25 @@ def nearestOfType(dfs,com=[],cat=''):
     obs = obs.astype(str)
     chs = list(com[1])
     tys = list(com[2])
-    startRadius = 150/PXSIZE
     for ii in range(len(chs)):
         ch = int(chs[ii])
         types = list(tys[ii])
         for ty in types:
             tytle = 'nearest '+obs.columns[ch]+': '+ty
             df[tytle] = 9999
-            for us in sorted(list(obs["slide_scene"].unique())):
+            for us in tqdm(sorted(list(obs["slide_scene"].unique())), desc="nearest "+ty):
                 key0 = obs["slide_scene"] == us
                 tdfxy = dfxy.loc[key0,:]
                 tobs = obs.loc[key0,:]
                 key1 = tobs.iloc[:,ch] == ty
                 tbxy = tdfxy.loc[key1,:]
-                for i in range(tdfxy.shape[0]):
-                    ind = tdfxy.index[i]
-                    x,y = tdfxy.iloc[i,0],tdfxy.iloc[i,1]
-                    nx,ny = tbxy.iloc[:,0],tbxy.iloc[:,1]
-                    distanceV = ((x-nx)**2+(y-ny)**2)**.5
-                    if distanceV.shape[0] > 0:
-                        dist = float(distanceV.min()) * PXSIZE
-                        df.loc[ind,tytle] = dist
+                if tbxy.shape[0] == 0:
+                    continue
+                target_coords = tbxy.values.astype(float)
+                all_coords = tdfxy.values.astype(float)
+                tree = cKDTree(target_coords)
+                dists, _ = tree.query(all_coords, k=1)
+                df.loc[tdfxy.index, tytle] = dists * PXSIZE
     return([df,obs,dfxy],[])
 
 '''

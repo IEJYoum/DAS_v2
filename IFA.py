@@ -420,11 +420,8 @@ def _apply_roi_mailbox_csv_to_obs(obs, patch_path, return_meta=False, log_fn=pri
         log("ROI mailbox patch must contain exactly one target column.")
         return (obs, 0, "") if return_meta else obs
     column = str(columns[0])
-    out = obs.copy()
-    if column not in out.columns:
-        out[column] = str(np.nan)
     idx_map = {}
-    for idx0 in list(out.index):
+    for idx0 in list(obs.index):
         key = str(idx0)
         if key not in idx_map:
             idx_map[key] = idx0
@@ -435,12 +432,18 @@ def _apply_roi_mailbox_csv_to_obs(obs, patch_path, return_meta=False, log_fn=pri
         if idx != "":
             last_value[idx] = str(rows[i].get("label", ""))
         i += 1
-    applied = 0
-    for idx in last_value:
-        if idx in idx_map:
-            out.loc[idx_map[idx], column] = last_value[idx]
-            applied += 1
-    log("Applied ROI mailbox patch to obs:", applied, "rows ->", column)
+    matched = [idx for idx in last_value if idx in idx_map]
+    unmatched = len(last_value) - len(matched)
+    if len(matched) == 0:
+        log("Applied ROI mailbox patch to obs: 0 rows ->", column, "| unmatched indexes:", unmatched)
+        return (obs, 0, column) if return_meta else obs
+    out = obs.copy()
+    if column not in out.columns:
+        out[column] = str(np.nan)
+    for idx in matched:
+        out.loc[idx_map[idx], column] = last_value[idx]
+    applied = len(matched)
+    log("Applied ROI mailbox patch to obs:", applied, "rows ->", column, "| unmatched indexes:", unmatched)
     if return_meta:
         return out, applied, column
     return out
@@ -642,9 +645,6 @@ def menu(options,functions,df=9,obs=9,dfxy=9,esc = False): #MANUAL MENU
             raise
         except:
             return(df,obs,dfxy)
-        if isinstance(obs, pd.DataFrame):
-            active_root = str(ROI_MAILBOX_SESSION.get("project_root", "")).strip() if isinstance(ROI_MAILBOX_SESSION, dict) else ""
-            obs = _check_and_ingest_roi_mailbox(obs, active_root, log_fn=print)
         if DEVMODE:
             EXTEND_LOAD_PROGRESS = bool(esc and ch in [1,2,4])
             df,obs,dfxy, *logL =functions[ch](df,obs,dfxy)

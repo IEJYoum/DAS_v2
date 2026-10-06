@@ -57,6 +57,30 @@ class SpineTests(unittest.TestCase):
         self.assertListEqual(list(state.df.columns), ["marker"])
         self.assertEqual(state.stem, "baseline")
 
+    def test_dirty_triplet_refreshes_baseline_after_returning_home(self):
+        state = self._state()
+        spine.capture_home_baseline(state)
+        calls = {"main": 0}
+
+        def startup_menu(_state):
+            self.fail("Loaded data should route to main_menu.")
+
+        def main_menu(active_state):
+            calls["main"] += 1
+            if calls["main"] == 1:
+                active_state.obs["new_label"] = "kept"
+                spine.mark_triplet_dirty(active_state)
+                return True
+            if calls["main"] == 2:
+                active_state.obs["temporary"] = "discarded"
+                raise KeyboardInterrupt
+            return False
+
+        spine.run_session(state, startup_menu=startup_menu, main_menu=main_menu)
+
+        self.assertIn("new_label", state.obs.columns)
+        self.assertNotIn("temporary", state.obs.columns)
+
 
 if __name__ == "__main__":
     unittest.main()
