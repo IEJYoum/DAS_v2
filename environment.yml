@@ -27,6 +27,8 @@ dependencies:
       - pygame
       - czifile
       - tensorflow-cpu
+      - zarr
+      - numcodecs
       - csbdeep
       - stardist
       - fcsparser  # may downgrade numpy; pip install numpy==2.2.6 after
