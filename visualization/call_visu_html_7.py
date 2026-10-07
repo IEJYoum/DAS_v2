@@ -70,6 +70,11 @@ except Exception:
     def has_glob_magic(value):
         text = str(value or "")
         return "*" in text or "?" in text or ("[" in text and "]" in text)
+try:
+    from path_compat import native_path_text
+except Exception:
+    def native_path_text(path_like):
+        return str(path_like or "")
 from shared_utils import (
     load_project_config_values,
     save_project_config_updates,
@@ -192,7 +197,7 @@ def normalize_stored_path(path):
     Returns the cleaned absolute path if it looks native to this OS.
     Returns "" if the path looks foreign (e.g. Windows path on Linux).
     """
-    raw = strip_quotes(str(path or "").strip())
+    raw = native_path_text(strip_quotes(str(path or "").strip()))
     if raw == "":
         return ""
     if os.name == "nt":

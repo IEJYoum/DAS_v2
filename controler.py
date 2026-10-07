@@ -42,6 +42,7 @@ for _bootstrap_dir in _BOOTSTRAP_DIRS:
 import frontend
 import io_adapter as io
 import spine
+from path_compat import is_foreign_path_text, native_path_text
 from shared_utils import (
     append_artifact_manifest_row,
     checkChange,
@@ -575,8 +576,12 @@ def _write_config_file(path: str | Path, values: dict[str, str]) -> None:
 
 
 def _resolve_usable_folder(path_like: object, label: str, *, log_ignore: bool = True) -> Optional[Path]:
-    text = str(path_like or "").strip()
+    text = native_path_text(path_like)
     if text == "":
+        return None
+    if is_foreign_path_text(text):
+        if log_ignore:
+            io.dprint(f"Ignoring foreign {label}: {path_like}")
         return None
     try:
         path = Path(text).expanduser().resolve()

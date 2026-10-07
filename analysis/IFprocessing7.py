@@ -867,7 +867,7 @@ def neighborhoodCount(dfs,com=[],cat=''):
                 continue
             tree = cKDTree(coords)
             neighbor_lists = tree.query_ball_point(coords[center_positions], radius)
-            type_codes = pd.Categorical(tobs[obcol], categories=uch).codes.values
+            type_codes = np.array(pd.Categorical(tobs[obcol], categories=uch).codes)
             n_types = len(uch)
             for ci, pos_i in enumerate(center_positions):
                 ind = tobs.index[pos_i]
@@ -932,7 +932,7 @@ def neighborhoodEntropy(dfs,com=[],cat=''):
                 continue
             tree = cKDTree(coords)
             neighbor_lists = tree.query_ball_point(coords[center_positions], radius)
-            type_codes = pd.Categorical(tobs[obcol], categories=uch).codes.values
+            type_codes = np.array(pd.Categorical(tobs[obcol], categories=uch).codes)
             n_types = len(uch)
             for ci, pos_i in enumerate(center_positions):
                 ind = tobs.index[pos_i]
@@ -1811,10 +1811,11 @@ def _find_overlapping_gates(rows):
 
 
 def _applyGatingConfig(obs,path):
-    #default must be a non-empty string, not "" (e.g. spatialLite indexes ty[0], which breaks on "")
+    # Match SS_Autothresh/R/classification.R: every cell receives a leaf label.
+    # "NL" means it matched no Include_Label population; its parent is absent.
     gate_df = pd.read_csv(path)
-    obs["Celltype: Gating"] = "unclassified"
-    obs["Subtype: Gating"] = "unclassified"
+    obs["Celltype: Gating"] = pd.NA
+    obs["Subtype: Gating"] = "NL"
     has_cells = "Cells_func" in obs.columns
     thresholded_cols = [col for col in obs.columns if str(col).endswith("_func")]
     thresholded_cells = pd.Series(True,index=obs.index)
@@ -1830,8 +1831,10 @@ def _applyGatingConfig(obs,path):
 
     rows = []
     for _,row in gate_df.iterrows():
-        included = str(row.get("Include_Label","")).strip()
-        if included not in ("1","1.0"):
+        # R's load_gating_strategy() defines the labeled set as every row with
+        # a non-missing Include_Label value.  Blank CSV fields become NaN in
+        # pandas, so test missingness rather than requiring the literal 1.
+        if pd.isna(row.get("Include_Label")):
             continue
         cls = str(row.get("Class","")).strip()
         parent = str(row.get("Include_Parent","")).strip()
@@ -1842,9 +1845,12 @@ def _applyGatingConfig(obs,path):
 
     overlaps = _find_overlapping_gates([(cls,conds) for cls,parent,conds in rows])
     if overlaps:
-        print("NOTE: these Include_Label rules can match the same cell; later rows win by file order:")
-        for a,b in overlaps:
-            print("  -",a,"<->",b)
+        pairs = "\n".join(["  - " + str(a) + " <-> " + str(b) for a,b in overlaps])
+        raise ValueError(
+            "Gating strategy QC failed: Include_Label populations overlap and "
+            "could classify the same cell:\n" + pairs + "\n"
+            "Fix the gating strategy before running classification."
+        )
 
     funcCols = {}
     for cls,parent,conds in rows:
@@ -1873,6 +1879,7 @@ def _applyGatingConfig(obs,path):
         obs.loc[mask,"Subtype: Gating"] = cls
         obs.loc[mask,"Celltype: Gating"] = parent
         print(cls,":",int(mask.sum()),"cells")
+    print("NL:",int((obs["Subtype: Gating"] == "NL").sum()),"cells")
     return(obs)
 
 
@@ -1880,9 +1887,8 @@ def _applyArtifactGate(obs,gate):
     #matches the R reference's flag_artifacts()/classify_cells(): cells positive on
     #>= round(gate * n_markers) of thresholded markers (Cells/size excluded, same as
     #her threshold_tbl$marker != "Cells") are forced to "Artifact", overriding
-    #whatever population they otherwise matched. Celltype: Gating goes back to
-    #"unclassified" (our sentinel for her parent_class <- NA_character_), matching
-    #her leaving the parent class unset for artifacts.
+    #whatever population they otherwise matched.  Its parent class is absent,
+    #matching R's parent_class <- NA_character_ for artifacts.
     funcCols = [col for col in obs.columns if str(col).endswith("_func") and col != "Cells_func"]
     if len(funcCols) == 0:
         print("WARNING: no thresholded marker columns found for artifact gate")
@@ -1890,7 +1896,7 @@ def _applyArtifactGate(obs,gate):
     nPos = (obs.loc[:,funcCols].astype(str) == "+").sum(axis=1)
     cutoff = int(round(gate*len(funcCols)))
     key = nPos >= cutoff
-    obs.loc[key,"Celltype: Gating"] = "unclassified"
+    obs.loc[key,"Celltype: Gating"] = pd.NA
     obs.loc[key,"Subtype: Gating"] = "Artifact"
     print("artifact gate",gate,"(cutoff",cutoff,"of",len(funcCols),"markers):",int(key.sum()),"cells")
     return(obs)
