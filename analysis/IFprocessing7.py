@@ -1600,7 +1600,7 @@ def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName 
         used_cols = []
         for mark in prim.columns:#markers:
             for col in df.columns:
-                if mark+'_' in col:
+                if mark.lower()+'_' in col.lower():
                     dm[mark] = df.loc[:,col]
                     used_cols.append(col)
                     break
