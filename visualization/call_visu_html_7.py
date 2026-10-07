@@ -435,6 +435,7 @@ def build_run_plan(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=N
     core_names = list(core_tiles.keys())
     core_positions = build_project_core_positions(obs, core_names)
     view_sets = catalog["view_sets"]
+    overlay_context = prepare_overlay_context(obs, dfxy, catalog)
     subset_options, subset_overlays, overlay_report = build_project_subset_artifacts(
         catalog,
         view_sets,
@@ -444,6 +445,7 @@ def build_run_plan(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=N
         str(meta.get("viewer_root", "")),
         core_positions,
         segmentation_by_slide_scene=segmentation_map,
+        overlay_context=overlay_context,
     )
     figure_entries = build_project_figure_artifacts(view_sets, subset_options, meta)
     asset_types = collect_asset_type_catalog_from_core_tiles(core_tiles)
@@ -464,6 +466,7 @@ def build_run_plan(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=N
             "centroid_count": int(overlay_report.get("centroid", 0)),
             "none_count": int(overlay_report.get("none", 0)),
             "centroid_scenes": list(overlay_report.get("centroid_scenes", [])),
+            "scenes": dict(overlay_report.get("scenes", {})),
         },
         "roi_data": build_roi_payload_plan(
             catalog,
@@ -473,6 +476,8 @@ def build_run_plan(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=N
             meta=meta,
             out_root=str(meta.get("viewer_root", "")),
             segmentation_by_slide_scene=segmentation_map,
+            overlay_context=overlay_context,
+            scene_artifacts=overlay_report.get("scenes", {}),
         ),
         "roi_mailbox": build_roi_mailbox_payload(roi_mailbox),
         "threshold_store": build_threshold_store_payload(
@@ -2738,7 +2743,7 @@ def extract_slide_scene_from_path(path):
     return slide_id + roi_tag
 
 
-def core_tiff_map(run_plan):
+def core_display_source_map(run_plan):
     out = {}
     core_tiles = run_plan.get("core_tiles", {})
     if not isinstance(core_tiles, dict):
@@ -2750,10 +2755,13 @@ def core_tiff_map(run_plan):
             tile = tiles[i]
             if str(tile.get("tile_kind", "")) == "composite":
                 paths = []
-                for src in list(tile.get("source_paths", [])):
-                    ext = os.path.splitext(str(src))[1].lower()
-                    if ext in [".tif", ".tiff"]:
-                        paths.append(str(src))
+                for src in list(tile.get("channel_sources", []) or []):
+                    append_unique(paths, src)
+                for src in list(tile.get("tiff_paths", []) or []):
+                    append_unique(paths, src)
+                for src in list(tile.get("source_paths", []) or []):
+                    if os.path.splitext(source_path_text(src))[1].lower() in SUPPORTED_EXTS:
+                        append_unique(paths, src)
                 if len(paths) > 0:
                     out[str(core)] = paths
                     break
@@ -2854,7 +2862,8 @@ def prepare_overlay_context(obs, dfxy, run_plan):
         "xvals": xvals,
         "yvals": yvals,
         "cell_int": cell_int,
-        "source_tiffs": core_tiff_map(run_plan),
+        "display_sources": core_display_source_map(run_plan),
+        "scene_overlays": {},
     }
 
 
@@ -2914,15 +2923,22 @@ def build_core_position_index(core_names, overlay_context):
 
 
 def overlay_canvas_size(core, overlay_context, core_mask):
-    tiffs = list(overlay_context.get("source_tiffs", {}).get(str(core), []))
+    sources = list(overlay_context.get("display_sources", {}).get(str(core), []))
+    found = []
     i = 0
-    while i < len(tiffs):
+    while i < len(sources):
         try:
-            with Image.open(tiffs[i]) as im:
-                return int(im.size[0]), int(im.size[1])
+            path = source_path_text(sources[i])
+            with Image.open(path) as im:
+                found.append((int(im.size[0]), int(im.size[1])))
         except Exception:
             pass
         i += 1
+    if len(found) > 0:
+        first = found[0]
+        if any(size != first for size in found[1:]):
+            raise ValueError("Viewer channels have inconsistent dimensions for slide_scene: " + str(core))
+        return first
     xy = overlay_context.get("xy")
     xcol = overlay_context.get("xcol")
     ycol = overlay_context.get("ycol")
@@ -3015,72 +3031,27 @@ def render_point_subset_overlay(xvals, yvals, size, out_path):
     return True
 
 
-def render_segmentation_subset_overlay_from_file(segfile, ids, out_path):
-    if str(segfile or "").strip() == "" or len(ids) == 0 or tifffile is None:
-        return False
+def load_scene_segmentation_overlay(segfile, expected_size):
+    if str(segfile or "").strip() == "":
+        return {"status": "unavailable", "reason": "no exact segmentation file"}
+    if tifffile is None:
+        return {"status": "failed", "reason": "tifffile is unavailable", "segmentation_path": str(segfile)}
     if not os.path.isfile(str(segfile)):
-        return False
+        return {"status": "failed", "reason": "segmentation file is missing", "segmentation_path": str(segfile)}
     try:
-        label = tifffile.imread(str(segfile))
-    except Exception:
-        return False
-    label = np.asarray(label)
-    label = np.squeeze(label)
+        label = np.squeeze(np.asarray(tifffile.imread(str(segfile))))
+    except Exception as exc:
+        return {"status": "failed", "reason": "segmentation file could not be read: " + str(exc), "segmentation_path": str(segfile)}
     if label.ndim != 2:
-        return False
-    try:
-        ids_arr = np.asarray(list(ids), dtype=label.dtype)
-    except Exception:
-        ids_arr = np.asarray(list(ids))
-    mask = np.isin(label, ids_arr)
-    if not bool(mask.any()):
-        return False
-    if skseg is not None:
-        bounds = skseg.find_boundaries(label, connectivity=1, background=0, mode="thick")
-    else:
-        bounds = np.zeros_like(label, dtype=bool)
-        bounds[1:, :] |= label[1:, :] != label[:-1, :]
-        bounds[:-1, :] |= label[1:, :] != label[:-1, :]
-        bounds[:, 1:] |= label[:, 1:] != label[:, :-1]
-        bounds[:, :-1] |= label[:, 1:] != label[:, :-1]
-        bounds &= (label != 0)
-    bounds = bounds & mask
-    if not bool(bounds.any()):
-        return False
-    thick = bounds.copy()
-    thick[1:, :] |= bounds[:-1, :]
-    thick[:-1, :] |= bounds[1:, :]
-    thick[:, 1:] |= bounds[:, :-1]
-    thick[:, :-1] |= bounds[:, 1:]
-    bounds = thick
-    rgba = np.zeros((label.shape[0], label.shape[1], 4), dtype=np.uint8)
-    rgba[bounds, 0:3] = 255
-    rgba[bounds, 3] = 255
-    Image.fromarray(rgba, mode="RGBA").save(out_path, "PNG")
-    return True
-
-
-def render_segmentation_subset_overlay(seg_roots, slide_scene, ids, out_path):
-    roots = _normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])
-    if len(roots) == 0:
-        return False
-    segfile = _find_seg_file_multi(roots, slide_scene)
-    return render_segmentation_subset_overlay_from_file(segfile, ids, out_path)
-
-
-def extract_cell_boundaries(seg_path):
-    """Extract per-cell boundary pixel coordinates from a label TIFF. Returns dict {cell_int: [x1,y1,x2,y2,...]}."""
-    if seg_path is None or tifffile is None:
-        return {}
-    try:
-        label = tifffile.imread(str(seg_path))
-    except Exception:
-        return {}
-    label = np.asarray(label)
-    label = np.squeeze(label)
-    if label.ndim != 2:
-        return {}
-    # Find boundary pixels — same logic as render_segmentation_subset_overlay
+        return {"status": "failed", "reason": "segmentation image is not two-dimensional", "segmentation_path": str(segfile)}
+    mask_size = (int(label.shape[1]), int(label.shape[0]))
+    if tuple(mask_size) != tuple(expected_size):
+        return {
+            "status": "failed",
+            "reason": "segmentation dimensions " + str(mask_size) + " do not match displayed dimensions " + str(tuple(expected_size)),
+            "segmentation_path": str(segfile),
+            "mask_size": list(mask_size),
+        }
     if skseg is not None:
         bounds = skseg.find_boundaries(label, connectivity=1, background=0, mode="thick")
     else:
@@ -3091,74 +3062,114 @@ def extract_cell_boundaries(seg_path):
         bounds[:, :-1] |= label[:, 1:] != label[:, :-1]
         bounds &= (label != 0)
     boundary_y, boundary_x = np.where(bounds)
-    if len(boundary_y) == 0:
-        return {}
     boundary_labels = label[boundary_y, boundary_x]
-    # Group by cell ID into flat [x1,y1,x2,y2,...] arrays
-    from collections import defaultdict
-    cells = defaultdict(list)
-    i = 0
-    while i < len(boundary_labels):
-        cell_id = int(boundary_labels[i])
-        cells[cell_id].append(int(boundary_x[i]))
-        cells[cell_id].append(int(boundary_y[i]))
-        i += 1
-    return dict(cells)
+    unique_labels = np.unique(boundary_labels)
+    return {
+        "status": "ready",
+        "reason": "",
+        "segmentation_path": str(segfile),
+        "mask_size": list(mask_size),
+        "boundary_y": boundary_y,
+        "boundary_x": boundary_x,
+        "boundary_labels": boundary_labels,
+        "unique_labels": unique_labels,
+        "mask_label_count": int(unique_labels.size),
+    }
 
 
-def build_subset_overlay_for_core(core, subset_option, overlay_context, seg_roots, cache_dir, segmentation_by_slide_scene=None):
-    obs = overlay_context["obs"]
-    core_series = overlay_context["core_series"]
-    core_mask = core_series == str(core)
-    mask = core_mask.copy()
-    col = str(subset_option.get("column", "")).strip()
-    value = str(subset_option.get("value", "")).strip()
-    if col == "" or value == "" or col not in obs.columns:
-        return ""
-    mask = mask & (obs[col].astype(str) == value)
-    if not bool(mask.any()):
-        return ""
-
-    slide_scene = normalize_slide_scene(core)
-    if "slide_scene" in obs.columns:
-        scenes = sorted(list(set(obs.loc[mask, "slide_scene"].astype(str).tolist())), key=natural_sort_key)
-        if len(scenes) == 1:
-            slide_scene = scenes[0]
-    subset_id = str(subset_option.get("id", "")).strip()
-    scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
+def prepare_scene_overlay(core, overlay_context, seg_roots, segmentation_by_slide_scene=None):
+    cache = overlay_context.setdefault("scene_overlays", {})
+    if str(core) in cache:
+        return cache[str(core)]
+    core_mask = overlay_context["core_series"] == str(core)
+    display_size = overlay_canvas_size(core, overlay_context, core_mask)
     seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
-    seg_file = str(seg_map.get(slide_scene, "") or "").strip()
-    seg_tag = _seg_roots_cache_tag([seg_file] if seg_file != "" else seg_roots)
-    base = os.path.join(cache_dir, safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + seg_tag)
-    seg_out_path = base + "__seg.png"
-    centroid_out_path = base + "__centroid.png"
-    expected_size = overlay_canvas_size(core, overlay_context, core_mask)
-    has_seg_roots = seg_file != "" or len(_normalize_path_list(seg_roots if isinstance(seg_roots, list) else [seg_roots])) > 0
-    if has_seg_roots and _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
-        return seg_out_path
-    if (not has_seg_roots) and _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
-        return centroid_out_path
-    ids = []
-    cell_int = overlay_context.get("cell_int")
-    if isinstance(cell_int, pd.Series):
-        ids = list(cell_int.loc[mask].dropna().astype(int).tolist())
-    if slide_scene != "" and len(ids) > 0 and has_seg_roots:
-        if (seg_file != "" and render_segmentation_subset_overlay_from_file(seg_file, ids, seg_out_path)) or (
-            seg_file == "" and render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path)
-        ):
-            if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
-                return seg_out_path
+    seg_file = str(seg_map.get(str(core), "") or "").strip()
+    if seg_file == "" and len(seg_roots) > 0:
+        seg_file = str(_find_seg_file_multi(seg_roots, str(core)) or "").strip()
+    if len(seg_roots) > 0 or seg_file != "":
+        scene_overlay = load_scene_segmentation_overlay(seg_file, display_size)
+    else:
+        scene_overlay = {"status": "unavailable", "reason": "segmentation was not configured"}
+    scene_overlay["display_size"] = list(display_size)
+    scene_overlay["segmentation_path"] = seg_file
+    cache[str(core)] = scene_overlay
+    return scene_overlay
 
-    xy = overlay_context.get("xy")
-    xcol = overlay_context.get("xcol")
-    ycol = overlay_context.get("ycol")
-    if isinstance(xy, pd.DataFrame) and xcol in xy.columns and ycol in xy.columns:
-        xvals = pd.to_numeric(xy.loc[mask, xcol], errors="coerce").dropna().tolist()
-        yvals = pd.to_numeric(xy.loc[mask, ycol], errors="coerce").dropna().tolist()
-        if len(xvals) > 0 and len(yvals) > 0:
-            if render_point_subset_overlay(xvals, yvals, expected_size, centroid_out_path):
-                return centroid_out_path
-    return ""
+
+def render_segmentation_subset_overlay_from_scene(scene_overlay, ids, out_path):
+    if not isinstance(scene_overlay, dict) or scene_overlay.get("status") != "ready" or len(ids) == 0:
+        return False
+    labels = scene_overlay.get("boundary_labels")
+    boundary_y = scene_overlay.get("boundary_y")
+    boundary_x = scene_overlay.get("boundary_x")
+    if labels is None or boundary_y is None or boundary_x is None:
+        return False
+    try:
+        ids_arr = np.asarray(list(ids), dtype=labels.dtype)
+    except Exception:
+        ids_arr = np.asarray(list(ids))
+    selected = np.isin(labels, ids_arr)
+    if not bool(selected.any()):
+        return False
+    height = int(scene_overlay["mask_size"][1])
+    width = int(scene_overlay["mask_size"][0])
+    ys = boundary_y[selected]
+    xs = boundary_x[selected]
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+    for dy, dx in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)]:
+        yy = ys + dy
+        xx = xs + dx
+        keep = (yy >= 0) & (yy < height) & (xx >= 0) & (xx < width)
+        rgba[yy[keep], xx[keep], 0:3] = 255
+        rgba[yy[keep], xx[keep], 3] = 255
+    Image.fromarray(rgba, mode="RGBA").save(out_path, "PNG")
+    return True
+
+
+def write_scene_roi_artifacts(core, positions, overlay_context, scene_overlay, cache_dir, seg_roots, segmentation_by_slide_scene=None):
+    artifacts = {"default_overlay_source": "", "cell_boundaries_source": ""}
+    if positions is None or len(positions) == 0 or cache_dir == "":
+        return artifacts
+    overlay_path = build_subset_overlay_for_positions(
+        core,
+        {"id": "roi_all_cells"},
+        positions,
+        overlay_context,
+        cache_dir,
+        seg_roots,
+        segmentation_by_slide_scene=segmentation_by_slide_scene,
+        scene_overlay=scene_overlay,
+    )
+    if str(overlay_path or "").strip() != "":
+        artifacts["default_overlay_source"] = os.path.abspath(str(overlay_path))
+
+    seg_file = str(scene_overlay.get("segmentation_path", "") or "")
+    boundary_y = scene_overlay.get("boundary_y")
+    boundary_x = scene_overlay.get("boundary_x")
+    boundary_labels = scene_overlay.get("boundary_labels")
+    if seg_file == "" or boundary_y is None or boundary_x is None or boundary_labels is None:
+        return artifacts
+    size = tuple(scene_overlay.get("display_size", [1024, 1024]))
+    boundary_tag = _overlay_cache_tag(seg_file, [], [], [], [], size)
+    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + safe_tag(core, 60) + "_" + boundary_tag + ".js")
+    if not os.path.isfile(boundaries_path):
+        from collections import defaultdict
+        cells = defaultdict(list)
+        i = 0
+        while i < len(boundary_labels):
+            cell_id = int(boundary_labels[i])
+            cells[cell_id].append(int(boundary_x[i]))
+            cells[cell_id].append(int(boundary_y[i]))
+            i += 1
+        if len(cells) > 0:
+            payload = json.dumps(dict(cells), separators=(",", ":")).replace("</", "<\\/")
+            with open(boundaries_path, "w", encoding="utf-8") as f:
+                f.write("window.__CELL_BOUNDARIES__ = " + payload + ";\n")
+            print("Cell boundaries extracted:", len(cells), "cells from", seg_file)
+    if os.path.isfile(boundaries_path):
+        artifacts["cell_boundaries_source"] = os.path.abspath(boundaries_path)
+    return artifacts
 
 
 def report_overlay_result(report, mode, slide_scene=""):
@@ -3178,11 +3189,13 @@ def report_overlay_result(report, mode, slide_scene=""):
         report["none"] = int(report.get("none", 0)) + 1
 
 
-def build_subset_overlay_for_positions(core, subset_option, positions, overlay_context, cache_dir, seg_roots, report=None, segmentation_by_slide_scene=None):
+def build_subset_overlay_for_positions(core, subset_option, positions, overlay_context, cache_dir, seg_roots, report=None, segmentation_by_slide_scene=None, scene_overlay=None):
     if positions is None or len(positions) == 0:
         return ""
     core_mask = overlay_context["core_series"] == str(core)
-    expected_size = overlay_canvas_size(core, overlay_context, core_mask)
+    expected_size = tuple(scene_overlay.get("display_size", [])) if isinstance(scene_overlay, dict) else ()
+    if len(expected_size) != 2:
+        expected_size = overlay_canvas_size(core, overlay_context, core_mask)
     slide_scene = normalize_slide_scene(core)
     slide_scene_series = overlay_context.get("slide_scene_series")
     if isinstance(slide_scene_series, pd.Series):
@@ -3193,6 +3206,8 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
     seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
     seg_file = str(seg_map.get(slide_scene, "") or "").strip()
+    if seg_file == "" and isinstance(scene_overlay, dict):
+        seg_file = str(scene_overlay.get("segmentation_path", "") or "").strip()
     ids = []
     cell_int = overlay_context.get("cell_int")
     if isinstance(cell_int, pd.Series):
@@ -3213,12 +3228,17 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
         report_overlay_result(report, "segmentation", slide_scene)
         return seg_out_path
     if slide_scene != "" and len(ids) > 0 and has_seg_roots:
-        if (seg_file != "" and render_segmentation_subset_overlay_from_file(seg_file, ids, seg_out_path)) or (
-            seg_file == "" and render_segmentation_subset_overlay(seg_roots, slide_scene, ids, seg_out_path)
-        ):
+        rendered = False
+        if isinstance(scene_overlay, dict):
+            rendered = render_segmentation_subset_overlay_from_scene(scene_overlay, ids, seg_out_path)
+        if rendered:
             if _validate_cached_overlay(seg_out_path, expected_size[0], expected_size[1]):
                 report_overlay_result(report, "segmentation", slide_scene)
                 return seg_out_path
+
+    if has_seg_roots:
+        report_overlay_result(report, "none", slide_scene)
+        return ""
 
     if _validate_cached_overlay(centroid_out_path, expected_size[0], expected_size[1]):
         report_overlay_result(report, "centroid", slide_scene)
@@ -3232,12 +3252,15 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     return ""
 
 
-def build_subset_overlay_specs(run_plan, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None, segmentation_by_slide_scene=None):
-    overlay_context = prepare_overlay_context(obs, dfxy, run_plan)
+def build_subset_overlay_specs(run_plan, subset_options_by_view, obs, dfxy, meta, out_root, view_sets=None, segmentation_by_slide_scene=None, overlay_context=None, prepare_roi_artifacts=False):
+    if overlay_context is None:
+        overlay_context = prepare_overlay_context(obs, dfxy, run_plan)
     if overlay_context is None:
         return {}, {}
-    if not isinstance(subset_options_by_view, dict) or len(subset_options_by_view) == 0:
+    if (not isinstance(subset_options_by_view, dict) or len(subset_options_by_view) == 0) and not prepare_roi_artifacts:
         return {}, {}
+    if not isinstance(subset_options_by_view, dict):
+        subset_options_by_view = {}
     cache_dir = os.path.join(out_root, "_subset_overlay_cache")
     os.makedirs(cache_dir, exist_ok=True)
     seg_roots = resolve_segmentation_roots(meta)
@@ -3276,17 +3299,37 @@ def build_subset_overlay_specs(run_plan, subset_options_by_view, obs, dfxy, meta
                     unique_options[subset_id] = subset_option
                 j += 1
     rendered_cache = {}
-    for subset_id in unique_options:
-        subset_option = unique_options.get(subset_id, {})
-        col = str(subset_option.get("column", "")).strip()
-        value = str(subset_option.get("value", "")).strip()
-        if col not in column_cache:
-            column_cache[col] = obs[col].astype(str).to_numpy()
-        col_array = column_cache[col]
-        i = 0
-        while i < len(core_names):
-            core = str(core_names[i])
-            positions = core_positions.get(core)
+    report["scenes"] = {}
+    i = 0
+    while i < len(core_names):
+        core = str(core_names[i])
+        positions = core_positions.get(core)
+        scene_overlay = prepare_scene_overlay(core, overlay_context, seg_roots, segmentation_by_slide_scene=seg_map)
+        display_size = list(scene_overlay.get("display_size", []))
+        seg_file = str(scene_overlay.get("segmentation_path", "") or "")
+        scene_report = {
+            "display_size": list(display_size),
+            "segmentation_path": str(seg_file),
+            "status": str(scene_overlay.get("status", "unavailable")),
+            "reason": str(scene_overlay.get("reason", "")),
+            "data_row_count": int(len(positions)) if positions is not None else 0,
+            "mask_label_count": int(scene_overlay.get("mask_label_count", 0)),
+        }
+        cell_int = overlay_context.get("cell_int")
+        if scene_overlay.get("status") == "ready" and isinstance(cell_int, pd.Series) and positions is not None:
+            data_ids = np.unique(cell_int.iloc[positions].dropna().astype(int).to_numpy())
+            matched = int(np.isin(data_ids, scene_overlay["unique_labels"]).sum())
+            scene_report["matched_id_count"] = matched
+            scene_report["matched_id_fraction"] = float(matched / len(data_ids)) if len(data_ids) > 0 else 0.0
+        report["scenes"][core] = scene_report
+
+        for subset_id in unique_options:
+            subset_option = unique_options.get(subset_id, {})
+            col = str(subset_option.get("column", "")).strip()
+            value = str(subset_option.get("value", "")).strip()
+            if col not in column_cache:
+                column_cache[col] = obs[col].astype(str).to_numpy()
+            col_array = column_cache[col]
             overlay_path = ""
             if positions is not None and len(positions) > 0:
                 subset_positions = positions[col_array[positions] == value]
@@ -3299,9 +3342,21 @@ def build_subset_overlay_specs(run_plan, subset_options_by_view, obs, dfxy, meta
                     seg_roots,
                     report=report,
                     segmentation_by_slide_scene=seg_map,
+                    scene_overlay=scene_overlay,
                 )
             rendered_cache[(subset_id, core)] = overlay_path
-            i += 1
+        if prepare_roi_artifacts:
+            scene_report.update(write_scene_roi_artifacts(
+                core,
+                positions,
+                overlay_context,
+                scene_overlay,
+                cache_dir,
+                seg_roots,
+                segmentation_by_slide_scene=seg_map,
+            ))
+        overlay_context.get("scene_overlays", {}).pop(core, None)
+        i += 1
     for view_id in subset_options_by_view:
         view_payload = subset_options_by_view.get(view_id, {})
         if not isinstance(view_payload, dict) or len(view_payload) == 0:
@@ -3403,8 +3458,9 @@ def build_expression_payload_frame(df, obs):
     return expr_df, marker_list, ""
 
 
-def build_roi_payload_plan(run_plan, obs, dfxy, df=None, meta=None, out_root="", segmentation_by_slide_scene=None):
-    overlay_context = prepare_overlay_context(obs, dfxy, run_plan)
+def build_roi_payload_plan(run_plan, obs, dfxy, df=None, meta=None, out_root="", segmentation_by_slide_scene=None, overlay_context=None, scene_artifacts=None):
+    if overlay_context is None:
+        overlay_context = prepare_overlay_context(obs, dfxy, run_plan)
     if overlay_context is None:
         return {}
     core_names = sorted(list(run_plan.get("core_tiles", {}).keys()), key=natural_sort_key)
@@ -3431,6 +3487,7 @@ def build_roi_payload_plan(run_plan, obs, dfxy, df=None, meta=None, out_root="",
     if isinstance(meta, dict):
         seg_roots = resolve_segmentation_roots(meta)
     seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
+    artifacts_by_scene = scene_artifacts if isinstance(scene_artifacts, dict) else {}
     cores = {}
 
     i = 0
@@ -3441,48 +3498,24 @@ def build_roi_payload_plan(run_plan, obs, dfxy, df=None, meta=None, out_root="",
             i += 1
             continue
         slide_scene = normalize_slide_scene(core)
-        core_mask = np.zeros(obs.shape[0], dtype=bool)
-        core_mask[positions] = True
-        size = overlay_canvas_size(core, overlay_context, core_mask)
-        default_overlay_sources = []
-        if cache_dir != "":
-            overlay_path = build_subset_overlay_for_positions(
+        artifact = dict(artifacts_by_scene.get(core, {}) or {})
+        if len(artifact) == 0:
+            scene_overlay = prepare_scene_overlay(core, overlay_context, seg_roots, segmentation_by_slide_scene=seg_map)
+            artifact = write_scene_roi_artifacts(
                 core,
-                {"id": "roi_all_cells"},
                 positions,
                 overlay_context,
+                scene_overlay,
                 cache_dir,
                 seg_roots,
-                report=None,
                 segmentation_by_slide_scene=seg_map,
             )
-            if str(overlay_path or "").strip() != "":
-                try:
-                    default_overlay_sources = [os.path.abspath(str(overlay_path))]
-                except Exception:
-                    default_overlay_sources = [str(overlay_path)]
-        # Extract cell boundary coordinates for threshold overlays
-        cell_boundaries_source = ""
-        if cache_dir != "":
-            seg_file = str(seg_map.get(slide_scene, "") or "").strip()
-            if seg_file is not None and str(seg_file).strip() != "":
-                boundary_tag = _overlay_cache_tag(seg_file, [], [], [], [], size)
-                boundaries_path = os.path.join(
-                    cache_dir,
-                    "cell_boundaries_" + safe_tag(core, 60) + "_" + boundary_tag + ".js",
-                )
-                if os.path.isfile(boundaries_path):
-                    cell_boundaries_source = os.path.abspath(boundaries_path)
-                else:
-                    boundaries = extract_cell_boundaries(seg_file)
-                    if len(boundaries) > 0:
-                        payload = json.dumps(boundaries, separators=(",", ":")).replace("</", "<\\/")
-                        with open(boundaries_path, "w", encoding="utf-8") as f:
-                            f.write("window.__CELL_BOUNDARIES__ = ")
-                            f.write(payload)
-                            f.write(";\n")
-                        cell_boundaries_source = os.path.abspath(boundaries_path)
-                        print("Cell boundaries extracted:", len(boundaries), "cells from", seg_file)
+            artifact["display_size"] = list(scene_overlay.get("display_size", [1024, 1024]))
+            overlay_context.get("scene_overlays", {}).pop(core, None)
+        size = tuple(artifact.get("display_size", [1024, 1024]))
+        default_source = str(artifact.get("default_overlay_source", "") or "")
+        default_overlay_sources = [default_source] if default_source != "" else []
+        cell_boundaries_source = str(artifact.get("cell_boundaries_source", "") or "")
         rows = []
         subset_presence = {}
         j = 0
@@ -4074,7 +4107,7 @@ def dedupe_figure_entries_by_path(entries):
     return out
 
 
-def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions, segmentation_by_slide_scene=None):
+def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_root, core_positions, segmentation_by_slide_scene=None, overlay_context=None):
     ifprog.tick_progress("Project viewer: building subset options and overlays.")
     print("Project viewer: building subset options and overlays.")
     subset_options, subset_source = build_subset_options_by_view(view_sets, obs, core_positions=core_positions, return_source=True)
@@ -4088,6 +4121,8 @@ def build_project_subset_artifacts(base_viewer, view_sets, obs, dfxy, meta, out_
         out_root,
         view_sets=view_sets,
         segmentation_by_slide_scene=segmentation_by_slide_scene,
+        overlay_context=overlay_context,
+        prepare_roi_artifacts=True,
     )
     return subset_options, subset_overlays, overlay_report
 
