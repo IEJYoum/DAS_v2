@@ -57,6 +57,9 @@ MASKS_KWARGS = {
     "buffer_ratio": 0.1,
     "lower_percentile": 10.0,
     "upper_percentile": 90.0,
+    "write_debug": True,
+    "debug_dir": OUTPUT_DIR / "debug",
+    "debug_channels": [],     # [] means every requested marker
 }
 
 # Batch mode stages a glob of DAS-style ColorDecon ROI folders into the exact
@@ -168,6 +171,9 @@ def run_masks(**kwargs):
     if len(channels) == 0:
         raise ValueError("channels must be a non-empty list.")
     model_path = _path(kwargs.pop("model_path", MODEL_PATH), "model_path")
+    write_debug = kwargs.pop("write_debug", False)
+    debug_dir = kwargs.pop("debug_dir", Path(OUTPUT_DIR) / "debug")
+    debug_channels = kwargs.pop("debug_channels", [])
     print("[PhenoBIC] masks input:", base_dir)
     module.run_PhenoBIC(
         base_dir=str(base_dir),
@@ -181,7 +187,10 @@ def run_masks(**kwargs):
     if source_dir.resolve() != out_dir:
         shutil.copytree(source_dir, out_dir, dirs_exist_ok=True)
     print("[PhenoBIC] copied mask output to:", out_dir)
-    return out_dir / "PhenoBIC_cell_phenotype_classes.csv"
+    result_csv = out_dir / "PhenoBIC_cell_phenotype_classes.csv"
+    if write_debug:
+        write_positive_outline_debug(base_dir, result_csv, debug_dir, debug_channels or channels)
+    return result_csv
 
 
 def _roi_patch_name(folder):
@@ -243,7 +252,7 @@ def stage_das_color_decon_batch(source_glob, staging_dir):
 
 
 def write_positive_outline_debug(base_dir, result_csv, debug_dir, channels=()):
-    """Save downsampled gray-marker images with cyan outlines around positives."""
+    """Save marker images with cyan-positive and thin gray-negative cell outlines."""
     import numpy as np
     import pandas as pd
     from PIL import Image
@@ -265,20 +274,33 @@ def write_positive_outline_debug(base_dir, result_csv, debug_dir, channels=()):
             image = imread(base_dir / "multiplex_images" / patch / (channel + ".tif"))
             lo, hi = np.percentile(image, [1, 99])
             gray = np.zeros_like(image, dtype=np.uint8) if hi <= lo else np.clip((image - lo) * 255 / (hi - lo), 0, 255).astype(np.uint8)
-            positive = set(rows.loc[rows[channel].astype(str).str.lower() == "pos", "Cell_label"].astype(int))
-            selected = np.isin(mask, list(positive))
-            inner = selected.copy()
-            inner[1:, :] &= selected[:-1, :]; inner[:-1, :] &= selected[1:, :]
-            inner[:, 1:] &= selected[:, :-1]; inner[:, :-1] &= selected[:, 1:]
-            outline = selected & ~inner
-            # One dilation gives the requested visible two-pixel cyan boundary.
-            outline[1:, :] |= outline[:-1, :]; outline[:-1, :] |= outline[1:, :]
-            outline[:, 1:] |= outline[:, :-1]; outline[:, :-1] |= outline[:, 1:]
-            rgb = np.repeat(gray[:, :, None], 3, axis=2)
-            rgb[outline] = (0, 255, 255)
-            scale = min(1.0, 1600.0 / max(rgb.shape[:2]))
-            size = (max(1, round(rgb.shape[1] * scale)), max(1, round(rgb.shape[0] * scale)))
-            Image.fromarray(rgb).resize(size, Image.Resampling.NEAREST).save(debug_dir / (patch + "_" + channel + "_positive_overlay.png"))
+            def cell_outline(labels):
+                selected = np.isin(mask, labels.to_numpy())
+                inner = selected.copy()
+                inner[1:, :] &= selected[:-1, :] & (mask[1:, :] == mask[:-1, :])
+                inner[:-1, :] &= selected[1:, :] & (mask[:-1, :] == mask[1:, :])
+                inner[:, 1:] &= selected[:, :-1] & (mask[:, 1:] == mask[:, :-1])
+                inner[:, :-1] &= selected[:, 1:] & (mask[:, :-1] == mask[:, 1:])
+                return selected & ~inner
+
+            positive = rows.loc[rows[channel].astype(str).str.lower() == "pos", "Cell_label"].astype(int)
+            negative = rows.loc[rows[channel].astype(str).str.lower() == "neg", "Cell_label"].astype(int)
+            positive_outline = cell_outline(positive)
+            negative_outline = cell_outline(negative)
+            # Downsample the stain first, then apply a nearest-neighbor mask.
+            # This keeps the cyan cell boundary crisp rather than shrinking it
+            # into the stain image.  Stain is red to contrast with cyan.
+            scale = min(1.0, 3200.0 / max(gray.shape[:2]))
+            size = (max(1, round(gray.shape[1] * scale)), max(1, round(gray.shape[0] * scale)))
+            stain = np.asarray(Image.fromarray(gray).resize(size, Image.Resampling.LANCZOS))
+            negative_edge = np.asarray(Image.fromarray((negative_outline * 255).astype(np.uint8)).resize(size, Image.Resampling.NEAREST)) > 0
+            edge = np.asarray(Image.fromarray((positive_outline * 255).astype(np.uint8)).resize(size, Image.Resampling.NEAREST)) > 0
+            edge = edge | np.pad(edge[1:, :], ((0, 1), (0, 0))) | np.pad(edge[:-1, :], ((1, 0), (0, 0))) | np.pad(edge[:, 1:], ((0, 0), (0, 1))) | np.pad(edge[:, :-1], ((0, 0), (1, 0)))
+            rgb = np.zeros((stain.shape[0], stain.shape[1], 3), dtype=np.uint8)
+            rgb[:, :, 0] = stain
+            rgb[negative_edge] = (72, 72, 72)
+            rgb[edge] = (0, 255, 255)
+            Image.fromarray(rgb).save(debug_dir / (patch + "_" + channel + "_positive_overlay.png"))
     return debug_dir
 
 
