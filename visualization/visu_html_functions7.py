@@ -136,6 +136,11 @@ def write_viewer_plan(catalog, outdir=None, norm_kw=None):
     ready_path = os.path.join(run_dir, READY_FN)
     try:
         built_core_tiles = build_core_tiles_for_catalog(catalog, registry, norm_kw, paths)
+        catalog["scene_sources"] = build_scene_sources(
+            built_core_tiles,
+            run_dir,
+            catalog.get("overlay_backend", {}),
+        )
         report["features"]["core_images"] = {
             "status": "ready",
             "scene_count": len(built_core_tiles),
@@ -151,9 +156,23 @@ def write_viewer_plan(catalog, outdir=None, norm_kw=None):
             "status": "ready" if len(threshold_store) > 0 else "unavailable",
         }
         subset_options = dict(catalog.get("subset_options", {}) or {})
+        overlay_backend = dict(catalog.get("overlay_backend", {}) or {})
+        failed_overlay_scenes = [
+            scene for scene, item in dict(overlay_backend.get("scenes", {}) or {}).items()
+            if str(item.get("status", "")) == "failed"
+        ]
+        subset_status = "ready" if len(subset_options) > 0 else "unavailable"
+        if len(failed_overlay_scenes) > 0 or int(overlay_backend.get("none_count", 0)) > 0:
+            subset_status = "degraded"
+            report["warnings"].append(
+                "Subset overlays failed for scene(s): " + ", ".join(failed_overlay_scenes[:12])
+                if len(failed_overlay_scenes) > 0
+                else "One or more subset overlays could not be rendered."
+            )
         report["features"]["subsets"] = {
-            "status": "ready" if len(subset_options) > 0 else "unavailable",
+            "status": subset_status,
             "view_count": len(subset_options),
+            "overlay_backend": overlay_backend,
         }
         catalog["feature_status"] = report["features"]
         output_catalog = dict(catalog)
@@ -380,6 +399,7 @@ def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
         "dataset_label": catalog.get("dataset_label", ""),
         "viewer_filename_base": catalog.get("viewer_filename_base", ""),
         "core_tiles": built_core_tiles,
+        "scene_sources": catalog.get("scene_sources", {}),
         "figure_entries": figure_entries or [],
         "figure_render_limit": int(FIGURE_RENDER_LIMIT),
         "subset_options": catalog.get("subset_options", {}),
@@ -395,6 +415,46 @@ def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
         "asset_type_catalog": catalog.get("asset_type_catalog", {}),
         "feature_status": catalog.get("feature_status", {}),
     }
+
+
+def build_scene_sources(built_core_tiles, run_dir, overlay_backend=None):
+    overlay_scenes = dict((overlay_backend or {}).get("scenes", {}) or {})
+    out = {}
+    for scene in built_core_tiles:
+        display_asset = ""
+        width = 0
+        height = 0
+        for tile in list(built_core_tiles.get(scene, []) or []):
+            if str(tile.get("tile_kind", "")) != "composite":
+                continue
+            channels = list(tile.get("channels", []) or [])
+            if len(channels) == 0:
+                continue
+            display_asset = str(channels[0].get("rel", "") or "")
+            display_path = os.path.normpath(os.path.join(run_dir, display_asset))
+            try:
+                with Image.open(display_path) as image:
+                    width, height = int(image.size[0]), int(image.size[1])
+            except Exception:
+                width, height = 0, 0
+            break
+        overlay_scene = dict(overlay_scenes.get(str(scene), {}) or {})
+        seg_path = str(overlay_scene.get("segmentation_path", "") or "")
+        signature = {}
+        if seg_path != "":
+            try:
+                stat = os.stat(seg_path)
+                signature = {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+            except OSError:
+                signature = {}
+        out[str(scene)] = {
+            "display_asset": display_asset,
+            "width": width,
+            "height": height,
+            "segmentation_path": seg_path,
+            "segmentation_signature": signature,
+        }
+    return out
 
 
 def load_json(path, default=None):
@@ -2085,12 +2145,13 @@ function renderSlotPanel(markers) {
     sel.addEventListener('change', () => {
       const v = String(sel.value || '');
       const mk = v === '' ? null : v;
+      const displaced = slotMarkers[i];
       if (mk) {
         slotNoneLocks[i] = false;
         for (let j = 0; j < slotMarkers.length; j++) {
           if (j !== i && slotMarkers[j] === mk) {
-            slotMarkers[j] = null;
-            slotNoneLocks[j] = false;
+            slotMarkers[j] = displaced;
+            slotNoneLocks[j] = !displaced;
           }
         }
       } else {
@@ -2867,8 +2928,6 @@ function renderValueSelect() {
   }
   if (!activeValue || !vals.includes(activeValue)) activeValue = vals[0];
   sel.value = activeValue;
-  activeSubsetGroup = ALL_SUBSET_GROUP;
-  activeSubsetValue = NONE_SUBSET_ID;
 }
 
 function boot() {
@@ -2924,8 +2983,6 @@ function boot() {
   const vsel = document.getElementById('valueSelect');
   vsel.addEventListener('change', () => {
     activeValue = vsel.value;
-    activeSubsetGroup = ALL_SUBSET_GROUP;
-    activeSubsetValue = NONE_SUBSET_ID;
     const nextView = getView(activeGroup, activeValue);
     renderSubsetControls(nextView);
     if (autoDisplayRelevantFigs) {
@@ -3172,7 +3229,7 @@ def write_roi_runtime_html(outdir):
     border: 1px solid var(--line);
     border-radius: 12px;
     background: #030405;
-    overflow: hidden;
+    overflow: visible;
   }
   .stageInner {
     position: relative;
@@ -3184,6 +3241,11 @@ def write_roi_runtime_html(outdir):
     inset: 0;
     width: 100%;
     height: 100%;
+  }
+  .svgLayer {
+    inset: -10px;
+    width: calc(100% + 20px);
+    height: calc(100% + 20px);
   }
   .imgLayer, .overlayLayer {
     object-fit: contain;
@@ -3421,6 +3483,14 @@ function stageDims() {
   const w = Math.max(1, Number(DATA.width || 1024));
   const h = Math.max(1, Number(DATA.height || 1024));
   return [w, h];
+}
+function roiViewport() {
+  const dims = stageDims();
+  const inner = el('stageInner');
+  const rect = inner ? inner.getBoundingClientRect() : null;
+  const screenWidth = Math.max(1, Number(rect && rect.width || dims[0]));
+  const screenHeight = Math.max(1, Number(rect && rect.height || dims[1]));
+  return [10 * dims[0] / screenWidth, 10 * dims[1] / screenHeight];
 }
 function applyStageZoom() {
   const stage = el('stage');
@@ -3793,7 +3863,8 @@ function renderStage() {
   }
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('class', 'svgLayer');
-  svg.setAttribute('viewBox', '0 0 ' + dims[0] + ' ' + dims[1]);
+  const margin = roiViewport();
+  svg.setAttribute('viewBox', String(-margin[0]) + ' ' + String(-margin[1]) + ' ' + String(dims[0] + 2 * margin[0]) + ' ' + String(dims[1] + 2 * margin[1]));
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
   let markup = '';
   for (const row of scopeRows) {
@@ -4490,12 +4561,13 @@ function renderSlotPanel(markers) {
     sel.addEventListener('change', () => {
       const v = String(sel.value || '');
       const mk = v === '' ? null : v;
+      const displaced = slotMarkers[i];
       if (mk) {
         slotNoneLocks[i] = false;
         for (let j = 0; j < slotMarkers.length; j++) {
           if (j !== i && slotMarkers[j] === mk) {
-            slotMarkers[j] = null;
-            slotNoneLocks[j] = false;
+            slotMarkers[j] = displaced;
+            slotNoneLocks[j] = !displaced;
           }
         }
       } else {

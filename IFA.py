@@ -2033,7 +2033,9 @@ def editObs(df,obs,dfxy):
     """Entry point for observation restructuring (optional full re-split + unpackObs)."""
     ch = logInput("re-organize all obs? (y) :")
     if ch == "1" or ch == "y":
-        df,obs,dfxy=makeObs(pd.concat([df,obs,dfxy],axis=1))
+        # Reorganization is an explicit manual repair action: do not let the
+        # Koei import shortcut bypass the XY and observation column prompts.
+        df,obs,dfxy=makeObs(pd.concat([df,obs,dfxy],axis=1), allow_koei_auto=False)
     obs=unpackObs(obs)
     return(df,obs,dfxy)
 
@@ -2074,9 +2076,9 @@ def _koei_make_obs(df):
     print("Koei runmode: swap X/Y = no")
     return(df,obs,dfxy)
 
-def makeObs(df):
+def makeObs(df, allow_koei_auto=True):
     """Split a merged table into measurement df, observation obs, and coordinate dfxy tables."""
-    if _koei_runmode():
+    if allow_koei_auto and _koei_runmode():
         auto = _koei_make_obs(df)
         if auto is not None:
             df,obs,dfxy = auto

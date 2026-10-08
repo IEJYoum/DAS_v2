@@ -1,0 +1,369 @@
+VIEWER OVERLAY REFRESH PLAN v0
+==============================
+
+Purpose
+-------
+
+Make viewer generation more reliable and make annotation-overlay updates fast.
+
+The immediate deliverable is a standalone script that takes one existing viewer
+run, creates a new sibling run, and changes only the requested overlay data and
+the HTML/JSON that points to it. It must not rediscover channels, rebuild image
+assets, rediscover figures, or pass through Metro.
+
+This pass also fixes the geometry bug that caused valid segmentation overlays to
+be discarded for some slide_scenes, and makes the current overlay engine load a
+segmentation TIFF once per scene instead of once per overlay.
+
+
+Known Failure To Fix
+--------------------
+
+The failed overlays are not caused by missing cells or mismatched mask labels.
+For tested GAB292 scenes, the obs cell IDs and segmentation labels overlap
+exactly and the renderer can produce a valid boundary PNG.
+
+The failure is the canvas-size contract:
+
+1. The displayed pooled channel asset is 3983 x 3983.
+2. The segmentation mask is 3983 x 3983.
+3. overlay_canvas_size() ignores pooled/cache PNGs and tries source TIFFs.
+4. When a source TIFF is unavailable, it estimates size from cell coordinates.
+5. That estimate can be 3997 x 3997.
+6. A valid 3983 x 3983 overlay is then rejected and deleted as the wrong size.
+7. The engine silently writes a centroid overlay instead.
+
+Some scenes work because their original TIFF remains readable; other scenes in
+the same slide fail because only their pooled viewer channel is usable. Network
+location is incidental. The broken gear is inconsistent geometry ownership.
+
+
+Strict Contracts
+----------------
+
+Spatial identity
+  - slide_scene is the only scene key.
+  - No slide/ROI parsing or fuzzy identity matching inside the overlay engine.
+
+Displayed geometry
+  - Width and height come from the exact channel asset displayed by the viewer.
+  - All displayed channels for a scene must have the same dimensions.
+  - A segmentation mask must match those dimensions exactly.
+  - XY maxima are not a valid substitute for segmentation-overlay dimensions.
+  - XY-derived dimensions remain permissible only for an explicitly reported
+    centroid-only scene.
+
+Data identity
+  - obs and dfxy indexes must be unique and aligned for the selected rows.
+  - Cell IDs use the existing accepted ID-column/index rules, once per run.
+  - The overlap between selected data IDs and mask labels is measured and
+    reported per scene.
+
+Failure behavior
+  - A requested segmentation overlay never silently becomes a centroid overlay.
+  - A failed refresh preserves the old overlay reference in the copied viewer.
+  - The source viewer is never edited.
+  - The new run receives READY only after its paths and required outputs pass.
+
+Implementation style
+  - Plain functions, dictionaries, DataFrames, and arrays; no new classes.
+  - One explicit input path and one explicit output path at each seam.
+  - No latest-run lookup, inferred project, or viewer_data reuse from any run
+    other than the source run named by the user.
+
+
+Pass 1: Correct And Accelerate The Existing Overlay Engine
+----------------------------------------------------------
+
+Update call_visu_html_7.py and the smallest required writer seams.
+
+1. Replace overlay_canvas_size() behavior for segmentation overlays.
+
+   Input:
+     - one scene's core-tile/channel entries
+     - one resolved segmentation path
+
+   Output:
+     {
+       "width": int,
+       "height": int,
+       "display_asset": str,
+       "segmentation_path": str,
+       "status": "ready" or "failed",
+       "reason": str
+     }
+
+   Open the first existing displayed channel asset from the run plan, including
+   pooled PNGs. Verify every displayed channel has the same dimensions. Open the
+   mask and require the same dimensions. Do not consult unavailable source TIFFs
+   after the displayed asset has been resolved.
+
+2. Change overlay construction from overlay-first to scene-first.
+
+   Current expensive shape:
+     for every subset overlay:
+       reopen the scene mask
+       find boundaries
+       filter labels
+       write overlay
+
+   Required shape:
+     for every slide_scene:
+       load its mask once
+       compute boundary pixels and their cell labels once
+       resolve scene data IDs once
+       for every requested subset overlay in that scene:
+         select the matching boundary pixels
+         write or reuse one PNG
+       release scene arrays
+
+3. Keep cache signatures literal and inspectable.
+
+   Signature inputs:
+     - exact slide_scene
+     - segmentation path plus file size and modification time
+     - displayed width and height
+     - selected cell IDs, or a stable digest of them
+     - overlay color/style values that alter pixels
+
+   A cache miss regenerates the overlay. A cache hit only reuses a PNG after
+   dimensions and readability are checked.
+
+4. Persist exact scene facts for future refreshes.
+
+   Add one plain scene_sources dictionary to viewer_data:
+
+     scene_sources[slide_scene] = {
+       "display_asset": relative-or-portable path,
+       "width": int,
+       "height": int,
+       "segmentation_path": original exact path or "",
+       "segmentation_signature": {...}
+     }
+
+   This is output metadata, not a second source of truth for fresh DAS builds.
+   Its purpose is to let a user explicitly refresh an existing viewer without
+   rerunning discovery.
+
+5. Expand build_report without changing the browser contract.
+
+   Report for each scene:
+     - displayed and mask dimensions
+     - exact mask path
+     - data-row count
+     - unique mask-label count
+     - matched-ID count and fraction
+     - overlays requested, reused, written, and failed
+     - exact failure/degradation reason
+
+   Overall READY must not hide per-scene overlay failures.
+
+
+Pass 2: ROI Viewport And Small UI Corrections
+---------------------------------------------
+
+Keep these changes local to the generated browser runtime. Do not extract a
+shared-controls framework yet.
+
+ROI drawing buffer
+  - Add a 10-screen-pixel margin around the image viewport.
+  - Convert 10 screen pixels to native-image coordinates using current zoom.
+  - Keep the raster and saved ROI coordinate system unchanged: image bounds are
+    still 0..width and 0..height.
+  - Allow polygon vertices in the padded margin, including negative coordinates
+    and coordinates slightly beyond image width/height.
+  - Inclusion testing continues against cell coordinates in native image space.
+  - Do not pad or resample image assets.
+
+Subset persistence
+  - When Group or Value changes, retain the current subset selection if it is
+    still available.
+  - Clear only selections that are invalid under the new options.
+  - Do not silently substitute a different subset.
+
+Channel swap
+  - Assigning a marker already used by another color performs a true swap.
+  - The displaced marker, including None, moves into the selected marker's old
+    slot.
+  - Never refill a color with the first alphabetical marker.
+  - Apply the same small deterministic rule separately in main viewer and
+    threshold viewer code. Shared-control extraction is deferred.
+
+
+Pass 3: Standalone Overlay Refresh
+----------------------------------
+
+Add one standalone script under visualization, provisionally:
+
+  visualization/refresh_viewer_overlays.py
+
+It may import small proven overlay/writer functions from the viewer modules, but
+must not call cvh.main(), build_viewer_run(), Metro, project prompts, channel
+discovery, figure discovery, or asset generation.
+
+Initial user flow
+-----------------
+
+1. Prompt for an exact source viewer-run folder.
+2. Prompt for the current obs CSV.
+3. Prompt for the current dfxy CSV.
+4. Show annotation columns and prompt for columns to refresh.
+5. Prompt for slide_scenes; blank means all scenes present in both the viewer
+   and current data.
+6. For an older viewer lacking scene_sources, prompt once for an exact
+   segmentation root or glob and resolve masks by exact slide_scene.
+7. Print a preflight table before expensive work.
+8. Create a temporary sibling run named from the source, for example das_1_overlay_1.
+9. Rebuild only selected overlays and the metadata that references them.
+10. Rewrite viewer_data.json, the named data JSON, and the main HTML so the
+    embedded VIEWER object and JSON files agree.
+11. Verify the new run, write build_report.json, then rename the temporary run
+    and write READY.
+
+Minimal inputs
+--------------
+
+The script needs obs and dfxy, not the expression dataframe.
+
+Read only:
+  - the saved row index
+  - slide_scene
+  - selected annotation columns
+  - one accepted cell-ID source if not derivable from the index
+  - the existing accepted x/y columns from dfxy
+
+Do not load marker-expression columns. Do not rewrite the triplet or config.
+
+Copy behavior
+-------------
+
+The new run must be a sibling of the source run so existing relative references
+to shared _asset_pool and _subset_overlay_cache remain valid.
+
+Copy or hard-link unchanged small/runtime files. Hard-link large unchanged ROI
+payload sidecars when supported, with ordinary file copy as the explicit
+fallback. The copied run must not depend on the source run remaining in place.
+
+Do not copy or regenerate:
+  - channel assets
+  - figures
+  - segmentation masks
+  - unchanged overlay PNGs
+  - threshold data
+
+HTML update
+-----------
+
+The current HTML embeds viewer_data in a JavaScript VIEWER constant, so editing
+viewer_data.json alone is insufficient.
+
+Use the existing HTML writer to emit a new main HTML from the updated dictionary.
+Do not use brittle string replacement inside the old HTML. Preserve unchanged
+figure entries, runtime code, tile paths, ROI paths, and threshold paths.
+
+Scope of v0 annotation changes
+------------------------------
+
+For v0, refresh columns that are already viewer subset filters, and allow a new
+column to be added as a subset filter across existing views. Recompute only:
+  - selected subset_options entries
+  - selected subset_overlays entries
+  - their exact labels/counts
+
+Do not rebuild unrelated top-level views, figure associations, or ROI sidecar
+subset metadata in v0. The script must print this limitation clearly. A later
+version can add an explicit "rebuild views/ROI payloads" mode after the narrow
+path is tested.
+
+If a selected column is needed inside the ROI editor immediately, stop with a
+clear message rather than claiming that ROI payloads were refreshed.
+
+Refresh report
+--------------
+
+Write overlay_refresh_report.json containing:
+  - source and output run paths
+  - exact obs/dfxy paths
+  - selected columns and scenes
+  - old-viewer mask resolution decisions
+  - each scene's geometry and ID-overlap checks
+  - each overlay preserved, reused, written, or failed
+  - each file rewritten or linked/copied
+  - validation result
+
+
+Validation Gates
+----------------
+
+Automated fixture
+  - Use a tiny viewer fixture with two slide_scenes and at least two subset
+    values.
+  - Make original TIFF unavailable while a pooled display PNG remains readable.
+  - Use display/mask dimensions that differ from the XY-derived estimate.
+  - Assert the mask-sized overlay is retained and not replaced by centroids.
+  - Assert a mask is read once per refreshed scene, not once per overlay.
+  - Assert source-run files are byte-identical after refresh.
+  - Assert unaffected overlay references remain unchanged.
+  - Assert embedded VIEWER data and viewer_data.json agree.
+  - Assert figure_entries.js, ROI sidecars, threshold runtime, and shared channel
+    paths still resolve from the copied run.
+  - Assert READY is absent after any required validation failure.
+
+Targeted real-data test
+  - First refresh only GAB292ROI01 and GAB292ROI02 with one small annotation.
+  - Confirm both segmentation overlays render at 3983 x 3983.
+  - Confirm channels, figures, threshold controls, and ROI opening are unchanged.
+  - Compare time and mask-read count against a full viewer build.
+
+UI tests
+  - At several zoom levels, draw an ROI using vertices within the 10-screen-pixel
+    outside margin and confirm native coordinates/mail remain correct.
+  - Confirm valid subsets persist and invalid subsets clear.
+  - Confirm red/blue marker reassignment swaps values, including None.
+
+Only after these pass should the standalone script be tested across all scenes.
+
+
+Deferred Work
+-------------
+
+- Wiring overlay refresh into DAS/Metro.
+- Extracting shared controls across main viewer, ROI, and threshold runtimes.
+- Incremental add-channel or replace-scene operations.
+- Rebuilding top-level view/group structures in refresh mode.
+- Refreshing ROI payload annotation metadata.
+- Figure discovery or figure-association changes.
+- In-place viewer mutation.
+- Automatic latest-run selection.
+
+The future add-channel/replace-scene work should reuse the proven copy -> change
+one owned section -> rewrite HTML/JSON -> validate pattern. It should not be
+generalized before overlay-only refresh works reliably.
+
+
+Implementation Order
+--------------------
+
+1. Add the geometry regression fixture and output-consistency assertions.
+2. Fix displayed-asset geometry ownership.
+3. Convert overlay generation to one mask load per scene and add reporting.
+4. Add scene_sources to newly generated viewer data.
+5. Implement the ROI viewport, subset persistence, and channel-swap changes.
+6. Implement the narrow standalone overlay refresh script.
+7. Run fixture tests, then the two-scene GAB292 test, then one full refresh.
+8. Review results before considering shared controls or Metro wiring.
+
+
+Definition Of Done
+------------------
+
+- GAB292ROI01 and ROI02 both retain segmentation overlays when their displayed
+  channel asset and mask dimensions agree.
+- One scene's segmentation TIFF is read at most once during one refresh/build.
+- A copied viewer can receive changed subset overlays without channel, figure,
+  ROI, threshold, or asset discovery work.
+- The source viewer remains untouched and usable after success or failure.
+- Every failed scene says exactly which geometry, path, or ID check failed.
+- ROI polygons can be drawn through a 10-screen-pixel viewport margin without
+  changing saved native coordinates.
+- Shared-control refactoring remains deferred until these changes are tested.
