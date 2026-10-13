@@ -3,6 +3,7 @@ import json
 import math
 import sys
 import time
+import traceback
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -10,9 +11,15 @@ from pathlib import Path
 # Allows both `python CLASSIFIER/run.py` and `from CLASSIFIER import run`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from CLASSIFIER.config import CONFIG, ROOT
+from CLASSIFIER.outputs import new_run_folder
 
 
 def main(cfg=None, **overrides):
+    """Run generation/preparation -> training -> held-out test; return a new folder.
+
+    Config precedence is CONFIG < cfg < kwargs; nested dictionaries replace
+    whole values. Relative paths resolve against the CLASSIFIER directory.
+    """
     settings = deepcopy(CONFIG)
     for supplied in (cfg or {}, overrides):
         unknown = set(supplied) - set(settings)
@@ -26,6 +33,17 @@ def main(cfg=None, **overrides):
         raise ValueError("gain_jitter must be in [0, 1)")
     if not math.isfinite(settings["noise"]) or settings["noise"] < 0:
         raise ValueError("noise must be finite and nonnegative")
+    if settings["class_weighting"] not in {"none", "capped_inverse_frequency"}:
+        raise ValueError("class_weighting must be none or capped_inverse_frequency")
+    if not math.isfinite(settings["class_weight_cap"]) or settings["class_weight_cap"] < 1:
+        raise ValueError("class_weight_cap must be finite and >= 1")
+    if settings["evaluation_scope"] not in {"source", "tiles"}:
+        raise ValueError("evaluation_scope must be source or tiles")
+    tile = settings["inference_tile_px"]
+    if tile < 1 or tile % 2**settings["model"]["depth"]:
+        raise ValueError("inference_tile_px must be positive and divisible by 2**depth")
+    if not 0 <= settings["inference_overlap"] < tile or settings["preview_max_px"] < 1:
+        raise ValueError("Invalid inference overlap or preview size")
     if settings["manifest"] is None and settings["scene_px"] % 2**settings["model"]["depth"]:
         raise ValueError("scene_px must be divisible by 2**model.depth (4 for the current model)")
     if settings["model"]["input_channels"] != len(settings["marker_groups"]):
@@ -34,18 +52,44 @@ def main(cfg=None, **overrides):
         raise ValueError("First-pass channel order must be NUC, IMMUNE, EPI")
     if settings["model"]["class_count"] != len(settings["class_names"]):
         raise ValueError("Model class_count differs from class_names")
-    path = settings["output_dir"] or (Path(settings["output_root"]) / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
-    out = Path(path)
-    out = (ROOT / out).resolve() if not out.is_absolute() else out.resolve()
-    out.mkdir(parents=True, exist_ok=False)
+    out = new_run_folder(settings["output_root"], settings["output_dir"])
     settings["output_dir"] = str(out)
     (out / "config.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    from CLASSIFIER import summary
+    summary.write_debug_summary(out, status="starting")
+    try:
+        folder = _execute(settings, out)
+        from CLASSIFIER import checks
+        summary.write_debug_summary(out, status="checking saved model", phase="reload model and compare exported predictions")
+        print("Checking saved model: reload it and compare with exported predictions", flush=True)
+        verification_start = time.perf_counter()
+        checks.verify_run(folder)
+        (out / "verification.json").write_text(json.dumps({"passed": True,
+            "checks": ["split isolation", "checkpoint/export round trip", "label independence"]},
+            indent=2), encoding="utf-8")
+        timings = json.loads((out / "timings.json").read_text(encoding="utf-8"))
+        timings["verification_seconds"] = time.perf_counter() - verification_start
+        timings["total_seconds"] += timings["verification_seconds"]
+        (out / "timings.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
+    except Exception:
+        summary.write_debug_summary(out, status="failed", error=traceback.format_exc())
+        raise
+    summary.write_debug_summary(out, status="complete", phase="saved model/export checks passed")
+    print(f"Run complete. Saved model/export checks: PASS\nDebug summary: {out / 'debug_summary.txt'}", flush=True)
+    return folder
+
+
+def _execute(settings, out):
+    """Run phases inside main's failure-summary boundary."""
+    from CLASSIFIER import summary
 
     def log(message):
         line = f"{datetime.now().strftime('%H:%M:%S')} {message}"
         print(line, flush=True)
         with (out / "run_log.txt").open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
+        summary.write_debug_summary(out, status="running", phase=message)
 
     total_start = time.perf_counter()
     timings = {}
@@ -71,6 +115,8 @@ def main(cfg=None, **overrides):
     else:
         manifest = Path(settings["manifest"])
         manifest = (ROOT / manifest).resolve() if not manifest.is_absolute() else manifest.resolve()
+        # Snapshot the manifest with absolute scene paths, not copies of images.
+        # The referenced dataset must remain available for checkpoint inference.
         table = pd.read_csv(manifest)
         table["scene_json"] = [str((manifest.parent / p).resolve()) for p in table.scene_json]
         table.to_csv(out / "manifest.csv", index=False)
@@ -84,19 +130,22 @@ def main(cfg=None, **overrides):
     timings["loading_and_preparation"] = time.perf_counter() - start
     preparation = []
     for scene in scenes:
+        # These counts are repeated for each marker's scaling-stat row below.
+        # Deduplicate preparation.csv by scene_id when totaling cell support.
         counts = scene["labels"]["class"].value_counts()
-        summary = {"split": scene["metadata"]["split"], "mask_cells": int((pd.unique(scene["mask"].ravel()) > 0).sum()),
+        scene_counts = {"split": scene["metadata"]["split"], "mask_cells": int((pd.unique(scene["mask"].ravel()) > 0).sum()),
                    "labelled_cells": len(scene["labels"]),
                    **{f"cells_{cls}": int(counts.get(cls, 0)) for cls in settings["class_names"]}}
-        summary["unlabelled_cells"] = summary["mask_cells"] - summary["labelled_cells"]
-        preparation.extend({**s, **summary} for s in scene["stats"])
+        scene_counts["unlabelled_cells"] = scene_counts["mask_cells"] - scene_counts["labelled_cells"]
+        preparation.extend({**s, **scene_counts} for s in scene["stats"])
     pd.DataFrame(preparation).to_csv(out / "preparation.csv", index=False)
     log(f"Prepared {len(scenes)} scenes / {sum(len(s['labels']) for s in scenes)} labelled cells")
     start = time.perf_counter()
     # One example per split first, rather than only the first few training scenes.
     examples = [next(s for s in scenes if s["metadata"]["split"] == split) for split in ("train", "val", "test")]
     for scene in examples[:settings["debug_scenes"]]:
-        report.write_debug(scene, scene, None, out / "debug", settings["class_names"])
+        report.write_debug(scene, scene, None, out / "debug", settings["class_names"],
+                           max_panel_px=settings["preview_max_px"])
     timings["preparation_render"] = time.perf_counter() - start
     checkpoint = train.main(settings, scenes, log)
     log("Testing held-out scenes with best validation checkpoint")
@@ -105,22 +154,24 @@ def main(cfg=None, **overrides):
     test_scenes = [s for s in scenes if s["metadata"]["split"] == "test"]
     predictions, maps = infer.evaluate_scenes(model, test_scenes, saved_cfg)
     metrics = report.score_cells(predictions, infer.label_table(test_scenes), settings["class_names"])
-    predictions.to_csv(out / "predictions.csv", index=False)
+    predictions.to_csv(out / "predictions.csv", index=False, encoding="utf-8-sig")
     (out / "test_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     timings["test"] = time.perf_counter() - start
     start = time.perf_counter()
     for scene in test_scenes[:settings["debug_scenes"]]:
         sid = scene["metadata"]["scene_id"]
-        report.write_debug(scene, scene, maps[sid], out / "debug", settings["class_names"])
+        report.write_debug(scene, scene, maps[sid], out / "test", settings["class_names"],
+            title=f"Test | best validation checkpoint | {sid}", max_panel_px=settings["preview_max_px"])
     for scene in [s for s in scenes if s["metadata"]["split"] == "train"][:settings["debug_scenes"]]:
         probabilities = infer.predict_scene(model, scene["x"], saved_cfg["device"])
         report.write_debug(scene, scene, probabilities, out / "debug" / "training", settings["class_names"])
-    report.write_errors(test_scenes, predictions, out / "debug", settings["class_names"], settings["error_gallery_limit"])
+    report.write_prediction_report(test_scenes, predictions, out / "test", settings["class_names"],
+                                  settings["error_gallery_limit"], title="Test | confident wrong labelled calls")
     timings["test_render"] = time.perf_counter() - start
     timings.update(json.loads((out / "training_summary.json").read_text(encoding="utf-8")))
     timings["total_seconds"] = time.perf_counter() - total_start
     (out / "timings.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
-    log(f"Complete in {timings['total_seconds']:.1f}s | test macro-F1 {metrics['macro_f1']:.3f} | accuracy {metrics['accuracy']:.3f}")
+    log(f"Training/test outputs written in {timings['total_seconds']:.1f}s | test macro-F1 {metrics['macro_f1']:.3f} | accuracy {metrics['accuracy']:.3f}")
     return out
 
 

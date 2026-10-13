@@ -2,6 +2,10 @@
 
 DAS_v2 is an interactive analysis toolkit for cyclic IF / cmIF style imaging data.
 
+For the standalone lineage classifier, start with
+[CLASSIFIER/README.md](CLASSIFIER/README.md) for terminal commands and a code map,
+and [CLASSIFIER/NEXT_STEPS.md](CLASSIFIER/NEXT_STEPS.md) for pending experiments.
+
 At a high level, this repo can help you:
 - prepare imaging data
   - image registration

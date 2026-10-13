@@ -16,7 +16,24 @@ def read_plane(path):
         return np.array(image)
 
 
+def tile_starts(length, tile_px, overlap=0):
+    """Cover an axis, including the far edge, without exceeding image bounds."""
+    if min(length, tile_px) < 1 or not 0 <= overlap < tile_px:
+        raise ValueError("Invalid tile size/overlap")
+    if length <= tile_px:
+        return [0]
+    starts = list(range(0, length - tile_px + 1, tile_px - overlap))
+    if starts[-1] != length - tile_px:
+        starts.append(length - tile_px)
+    return starts
+
+
 def read_scene(scene_json):
+    """Resolve explicit files and validate marker/mask shapes and label IDs.
+
+    Unlabelled mask cells have no row in cells.csv; blank class rows are not
+    accepted by the later target-painting step.
+    """
     path = Path(scene_json)
     meta = json.loads(path.read_text(encoding="utf-8"))
     markers = {}
@@ -40,6 +57,11 @@ def read_scene(scene_json):
 
 
 def normalize_marker(raw, background=0.0, upper_percentile=99.5):
+    """Scale background-subtracted positives by their percentile; clip to [0, 1].
+
+    Statistics belong to the supplied plane (a full ROI before any crop).
+    Constant or no-signal planes fail rather than receiving invented scaling.
+    """
     raw = np.asarray(raw, dtype=np.float32)
     if not 0 < upper_percentile <= 100 or not np.isfinite(background):
         raise ValueError("Invalid normalization parameters")
@@ -61,6 +83,7 @@ def normalize_marker(raw, background=0.0, upper_percentile=99.5):
 
 
 def build_superstains(scaled_markers, marker_groups):
+    """Return CHW float32 planes in group order using pixelwise marker maxima."""
     planes = []
     for lineage, names in marker_groups.items():
         available = [scaled_markers[m] for m in names if m in scaled_markers]
@@ -73,6 +96,11 @@ def build_superstains(scaled_markers, marker_groups):
 
 
 def paint_targets(mask, labels, class_names):
+    """Return HW class indices and weights totaling one per labelled cell.
+
+    Missing cells/background get target -1 and weight 0. Inverse-area weights
+    equalize cells of different sizes; they do not compensate rare classes.
+    """
     unknown = set(labels["class"]) - set(class_names)
     if unknown:
         raise ValueError(f"Unknown class names: {sorted(unknown)}")
@@ -98,8 +126,9 @@ def crop_scene(scene, window, full_counts):
     complete = np.flatnonzero((counts == full_counts) & (counts > 0))
     labels = scene["labels"][scene["labels"].cell_id.isin(complete)].copy()
     targets, weights = paint_targets(mask, labels, scene["class_names"])
-    parent = scene["metadata"]["scene_id"]
-    meta = {**scene["metadata"], "scene_id": f"{parent}_y{y}_x{x}",
+    tile_prefix = scene["metadata"]["scene_id"]
+    parent = scene["metadata"].get("parent_scene_id", tile_prefix)
+    meta = {**scene["metadata"], "scene_id": f"{tile_prefix}_y{y}_x{x}",
             "parent_scene_id": parent, "window": list(window)}
     meta.pop("windows", None)
     return {**scene, "markers": {m: v[region].copy() for m, v in scene["markers"].items()},
@@ -111,6 +140,7 @@ def crop_scene(scene, window, full_counts):
 
 
 def prepare_scene(scene_json, cfg):
+    """Normalize a full scene and build x/targets/weights before optional tiling."""
     markers, mask, labels, meta = read_scene(scene_json)
     if not np.isclose(meta["um_per_px"], cfg["target_um_per_px"], rtol=0, atol=1e-8):
         raise ValueError(f"{meta['scene_id']}: physical resolution differs; resample before input")
@@ -129,7 +159,14 @@ def prepare_scene(scene_json, cfg):
             "weights": weights, "stats": stats, "class_names": cfg["class_names"]}
 
 
-def load_scenes(manifest_path, cfg, split=None):
+def read_manifest(manifest_path):
+    """Validate source-scene isolation across ALL splits, without reading images.
+
+    scene_id is the supplied image identity: ROI now, optionally whole slide
+    later. slide is descriptive metadata, not a split group. Explicit parent
+    IDs keep already-tiled source images together. Reusing one mask path under
+    another scene ID is rejected as a likely duplicate source image.
+    """
     path = Path(manifest_path)
     manifest = pd.read_csv(path)
     resolved = [(path.parent / p).resolve() for p in manifest.scene_json]
@@ -137,20 +174,38 @@ def load_scenes(manifest_path, cfg, split=None):
         raise ValueError("Scene/scene-path duplicates across manifest rows or splits")
     if not set(manifest.split) <= {"train", "val", "test"}:
         raise ValueError("Manifest split must be train, val, or test")
+    source_splits, mask_owners = {}, {}
+    for row in manifest.itertuples(index=False):
+        scene_path = path.parent / row.scene_json
+        meta = json.loads(scene_path.read_text(encoding="utf-8"))
+        if meta["scene_id"] != row.scene_id or meta["split"] != row.split:
+            raise ValueError("Manifest and scene metadata disagree")
+        source = meta.get("parent_scene_id", row.scene_id)
+        if source in source_splits and source_splits[source] != row.split:
+            raise ValueError(f"Source scene {source} occurs in more than one split")
+        source_splits[source] = row.split
+        mask_path = (scene_path.parent / meta["mask"]).resolve()
+        if mask_path in mask_owners:
+            raise ValueError(f"Duplicate source mask across scenes: {mask_owners[mask_path]} / {row.scene_id}")
+        mask_owners[mask_path] = row.scene_id
+    return manifest
+
+
+def load_scenes(manifest_path, cfg, split=None):
+    """Return prepared scenes/tiles; each source image belongs to only one split.
+
+    Optional tiles reduce compute/memory; they never allocate parts of a source
+    image to different splits. Isolation is checked even for split-only loads.
+    """
+    path = Path(manifest_path)
+    manifest = read_manifest(path)
     result = []
-    slide_splits = {}
     for row in manifest.itertuples(index=False):
         if split is not None and row.split != split:
             continue
         scene = prepare_scene(path.parent / row.scene_json, cfg)
-        if scene["metadata"]["scene_id"] != row.scene_id or scene["metadata"]["split"] != row.split:
-            raise ValueError("Manifest and scene metadata disagree")
-        slide = scene["metadata"].get("slide")
-        if slide is not None:
-            if slide in slide_splits and slide_splits[slide] != row.split:
-                raise ValueError(f"Slide {slide} occurs in more than one split")
-            slide_splits[slide] = row.split
-        if "windows" in scene["metadata"]:
+        expand_windows = row.split == "train" or cfg.get("evaluation_scope", "tiles") == "tiles"
+        if "windows" in scene["metadata"] and expand_windows:
             full_counts = np.bincount(scene["mask"].ravel())
             windows = scene["metadata"]["windows"]
             if len({tuple(w) for w in windows}) != len(windows):
@@ -171,6 +226,11 @@ def load_scenes(manifest_path, cfg, split=None):
 
 
 def augment_scene(scene, cfg, rng):
+    """Return aligned [CHW x, HW targets, HW weights, HW mask] batch members.
+
+    Rebuild superstains after marker selection, then rotate/flip every array
+    together. The returned mask supports debug display, not model inputs.
+    """
     groups = {}
     for lineage, names in cfg["marker_groups"].items():
         available = [m for m in names if m in scene["scaled"]]

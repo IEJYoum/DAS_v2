@@ -8,6 +8,7 @@ import pandas as pd
 import tifffile
 
 from CLASSIFIER.config import CLASS_NAMES
+from CLASSIFIER.data import tile_starts
 
 
 def one_file(folder, pattern):
@@ -17,19 +18,39 @@ def one_file(folder, pattern):
     return matches[0]
 
 
-def sample_windows(mask, labels, tile_px, count, rng):
-    """Seeded disjoint grid tiles; retain an artifact tile if one is available."""
+def sample_windows(mask, labels, tile_px, count, rng, overlap=0):
+    """count=None: full overlapping coverage; otherwise the small seeded sample.
+
+    Keep windows with complete labelled cells. Full coverage includes far image
+    edges and checks that every supplied label can supervise at least one tile.
+    """
+    # A cell supervises a tile only if all its original mask pixels fit there.
+    # Artifact retention makes this a coverage sample, not population sampling.
     full = np.bincount(mask.ravel())
     ids = labels.cell_id.to_numpy()
     artifacts = labels.loc[labels["class"].eq("ARTIFACT"), "cell_id"].to_numpy()
     candidates, has_artifact = [], []
-    for y in range(0, mask.shape[0] - tile_px + 1, tile_px):
-        for x in range(0, mask.shape[1] - tile_px + 1, tile_px):
+    covered = set()
+    if min(mask.shape) < tile_px:
+        raise ValueError("Training source is smaller than tile_px")
+    ys = tile_starts(mask.shape[0], tile_px, overlap) if count is None else range(0, mask.shape[0] - tile_px + 1, tile_px)
+    xs = tile_starts(mask.shape[1], tile_px, overlap) if count is None else range(0, mask.shape[1] - tile_px + 1, tile_px)
+    for y in ys:
+        for x in xs:
             counts = np.bincount(mask[y:y+tile_px, x:x+tile_px].ravel(), minlength=len(full))
             complete = (counts > 0) & (counts == full)
             if complete[ids].any():
                 candidates.append([y, x, tile_px, tile_px])
                 has_artifact.append(bool(complete[artifacts].any()))
+                covered.update(ids[complete[ids]].tolist())
+    if count is None:
+        missing = set(ids) - covered
+        if missing:
+            raise ValueError(f"{len(missing)} labelled cells never fit wholly in a training tile; "
+                             f"increase tile_px/overlap. Examples: {sorted(missing)[:10]}")
+        if not candidates:
+            raise ValueError("No usable training tiles")
+        return candidates
     if len(candidates) < count:
         raise ValueError(f"Only {len(candidates)} usable tiles; requested {count}")
     selected = rng.choice(len(candidates), count, replace=False)
@@ -40,7 +61,19 @@ def sample_windows(mask, labels, tile_px, count, rng):
 
 
 def main(obs_csv, label_column, scenes, output_dir, marker_tokens=("H2B", "CD45", "PANCK"),
-         um_per_px=0.5, tile_px=256, tiles_per_scene=8, seed=7, cache_images=True):
+         um_per_px=0.5, tile_px=256, tiles_per_scene=8, seed=7, cache_images=True, tile_overlap=0):
+    """Write a new dataset/manifest from explicit scene specs and ready labels.
+
+    Specs require scene_id (= obs slide_scene), slide, split and folder.
+    ObjectNumber is the mask ID. Blank class values are omitted, not assigned
+    UNCLASSIFIED. This function never derives agreement labels from gates.
+    """
+    if len({s["scene_id"] for s in scenes}) != len(scenes):
+        raise ValueError("A source scene can only appear once in the selection")
+    if len({Path(s["folder"]).resolve() for s in scenes}) != len(scenes):
+        raise ValueError("Duplicate source ROI folders in selection")
+    if not {s["split"] for s in scenes} <= {"train", "val", "test"}:
+        raise ValueError("Scene split must be train, val, or test")
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=False)
     obs = pd.read_csv(obs_csv, usecols=["slide_scene", "ObjectNumber", label_column])
@@ -50,11 +83,8 @@ def main(obs_csv, label_column, scenes, output_dir, marker_tokens=("H2B", "CD45"
     unknown = set(obs["class"].dropna()) - set(CLASS_NAMES)
     if unknown:
         raise ValueError(f"Unmapped labels in supplied single column: {sorted(unknown)}")
-    if len({s["slide"] for s in scenes}) != len(scenes):
-        # Multiple ROIs per slide are fine, but a slide must stay in one split.
-        for slide in {s["slide"] for s in scenes}:
-            if len({s["split"] for s in scenes if s["slide"] == slide}) != 1:
-                raise ValueError(f"Slide {slide} is assigned to multiple splits")
+    # One explicit assignment per source ROI. Independent ROIs on the same
+    # slide may have different splits; tiles inherit this source assignment.
     manifest, reports = [], []
     for ordinal, spec in enumerate(scenes):
         sid, split = spec["scene_id"], spec["split"]
@@ -92,7 +122,7 @@ def main(obs_csv, label_column, scenes, output_dir, marker_tokens=("H2B", "CD45"
         labels = rows.loc[rows["class"].notna(), ["cell_id", "class"]]
         labels.to_csv(destination / "cells.csv", index=False)
         windows = sample_windows(mask, labels, tile_px, tiles_per_scene,
-                                 np.random.default_rng(seed + ordinal))
+                                 np.random.default_rng(seed + ordinal), tile_overlap)
         meta = {"scene_id": sid, "split": split, "slide": spec["slide"],
                 "um_per_px": um_per_px, "selection_seed": seed + ordinal,
                 "markers": {m: paths[m] for m in marker_tokens},
@@ -100,7 +130,9 @@ def main(obs_csv, label_column, scenes, output_dir, marker_tokens=("H2B", "CD45"
                 "obs_source": str(obs_csv), "label_column": label_column,
                 "cell_id_source": "ObjectNumber", "source_files": {m: str(p) for m, p in sources.items()},
                 "mask_source": str(mask_source),
-                "tile_selection": "seeded grid; retain an artifact-containing tile if available"}
+                "tile_selection": "full coverage; all supervised cells fit a tile" if tiles_per_scene is None
+                                  else "seeded grid; retain an artifact-containing tile if available",
+                "tile_overlap": tile_overlap}
         (destination / "scene.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         manifest.append({"scene_id": sid, "scene_json": f"{sid}/scene.json", "split": split})
         summary = {"scene_id": sid, "split": split, "shape": list(mask.shape),
@@ -116,3 +148,45 @@ def main(obs_csv, label_column, scenes, output_dir, marker_tokens=("H2B", "CD45"
         "label_column": label_column, "cache_images": cache_images, "um_per_px": um_per_px,
         "scenes": reports}, indent=2), encoding="utf-8")
     return manifest_path
+
+
+def retile_manifest(source_manifest, output_dir, tile_px=256, overlap=64):
+    """New coverage metadata/label snapshot, reusing explicitly cached source TIFFs.
+
+    This changes windows, not source scene split assignments or image pixels.
+    The returned dataset depends on the original cached TIFFs staying in place.
+    """
+    from CLASSIFIER.data import read_manifest
+    source_manifest = Path(source_manifest)
+    manifest = read_manifest(source_manifest)
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=False)
+    reports = []
+    for row in manifest.itertuples(index=False):
+        source_path = source_manifest.parent / row.scene_json
+        meta = json.loads(source_path.read_text(encoding="utf-8"))
+        mask_path = (source_path.parent / meta["mask"]).resolve()
+        mask = tifffile.imread(mask_path)
+        cells_path = (source_path.parent / meta["cells"]).resolve()
+        labels = pd.read_csv(cells_path)
+        windows = sample_windows(mask, labels, tile_px, None, np.random.default_rng(0), overlap)
+        destination = out / row.scene_id
+        destination.mkdir()
+        shutil.copy2(cells_path, destination / "cells.csv")
+        updated = {**meta, "markers": {m: str((source_path.parent / p).resolve())
+                    for m, p in meta["markers"].items()}, "mask": str(mask_path), "cells": "cells.csv",
+                   "windows": windows, "tile_overlap": overlap,
+                   "tile_selection": "full coverage; every supplied label fits at least one tile",
+                   "source_manifest": str(source_manifest.resolve())}
+        (destination / "scene.json").write_text(json.dumps(updated, indent=2), encoding="utf-8")
+        reports.append({"scene_id": row.scene_id, "split": row.split,
+                        "shape": list(mask.shape), "windows": len(windows),
+                        "labelled_cells": len(labels), "labels": labels["class"].value_counts().to_dict()})
+        print(f"{row.scene_id}: {len(windows)} tiles cover all {len(labels)} supplied labels", flush=True)
+    snapshot = manifest.copy()
+    snapshot["scene_json"] = [f"{sid}/scene.json" for sid in snapshot.scene_id]
+    path = out / "manifest.csv"
+    snapshot.to_csv(path, index=False)
+    (out / "ingest_report.json").write_text(json.dumps({"source_manifest": str(source_manifest.resolve()),
+        "tile_px": tile_px, "overlap": overlap, "scenes": reports}, indent=2), encoding="utf-8")
+    return path

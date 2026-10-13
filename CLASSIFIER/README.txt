@@ -1,3 +1,9 @@
+START HERE: README.md is the current code navigation and terminal-use guide.
+RUN_TEST.md gives the prepared workstation test and engineering takeover notes.
+NEXT_STEPS.md records completed changes and pending work as of 2026-10-13.
+The notes below are retained as historical experiment context; their old run
+counts and upstream curation policy have not been reverified on this workstation.
+
 CLASSIFIER -- small synthetic lineage harness
 ============================================
 
@@ -10,7 +16,7 @@ Edit CONFIG in config.py for normal IDE use. Or, from the DAS_v2 directory:
     folder = run.main(steps=200, output_dir="runs/my_first_run")
 
 output_dir must be new; the default creates a timestamped folder under
-C:\Users\youm\Desktop\src\classifier_runs (config.output_root).
+D:\CLASSIFIER_OUTPUT (config.output_root).
 An explicit relative output_dir is relative to CLASSIFIER, not terminal cwd.
 Nested config values replace the corresponding entire dict; for example:
     folder = run.main(model={"input_channels": 3, "class_count": 4,
@@ -38,8 +44,8 @@ identifies the cells in the capped confident-error gallery.
 
 channels_<scene>.png stitches the five scaled marker images and an RGB
 composite, with truth and predicted-class outlines on each panel. RGB uses
-epithelial blue, immune red, nuclear white. Outline colors: immune yellow,
-epithelial green, unclassified grey, artifact magenta. Small panels are
+epithelial blue, immune red, nuclear white. Outline colors: immune magenta,
+epithelial green, unclassified orange, artifact red. Small panels are
 enlarged; larger panels retain native pixels and outlines. The training
 folder shows final training-scene predictions; train_channels.png shows
 the actual first augmented input channels, with first-step predictions.
@@ -49,7 +55,7 @@ validation/debug overhead. metrics.jsonl holds the underlying values.
 NOISE AND SCALE
 ---------------
 noise is the synthetic Gaussian pixel-noise standard deviation divided by
-marker gain, for all stains including DAPI. Default .006; try .1, .5, 2,
+marker gain, for all stains including DAPI. CONFIG currently uses 1; try .1, .5, 2,
 or 10 for an extreme test. It changes images, not masks/true labels.
 Keep seed and other settings fixed for a comparison. Noise affects newly
 generated scenes only: reusing a manifest reuses its existing PNGs.
@@ -91,7 +97,7 @@ SMALL REAL-DATA RUN
 
 run_real.py stages three explicit AH08 ROI folders on first use and calls
 the SAME run/train/infer functions. Later calls reuse its local manifest.
-Cached inputs: src/classifier_runs/AH08_real_inputs/dataset. Outputs are
+Cached inputs: D:/CLASSIFIER_OUTPUT/AH08_real_inputs/dataset. Outputs are
 new timestamped folders alongside the other classifier runs.
 NUC = H2B, IMMUNE = CD45, EPI = PANCK. No stain warping or mask expansion.
 Physical scale is recorded provisionally as 0.5 um/px; TIFF mask tags say

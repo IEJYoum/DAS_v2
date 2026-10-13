@@ -1530,6 +1530,12 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
         return([original_df,original_obs,original_dfxy],[])
     dfs = typed_dfs
 
+    # Subtypes are valid only within their current primary-celltype branch.
+    # Reset old results before recombining so a cell reclassified on a later
+    # Maxey run cannot retain a stale tumor or immune subtype.
+    dfs[1]['Tumor Subtype: Matrix'] = 'nan'
+    dfs[1]['Immune Subtype: Matrix'] = 'nan'
+
     #each of the 4 pieces below is independent: subsets fresh from dfs, and only recombines
     #if its own matrix file was found, so a missing tumor/immune matrix just leaves that
     #piece's obs column at its 'nan' default instead of aborting the other pieces too
@@ -1597,12 +1603,15 @@ def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName 
 
         #markers = [mark.split('_')[0] for mark in df.columns]
         dm = {}
-        used_cols = []
+        used_col_positions = []
         for mark in prim.columns:#markers:
-            for col in df.columns:
+            for col_position,col in enumerate(df.columns):
                 if mark.lower()+'_' in col.lower():
-                    dm[mark] = df.loc[:,col]
-                    used_cols.append(col)
+                    # Use position rather than label: the legacy suffixing step
+                    # can legitimately create duplicate labels (for example
+                    # CD45 and CD45_), and label selection would return both.
+                    dm[mark] = df.iloc[:,col_position]
+                    used_col_positions.append(col_position)
                     break
         #print(dm)
         #print(dm.values())
@@ -1618,7 +1627,7 @@ def maxeyTypeH(dfs,method = 'zscore',fileName = 'primary_celltype.csv',typeName 
             return(None)
         dm1.columns = dm.keys()
         dm = dm1
-        below_thresh_key = below_thresh_key.loc[:,used_cols]
+        below_thresh_key = below_thresh_key.iloc[:,used_col_positions]
         #print(dm)
         prim = prim.loc[:,dm.columns]
         #print(prim)

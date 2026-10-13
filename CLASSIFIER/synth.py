@@ -11,6 +11,11 @@ from CLASSIFIER.config import CLASS_NAMES
 
 
 def generate_scene(seed, size=128, cell_count=24, noise=0.006):
+    """Return raw marker planes, integer mask and exact labels for one toy scene.
+
+    Function defaults are small fixtures; run.main supplies CONFIG values.
+    Toy classes are nearly balanced, so they cannot validate rare-class tuning.
+    """
     if not np.isfinite(noise) or noise < 0:
         raise ValueError("noise must be finite and nonnegative")
     if size < 32 or not 4 <= cell_count <= 65535:
@@ -92,6 +97,7 @@ def generate_scene(seed, size=128, cell_count=24, noise=0.006):
 
 
 def main(cfg):
+    """Write separate seeded train/val/test scenes beneath the new run directory."""
     out = Path(cfg["output_dir"]) / "scenes"
     out.mkdir()
     manifest = []

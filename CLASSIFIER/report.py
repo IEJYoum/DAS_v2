@@ -9,10 +9,17 @@ import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
-COLORS = np.array([[255, 255, 0], [0, 255, 0], [160, 160, 160], [255, 0, 255]], np.uint8)
+# Indices follow config.CLASS_NAMES: IMMUNE magenta, EPI green, UNCLASSIFIED
+# orange, ARTIFACT red. This palette colors class maps/outlines, not the RGB input.
+COLORS = np.array([[255, 0, 255], [0, 255, 0], [255, 165, 0], [255, 0, 0]], np.uint8)
 
 
 def score_cells(predictions, labels, class_names):
+    """Score only supplied truth rows; require a prediction for each labelled cell.
+
+    Macro-F1 includes every configured class, even those with no truth support
+    (whose F1 is zero here). Read per_class support alongside the headline score.
+    """
     keys = ["scene_id", "cell_id"] if "scene_id" in labels else ["cell_id"]
     unknown = (set(labels["class"]) | set(predictions.predicted_class)) - set(class_names)
     if unknown:
@@ -65,7 +72,7 @@ def cell_map(probabilities, mask, class_names):
 
 
 def overlay(image, mask, targets):
-    """Native-resolution inner outlines, including boundaries between touching IDs."""
+    """Inner outlines at the supplied raster resolution, including touching IDs."""
     rgb = image if image.ndim == 3 else np.repeat(image[..., None], 3, axis=-1)
     rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
     padded = np.pad(mask, 1)
@@ -76,30 +83,60 @@ def overlay(image, mask, targets):
     return rgb
 
 
-def write_channels(planes, x, mask, targets, path, class_names, predicted_targets=None, title=""):
+def preview_overlay(image, mask, targets, size):
+    """Resize imagery/label rasters FIRST, then draw one display-pixel boundaries.
+
+    Intensities use area averaging for shrinking. IDs and class indices use
+    the same nearest-neighbour coordinates, never interpolated label values.
+    Only display arrays change; native masks, calls and CSVs remain untouched.
+    """
+    width, height = size
+    if mask.shape == (height, width):
+        return overlay(image, mask, targets)
+    ys = np.minimum(((np.arange(height) + .5) * mask.shape[0] / height).astype(int), mask.shape[0] - 1)
+    xs = np.minimum(((np.arange(width) + .5) * mask.shape[1] / width).astype(int), mask.shape[1] - 1)
+    region = np.ix_(ys, xs)
+    resampling = Image.Resampling.BOX if height <= mask.shape[0] and width <= mask.shape[1] else Image.Resampling.BILINEAR
+    def resize(plane):
+        return np.asarray(Image.fromarray(np.asarray(plane, dtype=np.float32)).resize(size, resampling))
+    resized = resize(image) if image.ndim == 2 else np.stack([resize(image[..., c]) for c in range(image.shape[-1])], axis=-1)
+    return overlay(resized, mask[region], targets[region])
+
+
+def write_channels(planes, x, mask, targets, path, class_names, predicted_targets=None, title="", max_panel_px=None):
     """Stitch each scaled channel and a composite, with truth/prediction outline rows."""
     panels = {**planes, "RGB composite": composite(x)}
     rows = [("Truth", targets)]
     if predicted_targets is not None:
         rows.append(("Prediction", predicted_targets))
     height, width = mask.shape
-    width, height = max(256, width), max(256, height)
-    canvas = Image.new("RGB", (len(panels) * width, 76 + len(rows)*(height+32)), (24, 24, 24))
-    draw = ImageDraw.Draw(canvas)
+    scale = min(1, max_panel_px / max(height, width)) if max_panel_px else 1
+    width, height = max(256, round(width * scale)), max(256, round(height * scale))
     font = ImageFont.truetype(str(Path(matplotlib.get_data_path()) / "fonts/ttf/DejaVuSans.ttf"), 14)
-    draw.text((8, 4), title, font=font, fill="white")
-    draw.text((8, 25), "RGB: EPI blue / IMMUNE red / NUC white", font=font, fill="white")
+    lines, line = [], ""
+    for word in title.split():
+        candidate = f"{line} {word}".strip()
+        if line and font.getlength(candidate) > len(panels) * width - 16:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    lines.append(line)
+    extra = 20 * (len(lines) - 1)
+    canvas = Image.new("RGB", (len(panels) * width, 76 + extra + len(rows)*(height+32)), (24, 24, 24))
+    draw = ImageDraw.Draw(canvas)
+    for i, text in enumerate(lines):
+        draw.text((8, 4 + 20*i), text, font=font, fill="white")
+    draw.text((8, 25 + extra), "RGB: EPI blue / IMMUNE red / NUC white", font=font, fill="white")
     offset = 8
     for cls, color in zip(class_names, COLORS):
-        draw.text((offset, 48), cls, font=font, fill=tuple(color))
+        draw.text((offset, 48 + extra), cls, font=font, fill=tuple(color))
         offset += int(draw.textlength(cls, font=font)) + 24
     for r, (row_title, class_map) in enumerate(rows):
-        top = 76 + r*(height+32)
+        top = 76 + extra + r*(height+32)
         for c, (name, plane) in enumerate(panels.items()):
             draw.text((c*width+8, top), f"{row_title}: {name}", font=font, fill="white")
-            image = Image.fromarray(overlay(plane, mask, class_map))
-            if image.size != (width, height):
-                image = image.resize((width, height), Image.Resampling.NEAREST)
+            image = Image.fromarray(preview_overlay(plane, mask, class_map, (width, height)))
             canvas.paste(image, (c*width, top+24))
     path = Path(path)
     canvas.save(path)
@@ -112,7 +149,7 @@ def write_loss(metrics_path, output_path):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(frame.wall_seconds, frame.loss, alpha=.35, label="batch loss")
     ax.plot(frame.wall_seconds, frame.loss.rolling(10, min_periods=1).mean(), label="10-step mean")
-    ax.set(xlabel="Training wall-clock seconds (includes validation/debug)", ylabel="Cell-weighted cross entropy")
+    ax.set(xlabel="Training wall-clock seconds (includes validation/debug)", ylabel="Weighted cross entropy")
     ax.legend(); ax.grid(alpha=.2)
     return _save(fig, Path(output_path))
 
@@ -124,10 +161,56 @@ def _save(fig, path):
     return path
 
 
-def write_debug(scene, prepared, predictions, output_dir, class_names):
+def write_native_roi(scene, probabilities, output_dir, class_names, title, prefix="", cell_targets=None):
+    """Native pixels for zoom, plus one crop using the SAME whole-scene cell calls.
+
+    PNG title bars add height only; the ROI image is never resized. The companion
+    slices whole-scene calls instead of recomputing decisions on partial cells.
+    """
+    out = Path(output_dir)
+    sid = scene["metadata"]["scene_id"]
+    mask, truth = scene["mask"], scene["targets"]
+    calls = cell_map(probabilities, mask, class_names) if cell_targets is None else cell_targets
+    rgb = composite(scene["x"])
+    height, width = mask.shape
+    font = ImageFont.truetype(str(Path(matplotlib.get_data_path()) / "fonts/ttf/DejaVuSans.ttf"), 16)
+    paths = []
+    for kind in ("truth", "predictions", "errors"):
+        if kind == "errors":
+            targets = np.full(mask.shape, -1, np.int64)
+            targets[(truth >= 0) & (truth == calls)] = 1  # green
+            targets[(truth >= 0) & (truth != calls)] = 3  # red
+            image = overlay(rgb * .35, mask, targets)
+            legend = "Correct labelled cells: green | Incorrect: red | No truth: no outline"
+        else:
+            image = overlay(rgb, mask, truth if kind == "truth" else calls)
+            legend = "IMMUNE magenta | EPI green | UNCLASSIFIED orange | ARTIFACT red"
+        canvas = Image.new("RGB", (width, height + 84), (24, 24, 24))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((8, 6), title, font=font, fill="white")
+        draw.text((8, 30), f"{kind.title()} | Native ROI {width} x {height}; image starts below this 84-pixel title bar",
+                  font=font, fill="white")
+        draw.text((8, 54), legend, font=font, fill="white")
+        canvas.paste(Image.fromarray(image), (0, 84))
+        path = out / f"{prefix}{sid}__roi_{kind}_native.png"
+        canvas.save(path)
+        paths.append(path)
+    th, tw = min(256, height), min(256, width)
+    y, x = (height - th) // 2, (width - tw) // 2
+    region = np.s_[y:y+th, x:x+tw]
+    path = out / f"{prefix}{sid}__companion_y{y}_x{x}.png"
+    write_channels({m: v[region] for m, v in scene["scaled"].items()},
+        scene["x"][:, y:y+th, x:x+tw], mask[region], truth[region], path, class_names,
+        predicted_targets=calls[region], title=f"{title} | companion x={x}:{x+tw}, y={y}:{y+th}; whole-ROI cell calls")
+    paths.append(path)
+    return paths
+
+
+def write_debug(scene, prepared, predictions, output_dir, class_names, title=None, prefix="", max_panel_px=None):
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     sid = scene["metadata"]["scene_id"]
+    title = title or sid
     paths = []
     if predictions is None:
         names = list(prepared["scaled"])
@@ -147,8 +230,8 @@ def write_debug(scene, prepared, predictions, output_dir, class_names):
             inset.set_xticks([0, 1])
             axes[row, 0].axis("off")
             axes[row, 1].axis("off")
-        fig.suptitle(sid)
-        paths.append(_save(fig, out / f"prep_{sid}.png"))
+        fig.suptitle(title)
+        paths.append(_save(fig, out / f"{prefix}{sid}__scaling.png"))
     columns = 5 if predictions is not None else 3
     fig, axes = plt.subplots(1, columns, figsize=(3*columns, 3.5))
     axes[0].imshow(composite(prepared["x"]))
@@ -170,25 +253,38 @@ def write_debug(scene, prepared, predictions, output_dir, class_names):
         axes[4].imshow(error)
         axes[4].set_title("cell errors red / correct green")
     else:
-        axes[2].imshow(overlay(composite(prepared["x"]), scene["mask"], prepared["targets"]))
+        h, w = scene["mask"].shape
+        scale = min(1, 256 / max(h, w))
+        size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        axes[2].imshow(preview_overlay(composite(prepared["x"]), scene["mask"], prepared["targets"], size),
+                       interpolation="nearest")
         axes[2].set_title("input + labelled outlines")
     for ax in axes:
         ax.axis("off")
-    fig.suptitle(sid + " | " + " / ".join(class_names))
-    paths.append(_save(fig, out / f"{'test' if predictions is not None else 'superstains'}_{sid}.png"))
+    fig.suptitle(title + " | " + " / ".join(class_names))
+    paths.append(_save(fig, out / f"{prefix}{sid}__{'predictions' if predictions is not None else 'inputs'}.png"))
     paths.append(write_channels(prepared["scaled"], prepared["x"], scene["mask"], prepared["targets"],
-                                out / f"channels_{sid}.png", class_names,
-                                cell_targets if predictions is not None else None, sid))
+                                out / f"{prefix}{sid}__channels.png", class_names,
+                                cell_targets if predictions is not None else None, title, max_panel_px))
+    if predictions is not None and "parent_scene_id" not in scene["metadata"] and max(scene["mask"].shape) > 256:
+        paths.extend(write_native_roi(scene, predictions, out, class_names, title, prefix, cell_targets))
     return paths
 
 
-def write_batch(batch, output_path, class_names, probabilities=None):
+def write_batch(batch, output_path, class_names, probabilities=None, class_weights=None):
     x, targets, weights, masks = batch
+    display_weights = weights * (targets != -1)
+    if class_weights is not None:
+        display_weights = display_weights * np.asarray(class_weights)[np.maximum(targets, 0)]
     fig, axes = plt.subplots(len(x), 3, figsize=(9, 2.6*len(x)), squeeze=False)
     for i in range(len(x)):
-        axes[i, 0].imshow(overlay(composite(x[i]), masks[i], targets[i])); axes[i, 0].set_title("augmented input + truth")
+        h, w = masks[i].shape
+        scale = min(1, 256 / max(h, w))
+        size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        axes[i, 0].imshow(preview_overlay(composite(x[i]), masks[i], targets[i], size), interpolation="nearest")
+        axes[i, 0].set_title("augmented input + truth")
         axes[i, 1].imshow(class_rgb(targets[i])); axes[i, 1].set_title("targets")
-        axes[i, 2].imshow(weights[i], cmap="magma"); axes[i, 2].set_title("loss weights")
+        axes[i, 2].imshow(display_weights[i], cmap="magma"); axes[i, 2].set_title("effective loss weights")
         for ax in axes[i]:
             ax.axis("off")
     path = _save(fig, Path(output_path))
@@ -203,12 +299,14 @@ def write_batch(batch, output_path, class_names, probabilities=None):
     return path, stats
 
 
-def write_errors(scenes, predictions, output_dir, class_names, limit=12):
+def write_prediction_report(scenes, predictions, output_dir, class_names, limit=12, prefix="", title=""):
+    """Export ALL calls for Excel; the PNG remains a capped wrong-cell gallery."""
+    from CLASSIFIER.infer import report_correctness
     out = Path(output_dir)
-    labels = pd.concat([s["labels"].assign(scene_id=s["metadata"]["scene_id"]) for s in scenes])
-    joined = labels.merge(predictions, on=["scene_id", "cell_id"], validate="one_to_one")
-    errors = joined[joined["class"] != joined.predicted_class].sort_values("certainty", ascending=False).head(limit)
-    errors.to_csv(out / "errors.csv", index=False)
+    out.mkdir(parents=True, exist_ok=True)
+    joined = report_correctness(predictions)
+    joined.to_csv(out / f"{prefix}predictions.csv", index=False, encoding="utf-8-sig")
+    errors = joined[joined.labelled & ~joined.correct.fillna(False)].sort_values("certainty", ascending=False).head(limit)
     if errors.empty:
         fig, ax = plt.subplots(figsize=(6, 2)); ax.axis("off")
         ax.text(.05, .5, "No wrong labelled cells in this split.")
@@ -226,5 +324,6 @@ def write_errors(scenes, predictions, output_dir, class_names, limit=12):
             x0, x1 = max(0, xx.min()-5), min(cell.shape[1], xx.max()+6)
             ax.imshow(composite(scene["x"])[y0:y1, x0:x1])
             ax.contour(cell[y0:y1, x0:x1], levels=[.5], colors="white", linewidths=.6)
-            ax.set_title(f"{record['scene_id']} / {record['cell_id']}\n{record['class']} -> {record['predicted_class']}\np={record['certainty']:.2f}", fontsize=8)
-    return _save(fig, out / "errors.png")
+            ax.set_title(f"{record['scene_id']} / {record['cell_id']}\n{record['true_class']} -> {record['predicted_class']}\np={record['certainty']:.2f}", fontsize=8)
+    fig.suptitle(title or "Most confident wrong labelled calls (capped gallery)")
+    return _save(fig, out / f"{prefix}errors.png")
