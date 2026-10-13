@@ -73,6 +73,7 @@ def main():
     check_source_splits()
     check_full_coverage()
     check_preview_boundaries()
+    check_error_pages()
     check_launcher()
     # Exact synthetic example, fixed throughout optimization (deliberate overfit).
     markers, mask, labels = synth.generate_scene(19, 64, 12)
@@ -291,6 +292,34 @@ def check_preview_boundaries():
     np.testing.assert_array_equal(report.preview_overlay(plane, mask, targets, (1024, 1024)),
                                   report.overlay(plane, mask, targets))
     print("PASS: resized channel panels draw connected boundaries after resizing; native overlay unchanged", flush=True)
+
+
+def check_error_pages():
+    """Every error appears exactly once; correct/unlabelled calls stay in the CSV."""
+    from unittest.mock import patch
+    mask = np.zeros((64, 64), np.uint16)
+    for cell_id in range(1, 16):
+        y, x = 8 + ((cell_id-1)//5)*12, 8 + ((cell_id-1)%5)*10
+        mask[y:y+3, x:x+3] = cell_id
+    scene = {"metadata": {"scene_id": "ROI"}, "mask": mask, "x": np.zeros((3, 64, 64), np.float32)}
+    rows = pd.DataFrame({"scene_id": ["ROI"]*15, "cell_id": range(1, 16),
+        "true_class": ["IMMUNE"]*14 + [None], "predicted_class": ["EPI"]*13 + ["IMMUNE"]*2,
+        "certainty": np.linspace(.99, .6, 15)})
+    displayed = []
+    save = report._save
+    def capture(fig, path):
+        for ax in fig.axes:
+            if ax.get_title():
+                displayed.append(int(ax.get_title().split("\n")[0].split(" / ")[1]))
+        return save(fig, path)
+    with tempfile.TemporaryDirectory() as temporary:
+        with patch.object(report, "_save", side_effect=capture):
+            paths = report.write_prediction_report([scene], rows, temporary, CLASS_NAMES, page_size=5)
+        assert [p.name for p in paths] == ["errors0.png", "errors1.png", "errors2.png"]
+        assert displayed == list(range(1, 14))
+        exported = pd.read_csv(Path(temporary) / "predictions.csv")
+        assert len(exported) == 15 and exported.correct.isna().sum() == 1
+    print("PASS: all errors paginated once; correct/unlabelled predictions retained in CSV", flush=True)
 
 
 def check_launcher():

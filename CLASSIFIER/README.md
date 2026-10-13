@@ -1,5 +1,10 @@
 # CLASSIFIER: start here
 
+**For real data, open [run_project.py](run_project.py), edit its I/O settings and
+press Run.** [RUN_PROJECT.md](RUN_PROJECT.md) explains the central launcher,
+disposable BCC/AH08 adapters and prepare/predict/train-test modes. Dataset-specific
+launchers are now compatibility wrappers; their paths are configured centrally.
+
 This is a standalone broad-lineage classifier harness. It reads stain images,
 uses existing cell masks for supervision, trains a small PyTorch U-Net, and
 exports one prediction per mask cell. It currently runs synthetic experiments
@@ -14,6 +19,11 @@ implemented; `classifier_plan_v1.txt` still says no code exists.
 For the prepared test on this workstation and engineering takeover notes,
 read [RUN_TEST.md](RUN_TEST.md). Inputs, previews and new runs now live under
 `D:\CLASSIFIER_OUTPUT`.
+
+[ENGINE_EXPERIMENTS.md](ENGINE_EXPERIMENTS.md) records the reviewed model-swap,
+encoder-pretraining and head-comparison ideas; those are proposals, not new models.
+The brief [future experiments plan](future_experiments_plan_v0.md) adds the
+deferred learning curve for finding the minimum data needed to predict a batch.
 
 ## Run without VS Code
 
@@ -259,7 +269,7 @@ automatic 1/3 train, 1/6 test, 1/2 reserve selection exists yet. See
 | `debug/train_batch.png`, `debug/train_batch.json`, `debug/train_channels.png` | Actual first augmented batch and its loss weights; first predictions precede the first optimizer update. |
 | `validation/` | Flat per-step PNG/CSV/metrics collection. Native whole-ROI truth/prediction/error images, compact overview and one-tile companion. |
 | `debug/training/`, `debug/loss_vs_time.png` | Training-tile previews and loss against elapsed wall time. |
-| `test/predictions.csv`, `test/errors.png` | All calls with nullable `correct`; the image gallery alone is capped to wrong labelled calls. |
+| `test/predictions.csv`, `test/errors0.png`, `test/errors1.png`, ... | All calls with nullable `correct`; all labelled errors across numbered pages, sorted by certainty. |
 
 Current outline colors: IMMUNE magenta, EPI green, UNCLASSIFIED orange, ARTIFACT
 red. RGB image colors are separate: immune red, epithelial blue, nucleus white.

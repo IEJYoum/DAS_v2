@@ -1,5 +1,13 @@
 # Run the prepared test and take over the code
 
+**Current entry point:** edit `run_project.py` and press Run. See
+[RUN_PROJECT.md](RUN_PROJECT.md) for shared I/O paths, glob patterns and adapters.
+Defaults are BCC forward-only. For the previous training experiment choose
+`DATASET='ah08'`, `MODE='train_test'`; choose `MODE='prepare'` to inspect it first.
+The following older walkthrough records the original AH08 setup; dataset launcher
+options and reusable input-cache behavior have since been replaced by the central
+launcher and fresh per-run staging.
+
 The **next real-data training run is yours to start**. Inputs have already been
 copied and checked on this workstation, without training the real model.
 Use the same explicit interpreter that passed the dependency checks:
@@ -136,7 +144,7 @@ directly under `D:\CLASSIFIER_OUTPUT`. It contains:
   truth, `correct`, `labelled`, cell probabilities, support and confusion matrix.
 - `validation/`: all validation PNGs, per-step full predictions CSVs and metrics
   in one flat folder. Names/titles include the training step and ROI.
-- `test/`: best-checkpoint test PNGs, the all-call CSV and capped error gallery.
+- `test/`: best-checkpoint test PNGs, the all-call CSV and numbered error pages.
 - `debug/training/`: small training-tile examples; these are explicitly previews
   of training inputs rather than whole-ROI evaluation images.
 
@@ -152,7 +160,13 @@ results, not recomputed on cut-off cell fragments.
 
 CSV `correct` is True or False for supplied truth, and blank for unlabelled
 cells. Filter `labelled=True` before accuracy calculations in Excel. The PNG
-error gallery is capped; **the predictions CSV is not capped or error-only**.
+error gallery now includes every labelled error in `errors0.png`, `errors1.png`,
+etc. (with step/checkpoint prefixes where appropriate), highest certainty first.
+There are 12 cells per page by default; the legacy `error_gallery_limit` setting
+now controls page size, not the total error count. Page progress prints to the
+terminal. **The predictions CSV includes correct, incorrect and unlabelled calls.**
+Rendering all errors at each validation can be expensive; debug verbosity
+controls are deferred as requested.
 
 Use validation for tuning. The old eight-tile test had only one artifact;
 the whole test ROI includes 119. The scores still measure agreement with
@@ -278,3 +292,8 @@ the previously captioned tile previews. The original training run's sampled
 CSVs and historical tile-image pixels were restored, and its checkpoints,
 configuration and numeric metrics were unchanged. Its model was trained on
 eight tiles; the new whole-ROI training configuration has not yet been run.
+
+# New BCC dataset: forward only
+
+See [BCC_FORWARD.md](BCC_FORWARD.md) for the editable Z-drive input recipe,
+existing-checkpoint inference command, output layout and proxy-label scoring.

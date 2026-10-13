@@ -299,31 +299,51 @@ def write_batch(batch, output_path, class_names, probabilities=None, class_weigh
     return path, stats
 
 
-def write_prediction_report(scenes, predictions, output_dir, class_names, limit=12, prefix="", title=""):
-    """Export ALL calls for Excel; the PNG remains a capped wrong-cell gallery."""
+def write_prediction_report(scenes, predictions, output_dir, class_names, page_size=12, prefix="", title=""):
+    """Export all calls and show EVERY labelled error across numbered PNG pages."""
     from CLASSIFIER.infer import report_correctness
+    from scipy.ndimage import find_objects
+    if page_size < 1:
+        raise ValueError("Error gallery page_size must be >= 1")
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     joined = report_correctness(predictions)
     joined.to_csv(out / f"{prefix}predictions.csv", index=False, encoding="utf-8-sig")
-    errors = joined[joined.labelled & ~joined.correct.fillna(False)].sort_values("certainty", ascending=False).head(limit)
-    if errors.empty:
-        fig, ax = plt.subplots(figsize=(6, 2)); ax.axis("off")
-        ax.text(.05, .5, "No wrong labelled cells in this split.")
-    else:
-        fig, axes = plt.subplots(int(np.ceil(len(errors)/4)), 4, figsize=(12, 3*int(np.ceil(len(errors)/4))), squeeze=False)
-        lookup = {s["metadata"]["scene_id"]: s for s in scenes}
-        for ax in axes.flat:
-            ax.axis("off")
-        for ax, row in zip(axes.flat, errors.itertuples(index=False, name=None)):
-            record = dict(zip(errors.columns, row))
-            scene = lookup[record["scene_id"]]
-            cell = scene["mask"] == record["cell_id"]
-            yy, xx = np.where(cell)
-            y0, y1 = max(0, yy.min()-5), min(cell.shape[0], yy.max()+6)
-            x0, x1 = max(0, xx.min()-5), min(cell.shape[1], xx.max()+6)
-            ax.imshow(composite(scene["x"])[y0:y1, x0:x1])
-            ax.contour(cell[y0:y1, x0:x1], levels=[.5], colors="white", linewidths=.6)
-            ax.set_title(f"{record['scene_id']} / {record['cell_id']}\n{record['true_class']} -> {record['predicted_class']}\np={record['certainty']:.2f}", fontsize=8)
-    fig.suptitle(title or "Most confident wrong labelled calls (capped gallery)")
-    return _save(fig, out / f"{prefix}errors.png")
+    errors = joined[joined.labelled & ~joined.correct.fillna(False)].sort_values("certainty", ascending=False, kind="stable")
+    lookup = {s["metadata"]["scene_id"]: s for s in scenes}
+    # Whole-ROI scans and RGB construction happen once per scene, not per error.
+    cache = {sid: {"boxes": find_objects(lookup[sid]["mask"]),
+                   "rgb": (composite(lookup[sid]["x"]) * 255).astype(np.uint8)}
+             for sid in errors.scene_id.unique()}
+    page_count = max(1, int(np.ceil(len(errors) / page_size)))
+    print(f"Error gallery: {len(errors):,} labelled errors across {page_count} pages", flush=True)
+    paths = []
+    for page_number in range(page_count):
+        page = errors.iloc[page_number*page_size:(page_number+1)*page_size]
+        if page.empty:
+            fig, ax = plt.subplots(figsize=(6, 2)); ax.axis("off")
+            ax.text(.05, .5, "No wrong labelled cells in this split.")
+        else:
+            nrows = int(np.ceil(len(page)/4))
+            fig, axes = plt.subplots(nrows, 4, figsize=(12, 3*nrows), squeeze=False)
+            for ax in axes.flat:
+                ax.axis("off")
+            for ax, record in zip(axes.flat, page.to_dict("records")):
+                scene = lookup[record["scene_id"]]
+                cached = cache[record["scene_id"]]
+                cell_id = int(record["cell_id"])
+                box = cached["boxes"][cell_id - 1]
+                if box is None:
+                    raise ValueError(f"Error cell {cell_id} absent from scene mask")
+                y0, y1 = max(0, box[0].start-5), min(scene["mask"].shape[0], box[0].stop+5)
+                x0, x1 = max(0, box[1].start-5), min(scene["mask"].shape[1], box[1].stop+5)
+                cell = scene["mask"][y0:y1, x0:x1] == cell_id
+                ax.imshow(cached["rgb"][y0:y1, x0:x1])
+                ax.contour(cell, levels=[.5], colors="white", linewidths=.6)
+                ax.set_title(f"{record['scene_id']} / {cell_id}\n{record['true_class']} -> {record['predicted_class']}\np={record['certainty']:.2f}", fontsize=8)
+        caption = title or "Wrong labelled calls, highest certainty first"
+        fig.suptitle(f"{caption} | page {page_number+1}/{page_count} | {len(errors):,} total errors")
+        paths.append(_save(fig, out / f"{prefix}errors{page_number}.png"))
+        if (page_number + 1) % 10 == 0 or page_number + 1 == page_count:
+            print(f"  error pages written: {page_number+1}/{page_count}", flush=True)
+    return paths

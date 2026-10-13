@@ -39,5 +39,5 @@ CONFIG = {
     "log_every": 10,
     "validate_every": 50,
     "debug_scenes": 3,
-    "error_gallery_limit": 12,
+    "error_gallery_limit": 12,      # cells PER PAGE; all errors are rendered (legacy key name)
 }

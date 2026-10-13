@@ -104,7 +104,7 @@ def write_debug_summary(run_directory, status="complete", phase=None, error=None
     lines.extend(["", "Native ROI PNGs keep source pixels; an 84px title bar is added above them.",
                   "CSV correct=True/False where truth exists; blank where unlabelled.",
                   "Filter labelled=True before calculating accuracy in Excel.",
-                  "The wrong-cell PNG gallery is capped; predictions CSVs include all calls.",
+                  "Numbered errors0.png, errors1.png, etc. show all labelled errors; CSVs include all calls.",
                   f"Checkpoint/export verification: {'PASS' if verification.get('passed') else 'not recorded yet'}"])
     if error:
         lines.extend(["", "FAILURE DETAILS", error])
