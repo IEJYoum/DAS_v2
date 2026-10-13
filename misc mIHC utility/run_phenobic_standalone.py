@@ -12,10 +12,16 @@ DAS adapter can call.
 from __future__ import annotations
 
 import glob
+import os
 import re
 import shutil
 import sys
 from pathlib import Path
+
+
+# PhenoBIC creates worker processes; each otherwise repeats TensorFlow's
+# harmless missing-CUDA-runtime notice on CPU-only machines.  Keep errors.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 
 # ---------------------------------------------------------------------------

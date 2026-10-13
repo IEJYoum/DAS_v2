@@ -1,0 +1,432 @@
+lineage pixel classifier plan v0
+================================
+
+Status: proposed, revised once.  Nothing is implemented.  Standalone under
+``CLASSIFIER/``; no imports from the rest of DAS_v2 until the proof of
+concept passes.
+
+
+GOAL
+----
+
+A CNN that reads a small fixed set of "superstain" images (one per lineage)
+plus a nuclear stain and predicts, per pixel, which lineage the cell under
+that pixel belongs to.  Per-cell calls are made afterwards by averaging the
+pixel predictions inside any label mask.
+
+It must be "pretty good everywhere" across CycIF and mIHC, labs, and panels,
+rather than excellent on one dataset.  It predicts the best guess from signal,
+morphology, and spatial context, not only "what is above threshold".
+
+Proof of concept (PoC): nuclear + immune + epithelial in, four classes out.
+
+
+DECISIONS ALREADY MADE
+----------------------
+
+1. Input is superstains, not individual stains.
+   A superstain is the per-pixel max over the scaled markers of one lineage.
+   Each marker is scaled first, then the max is taken.  The model never
+   learns marker identity.  Expect one to three markers per lineage.
+
+2. Output is per pixel.  The mask is never a model input.
+   Masks are used to paint training labels and to aggregate at inference.
+
+3. Classes are IMMUNE, EPI, UNCLASSIFIED, ARTIFACT (PoC); FB and ENDO later.
+   UNCLASSIFIED is the default for any real cell outside the panel's scope.
+   ARTIFACT is a normal class: cells labelled ``artifact`` are trained
+   exactly like cells labelled ``immune``.
+
+4. There is no background class.  Pixels outside every cell get zero loss.
+   Nuclear-only and whole-cell masks can therefore be mixed: cytoplasm
+   outside a nuclear mask is unsupervised, not mislabelled.  The pixel map
+   between cells is undefined and is drawn grey in debug images.
+   Only the loss is masked.  The input image is never masked, in training
+   or at inference, so the model always sees the full tissue.  At
+   inference the mask is applied on the output side: aggregation reads
+   only the pixels inside cells.
+
+5. IGNORE is a label state, not a class.
+   Cells with no trusted label get zero loss.  They are never silently
+   UNCLASSIFIED.
+
+6. Resolution is one config value, ``target_um_per_px`` (start at 0.5).
+   Resampling happens only in prep.  Every physical knob is in microns.
+
+7. Scaling is applied at load time, not baked into tiles.
+   Tiles store resampled raw intensities, so the scaling method can change
+   without re-extracting.
+
+8. Every stage writes agent-readable text and human-readable images.
+
+9. The file-matching machinery (image + mask + labels per scene) is built
+   here as the scene sheet.  DAS is not patched now; later DAS can emit the
+   same sheet.
+
+10. Bad input fails loudly.  See FAIL-LOUD CHECKS.
+
+
+SCENE CONTRACT
+--------------
+
+The scene sheet is a CSV with one row per scene:
+
+    scene id, image path(s), mask path, mask kind (nuc / cell),
+    label CSV path, label column, um per px, assay, patient, slide
+
+Cell key: ``{slide_scene}_cell{seg_label}``, the DAS triplet index
+(``data_extraction/feature_extract_17.py``).  Labels are read from the
+``_obs.csv`` member of a triplet.  Data that does not follow this is
+standardized into triplets first; the classifier accepts one key format.
+
+One adapter reads a sheet row into:
+
+- ``markers``     marker name -> 2D raw intensity array
+- ``um_per_px``
+- ``label_mask``  2D integer array of cell ids (0 = no cell)
+- ``mask_kind``
+- ``labels``      cell key -> celltype string
+
+``label_map.csv`` maps each celltype string to IMMUNE / EPI / FB / ENDO /
+UNCLASSIFIED / ARTIFACT / IGNORE.  In the PoC, FB and ENDO map to
+UNCLASSIFIED because those superstains are not given to the model.
+
+
+LINEAGE MARKERS
+---------------
+
+``lineage_markers.csv``, same layout as ``maxey matrices/primary_celltype.csv``
+(rows are lineages, columns are markers, 1 = member).  Starting content,
+taken from that matrix and from the discussion:
+
+    NUC      DAPI, HEM
+    IMMUNE   CD45, CD3
+    EPI      PanCK, Ecad, CK19
+    ENDO     CD31
+    FB       aSMA, CD90        (Vim excluded, see below)
+
+A scene's panel is resolved automatically: its marker names are intersected
+with this table.  Names are compared after lowercasing and removing
+punctuation, which collapses the PanCK / PANCK / panCK / pan-CK columns of
+the existing matrix into one.
+
+Vim is in the matrix's fibroblast row but should stay out of the FB
+superstain.  Vimentin is also on immune cells, endothelium, and mesenchymal
+tumour (``tumor_celltype.csv`` uses it for exactly that).  The matrix method
+resolves the overlap by row priority; a superstain cannot, and the FB
+channel would mean different things in a Vim panel and an aSMA panel.
+This only matters from the FB / ENDO stage onward.
+
+
+FAIL-LOUD CHECKS
+----------------
+
+A scene that fails any check is rejected, named at the top of the report
+with the number that tripped it, and the run exits non-zero.
+
+1. Names.  A required lineage with no matching marker is an error that
+   lists the scene's markers.  So is an unmapped celltype string.
+
+2. Channel health (no labels needed; runs in prep and at inference).
+   From the scaling statistics: the channel has essentially no pixels above
+   the noise floor (failed stain), or no usable background peak (signal
+   everywhere, or saturated).
+
+3. Label-signal agreement (needs labels; prep only).
+   For each lineage: are cells labelled that lineage brighter in its
+   superstain than other cells?  Reported as the chance that a random
+   labelled-positive cell outranks a random other cell (0.5 = unrelated,
+   1.0 = perfect).  A low value means the stain, scaling, marker mapping,
+   mask alignment, or cell-key join is wrong.  Start the reject line at
+   0.8 and move it once real distributions are seen.
+
+
+LABEL STRATEGY
+--------------
+
+Curation is driven by the debug outputs rather than done up front.
+
+- Test set first.  About 500 cells, drawn at random within assay x class
+  before any model exists, hand-verified from crop galleries, frozen.
+  About 50 per stratum distinguishes "fine" from "collapsed"; it cannot
+  resolve differences of a few points.  It grows over time.
+- Hard-case list.  About 100 deliberately chosen cells (CD45-dim immune in
+  nests, CK-low tumour, each artifact kind), scored separately.  The
+  handful of perfectly labelled cells available now belong here.
+- Training set.  Start from the large noisy pool: 100k to 200k cells from
+  scenes that pass check 3, balanced over assay, dataset, and class.  No
+  hand verification.
+- Loop.  Train, open the error gallery (cells where the model confidently
+  disagrees with the label), review the top few hundred, correct or set to
+  IGNORE, retrain.  Corrections carry a ``verified`` flag.
+
+Why this order: a network averages out random label errors but learns
+consistent ones (every RBC called immune).  The error gallery is where
+consistent errors show up, so hand effort goes there.
+
+The test set must never be chosen from the error gallery; that would bias
+it toward cells the current model gets wrong.
+
+
+SYNTHETIC DATA
+--------------
+
+Purpose: exact ground truth for checking the pipeline and its debug
+outputs, and designed cases a per-cell-intensity baseline cannot solve but
+a network using shape and context can.  It says nothing about performance
+on real tissue.
+
+``synth.py`` writes scenes to disk in the scene-sheet format (per-marker
+TIFFs, label mask, triplet ``_obs.csv``), so synthetic and real data take
+the same path through the adapter.
+
+Tier S1, needed to run anything:
+- layout: epithelial nests (thresholded smooth random field) of large
+  packed cells; stroma of sparse elongated cells; small round immune cells
+  scattered, clustered, and some inside nests
+- nuclei as textured ellipses; cell body as the nucleus grown outward and
+  stopped by its neighbours
+- signal by lineage: EPI membrane and cytoplasm, IMMUNE thin membrane
+  ring, FB elongated fibres, ENDO ring around a lumen
+- one to three markers per lineage, each with its own gain, background,
+  noise, and a chance of being negative on a cell the others mark
+- raw-intensity model: offset + noise + gain x signal per scene, so
+  scaling has real work to do; an "mIHC-like" mode with zero-heavy
+  background, saturating signal, and a nuclear stain that bleeds into
+  cytoplasm
+- every cell carries its true class and a case tag
+
+Tier S2, designed hard cases (metrics are split by case tag):
+- spillover: an immune cell against a nest picks up epithelial membrane
+  signal along one edge
+- dim in context: weakly stained epithelial cells mid-nest; CD45-dim
+  immune cells inside nests
+- artifacts that have cell ids: RBC-like discs bright in every marker with
+  little nuclear signal; a fold band where every channel is raised and
+  blurred; bright specks in one channel on top of a cell whose true label
+  does not change
+- unclassified: nucleated cells with no lineage signal, and cells of a
+  lineage whose channel is withheld
+
+Tier S3, broken inputs:
+- stain-failure scenes (no signal; signal everywhere) that must trip
+  check 2
+- shifted masks and wrong joins that must trip check 3
+- nuclear-only versus whole-cell masks; merged cells for ``frac_top``
+- injected label errors, random and consistent, that the error gallery
+  must surface
+
+
+PIPELINE
+--------
+
+1. prep (CPU, once per dataset)
+   - read the scene; resample intensities (area averaging) and mask
+     (nearest) to ``target_um_per_px``
+   - per-scene, per-marker scaling statistics inside the dilated label mask
+   - run the fail-loud checks
+   - cut ``tile_px`` (512) tiles containing at least one labelled cell;
+     save raw marker planes, label mask, and class map as compressed
+     ``.npz``; one manifest row per tile
+   Scale estimate: at 0.5 um/px a 512 px tile is 256 um across, so a
+   million labelled cells is on the order of thousands of tiles.
+
+2. scaling (load time, one function)
+   Background = the dominant low peak of the marker histogram; noise = the
+   spread of pixels below that peak; value = arcsinh((raw - background) /
+   (noise x cofactor)), capped and divided by the cap.  Reads as "noise
+   units above background" and does not depend on how much tissue is
+   positive.  Expected to change after testing; other methods are added
+   when there is a comparison to run, not before.
+
+3. dataset
+   - random ``crop_px`` (256) crop; build superstains from scaled markers
+   - loss-weight map: 0 outside cells, 0 for IGNORE cells, 0 on an
+     ``erode_um`` rim at cell boundaries (tolerates mask misalignment)
+
+4. augmentation
+   - flips, 90 degree rotations, scale jitter (about +/-15 percent)
+   - per-channel gain, offset, gamma jitter; blur; noise
+   - marker drop: rebuild a superstain from a random non-empty subset
+   - small independent shift per channel (cycle misregistration)
+   - FB / ENDO stage: lineage dropout (zero a superstain, clear its
+     presence flag, relabel its class UNCLASSIFIED, remove it from the
+     output)
+
+5. loss
+   Per-pixel cross entropy (penalty for low probability on the labelled
+   class) times the loss-weight map.  Each pixel's weight is divided by its
+   cell's area so every cell counts once.  Rare classes are up-weighted by
+   capped inverse frequency.
+
+6. inference
+   Sliding window with overlap.  Per cell: mean class probability over its
+   mask pixels.  Output CSV indexed by cell key: predicted class, one
+   probability column per class, ``frac_top`` (share of the cell's pixels
+   voting for the winner), pixel count.
+
+7. baseline
+   Mean superstain intensity per cell into a gradient-boosted classifier,
+   same scaling and splits.  This is what the CNN has to beat.
+
+
+MODEL
+-----
+
+Contract, fixed:
+
+    model(x)           [batch, channels, H, W] -> class scores, same H x W
+    model.features(x)  -> the last feature map before the class scores
+
+Anything meeting the contract can be swapped in, including a collection of
+experts.  ``features`` is what per-cell embeddings for an external MLP or
+SVM are pooled from.
+
+Starting shape, a U-Net:
+
+- Down path: four steps.  Each step runs two 3x3 convolutions, then halves
+  the resolution and doubles the number of feature channels
+  (32, 64, 128, 256, then 512 at the bottom).  Each halving lets a feature
+  summarize a wider patch of tissue.
+- Up path: four steps back to full resolution.  Each step doubles the
+  resolution and concatenates the down-path features of the same size, so
+  every output pixel combines fine local detail (membrane ring, nuclear
+  texture) with wide context (inside a nest, inside a fold).
+- After every convolution: GroupNorm, then ReLU.  GroupNorm rescales
+  features using only the current image.  The usual alternative, BatchNorm,
+  uses running averages over the training set, which go wrong when a new
+  lab's intensities differ.
+- Upsampling is plain interpolation followed by a convolution.
+- Final 1x1 convolution to one score per class.
+- Roughly 8 million weights.  Each bottom-level feature can see about
+  140 px, roughly 70 um at 0.5 um/px.
+
+Config knobs: depth, base width, input channels, class count.
+
+Training start point: AdamW, learning rate 1e-3 decaying to zero on a
+cosine schedule, batches of 16 to 32 crops, mixed precision on GPU.
+
+What to change first if it underperforms, in order: how much context it
+sees (depth, crop size), then augmentation strength, then width.  Width is
+rarely the limit at this data size.
+
+The collection of experts is the experimental arm, not the starting point.
+With an unproven data pipeline and an unproven architecture together, a bad
+result cannot be traced to either.  Once the U-Net has a number, the CoE
+runs on the same tiles and metric and is judged against it.
+
+
+DEBUG CONTRACT
+--------------
+
+Every run writes into its own folder with a copy of its config and seed.
+
+prep
+- ``prep_report.txt``: rejected scenes first; then per scene and marker the
+  matched lineage, raw percentiles, background, noise, fraction saturated,
+  check 2 and check 3 values, cells per class, ignored cells
+- raw-versus-scaled panel per channel for a fixed sample of tiles, with
+  before and after histograms
+- superstain composite with cell outlines coloured by label
+
+dataset
+- ``debug_batch``: what the model sees after augmentation, as a contact
+  sheet, plus per-channel min / mean / max / nonzero fraction and per-class
+  pixel counts as text
+
+train
+- ``metrics.jsonl``: per evaluation, loss, per-class per-cell precision /
+  recall / F1, confusion matrix, each also by assay, dataset, and (on
+  synthetic data) case tag
+- ``train_log.txt``: the same in sentences
+- a fixed set of validation tiles re-rendered every evaluation as
+  input | label | prediction | error
+- error gallery: most confident wrong cells per (label, prediction) pair
+- review sheet: gallery image plus a CSV with a blank verdict column, used
+  for both test-set verification and label correction
+
+inference
+- per-scene text summary and overview image
+
+
+EVALUATION
+----------
+
+- Split by patient (or slide where patient is unknown).  Never by tile.
+- Headline number: worst-group per-cell macro-F1 on the verified test set,
+  groups being assay and dataset.  The average is reported but is not the
+  target.
+- ARTIFACT precision and recall, and the hard-case list, reported
+  separately.
+
+
+IMPLEMENTATION ORDER
+--------------------
+
+Steps 1 to 8 run on this workstation's CPU with synthetic data and a
+reduced model (smaller crops, base width 16).  Real training runs on the
+Linux GPU machine.
+
+1. ``config.py``, scene contract, ``adapters.py``, ``synth.py`` tier S1.
+2. ``prep.py`` and its debug outputs.  Look at them.
+3. ``scaling.py`` and the fail-loud checks.
+4. ``baseline.py`` and the metric / report code.  The metric code is
+   proven on a model too simple to hide a data bug, then reused unchanged.
+5. ``dataset.py``, augmentation, ``debug_batch``.
+6. ``model.py``, ``train.py``, fixed-tile renders, error gallery.
+7. ``infer.py`` and per-cell aggregation.
+8. Synthetic tiers S2 and S3.  Gate: the U-Net beats the baseline on the
+   designed cases, the broken scenes are rejected, and the error gallery
+   surfaces the injected label errors.
+9. Real data: scene sheet for two or three scenes per assay.  Human gate
+   on the raw-versus-scaled panels and check 3 values before training.
+10. Verified test set and hard-case list via the review sheet.
+11. Baseline, then PoC U-Net, on real data.  First curation loop.
+12. FB and ENDO with presence flags, lineage dropout, class masking.
+13. Embedding export; CoE comparison; wire into DAS.
+
+
+TESTS
+-----
+
+Few, each tied to a failure that would otherwise be silent:
+
+1. Label painting: IGNORE cells, cells missing from the table, the eroded
+   rim, and pixels outside cells all have zero weight.
+2. Per-cell aggregation of a known pixel map gives the expected class and
+   ``frac_top``.
+3. No patient appears in more than one split.
+4. The step 8 gate, run as one script on synthetic data.
+
+
+EXCLUDED FROM V0
+----------------
+
+- Per-scenario heads and per-sample trained encoders.
+- Learned pooling over individual marker images.
+- A separate artifact-region model feeding the classifier.
+- Instance segmentation or any attempt to replace the masks.
+- Immune or epithelial subtypes; non-epithelial tumours.
+- Any import from, or change to, the rest of DAS_v2.
+
+
+GO / NO-GO
+----------
+
+After step 11, continue to step 12 only if, on held-out patients in both
+assays, the U-Net beats the baseline on worst-group macro-F1 and on
+ARTIFACT F1, and no single assay or dataset collapses.  Margins are fixed
+after the real-data baseline, before the U-Net result is seen.
+
+If the U-Net only matches the baseline, morphology and context are not
+contributing.  Check the error gallery and the scaling panels before
+changing the architecture.
+
+
+OPEN QUESTIONS
+--------------
+
+1. "Fib" was named as the fibroblast marker in discussion; the matrix
+   lists aSMA, Vim, CD90.  Which markers are actually in the panels?
+2. What are the nuclear and lineage marker names in the mIHC data, if
+   they differ from the table above?

@@ -1,0 +1,308 @@
+LINEAGE PIXEL CLASSIFIER -- FIRST-PASS PLAN v1
+============================================
+
+Status: proposed implementation plan. No classifier code implemented yet.
+This replaces v0's implementation priorities; v0 remains background context.
+Guidance: Fireland/agent_instructions.txt and the user's latest clarification.
+
+PURPOSE OF THIS PASS
+--------------------
+Build a small, transparent ML harness: generate images, read them back,
+normalize, build superstains, train, predict, aggregate over cells, and
+inspect results. A complete short run is the deliverable. Establishing
+performance on real tissue is a later task, not a prerequisite for the engine.
+
+Start with synthetic data with exact labels. A random real TMA core can
+later supply an input/debug example; it does not establish accuracy without
+curated labels. The user will curate real test labels separately.
+
+Keep files small, ordinary functions with explicit arguments and returns,
+and one implementation of each operation. Use dicts for configuration and
+scene metadata, arrays/tensors for data, CSV for cell labels/results. Objects
+are justified for PyTorch models because parameters must be registered;
+configuration, scenes, telemetry, and adapters do not need class hierarchies.
+No plugins, compatibility machinery, automatic discovery, or UI.
+
+FIXED TASK AND FIRST-PASS POLICY
+-------------------------------
+Input order: NUC, IMMUNE, EPI. Each is a 2D float image in [0, 1].
+NUC is one scaled nuclear stain. Each lineage superstain is the pixelwise
+maximum of its individually scaled markers. Max happens after scaling.
+The model sees these three planes, not marker names or segmentation masks.
+
+Output order: IMMUNE, EPI, UNCLASSIFIED, ARTIFACT. Mutually exclusive scores
+per pixel. UNCLASSIFIED is a labelled real cell outside the offered lineages;
+uncertain or missing labels do not turn into UNCLASSIFIED.
+
+Artifact is an ordinary supplied cell label. No artifact-region detector,
+precedence rule, brightness gate, or postprocessing override. The model
+learns the expression/morphology/context associated with labelled artifacts.
+
+Labels omitted from the training table get zero loss, as do pixels outside
+cells. Those pixels remain visible in the input image. No IGNORE output
+class, background output class, erosion, mask dilation, or mask input.
+
+Hardcoded initial marker groups in config.py:
+    NUC: DAPI
+    IMMUNE: CD45, CD3
+    EPI: PanCK, Ecad
+Use whichever explicitly supplied members exist; require at least one in
+each group. No fuzzy matching, panel-specific models, or presence flags.
+These are placeholders for the machinery, not a universal marker policy.
+
+DATA ON DISK
+------------
+synth.py writes one folder per scene:
+    DAPI.png, CD45.png, CD3.png, PanCK.png, Ecad.png
+    mask.png
+    cells.csv
+    scene.json
+
+Marker images: single-channel 16-bit PNG, nonnegative signal-high raw
+intensities. The PNGs are actual numeric inputs, not contrast-adjusted
+previews. mask.png is uint16: 0 = outside cells, positive integer = cell ID.
+Keep the tiny synthetic ID count below the format's limit.
+cells.csv: cell_id, class, case_tag. Rows identify mask IDs within this scene.
+scene.json: scene_id, seed, split, um_per_px, and explicit relative paths
+for markers/mask/cells. All image planes share exactly the same H x W.
+
+Use (scene_id, cell_id) for joins and output keys. Do not make DAS triplets
+or parse composite index strings in this pass. A future DAS adapter will
+translate its external keys at the boundary.
+
+manifest.csv lists scene JSON paths and train/val/test assignments. Generate
+separate scenes for each split, with distinct seeds. Never split one scene's
+cells between training and testing. Save the generated files, not only an
+in-memory simulation, so disk ingestion is exercised by every run.
+
+SMALL SYNTHETIC GENERATOR
+-------------------------
+Start with 32 scenes: 24 train, 4 val, 4 test, each 128 x 128 pixels at
+0.5 um/px. Seed controls all generation. Separate random generators for
+synthesis and training so changing generation does not change crop order.
+
+Generate labelled ellipses with textured nuclei and larger cell bodies;
+place them without overlapping label regions. Provide compact epithelial
+groups, scattered/clustered small immune cells, and cells without offered
+lineage signal. Membrane/cytoplasmic intensity differs by class. Keep every
+class represented in each split and report exact counts.
+
+Generate two markers per lineage with independent gains and some cell-level
+marker dropout, so max pooling actually combines complementary evidence.
+Vary scene gain, mild offset, blur, and noise. Include zero-heavy backgrounds.
+These are controlled perturbations, not claims of realistic CycIF/mIHC.
+
+Include a few explicitly tagged dim cells, neighbouring-lineage spillover,
+and artifact-labelled cells with noisy/local contamination patterns. Do not
+give artifacts a single exact brightness signature or provide their case
+tags to the model. Case tags only support inspection and scoring.
+The generator labels the cases it creates; it is not an artifact detector
+for real tissue. Synthetic success verifies machinery, not biological truth.
+
+No fold simulator, realistic staining physics, FB/ENDO, multiple mask kinds,
+or exhaustive failure catalogue yet. Add a case only to investigate an
+observed failure or test a specific mechanism.
+
+FUNCTION BOUNDARIES / ARRAY CONTRACTS
+------------------------------------
+    synth.main(cfg) -> manifest_path
+    data.read_scene(scene_json) -> markers, mask, labels, metadata
+    data.normalize_marker(raw, background, upper_percentile)
+        -> scaled_float32, statistics
+    data.build_superstains(scaled_markers, marker_groups)
+        -> float32[C, H, W], channel_names
+    data.paint_targets(mask, labels, class_names)
+        -> int64[H, W] targets, float32[H, W] weights
+    model.build_model(model_cfg) -> torch.nn.Module
+    train.main(cfg) -> checkpoint_path
+    infer.predict_scene(model, x, device) -> float32[K, H, W] probabilities
+    infer.aggregate_cells(probabilities, mask, class_names) -> table
+    report.score_cells(predictions, labels, class_names) -> metrics_dict
+    report.write_debug(scene, prepared, predictions, output_dir) -> paths
+    run.main(cfg) -> run_directory
+
+These are the seams, not an instruction to add a forwarding wrapper for
+every line of code. The trainer and inference call the same preparation
+functions. Reporting consumes arrays/tables; it does not modify predictions.
+Data readers never normalize invisibly. Model code never opens image files.
+
+NORMALIZATION AND PREPARATION
+-----------------------------
+Use one explicit temporary scaler, per whole scene per marker:
+    excess = maximum(raw.astype(float32) - background, 0)
+    upper = percentile(excess[excess > 0], 99.5)
+    scaled = clip(excess / upper, 0, 1)
+Initial background = 0.0, configurable per marker. With zero-heavy images
+this preserves zero as zero. Computing the upper percentile on positive
+values avoids a zero denominator when positive pixels are rare. This is a
+simple starting transform, not an established normalization solution.
+
+An explicitly supplied constant/all-background marker cannot be scaled by
+this rule: report it and stop. Do not invent signal or silently add epsilon.
+Generated scenes should provide usable channels; marker dropout selects
+among valid supplied markers, not corrupt file inputs.
+
+Record background, upper, raw min/max and selected percentiles, and scaled
+mean/nonzero/clipped fraction. Show raw beside scaled with labelled display
+ranges. Preserve raw files so a different scaler does not require synthesis.
+Stats come from the image, not the labelled-cell mask. Do not estimate
+different scalings for train crops or infer crops.
+
+For now synthesize directly at configured target_um_per_px; no resampling
+implementation is needed. Reject a mismatched physical resolution instead
+of silently ignoring it. Later real-data preparation owns resampling.
+
+Full 128 x 128 scenes are training samples and inference inputs. This avoids
+tile-edge and partial-cell complications during the first run. No tile
+cache, compressed NPZ duplication, sliding windows, or worker processes yet.
+
+MODEL: SMALL PLACEHOLDER WITH TWO SWAPPABLE SEAMS
+-----------------------------------------------
+Common external contract:
+    model(x): float32[B, 3, H, W] -> logits[B, 4, H, W]
+Logits are unrestricted class scores, not probabilities. The harness applies
+softmax once for prediction and passes logits directly to cross entropy.
+The output grid matches the input grid. No flattening to a whole-image label.
+
+Internal contract:
+    model.forward_features(x) -> features[B, F, H, W]
+    model.head(features) -> logits[B, 4, H, W]
+The regular forward calls those two steps once. Feature extraction is not
+computed again for logging. A head changes how features become classes; an
+encoder changes what image information reaches those features.
+
+Start with a tiny U-Net encoder/decoder:
+    widths 8 -> 16 -> 32; two downsampling steps
+    two 3x3 convolutions per level, GroupNorm(4 groups), ReLU
+    2x2 max pooling down; bilinear interpolation up (align_corners=False)
+    concatenate matching down-path features on the way up
+    output F=8 features at the original resolution
+    default head = 1x1 convolution, 8 -> 4 logits
+H/W are multiples of 4 in this pass. This is deliberately small for CPU.
+Depth, base width, and head selection are model config, not trainer policy.
+
+Keep these concrete alternatives in the plan:
+- MLP head: apply the same small network independently at every pixel,
+  F -> 16 -> 4 with ReLU between. Equivalent to two 1x1 convolutions.
+  It still benefits from the encoder's spatial context; the head itself
+  does not add context. Implement when making the first head comparison.
+- Collection of experts (CoE) head: several feature-to-class predictors plus
+  a learned router, combined into the same logits grid. Expert count,
+  expert families, routing granularity, and recurrent steps are experiments,
+  not settled requirements. A CoE can instead replace the complete model if
+  it needs its own spatial workspace; it must still meet the external grid
+  contract. Do not constrain all future cores to pointwise classifiers.
+- An MLP on flattened image patches or pooled cell embeddings is a different
+  core, not a drop-in pixel head. Any such experiment needs an explicit
+  image-to-logits adapter or a deliberately revised contract.
+
+experts-ML/experts_v7.py is an existing expert/workspace candidate. Its current
+trainer solves image completion, not this task. A future local adapter must
+bridge input/output shapes, expose all trainable parameters, reset workspace
+per independent sample, and permit gradients through the selected experts.
+Do not copy that trainer or import experts-ML in the default first pass.
+Implement only the small U-Net/default head now; keep the seams usable.
+
+TRAINING AND INFERENCE
+-----------------------
+Ordinary PyTorch loop, AdamW(lr=1e-3), batch size 4, 200 steps to start.
+Fixed learning rate, CPU, no mixed precision, distributed setup, scheduler,
+or checkpoint resume machinery. Device is a config value for later GPU use.
+Use explicit seeds and CPU determinism for the first repeatable run.
+
+Load the small raw scene arrays once. Prepare normalized planes once;
+training-time marker drop rebuilds max superstains from a seeded nonempty
+subset of each lineage's markers. Optional gain jitter defaults off.
+Use flips/90-degree rotations, applying the same transform to input,
+targets, and weights. No independent channel shifts or scale jitter yet.
+Validation and testing use all supplied markers and no augmentation.
+
+Paint each labelled cell's class onto its mask pixels. Missing-label cells
+and background have target -1 and weight 0. For a labelled cell with n
+pixels, each pixel weight is 1/n, so one cell contributes total weight 1.
+Loss = sum(weight * per-pixel CE) / sum(weight), with CE ignoring target -1.
+Fail if a training batch has no supervised pixels. No class weighting or
+special artifact loss until an actual imbalance problem justifies it.
+
+At each validation interval, compute per-cell calls with the same inference
+and aggregation functions used for the final test. Save the best validation
+macro-F1 checkpoint (earliest wins ties); save the last checkpoint separately.
+Checkpoint holds model state, model/preparation configs, step, class/channel
+orders, and seed. Loading a checkpoint must reproduce its input convention.
+
+Per cell: mean each class probability over its mask pixels; choose the
+largest mean. certainty = that mean probability (uncalibrated confidence).
+frac_top = fraction of pixels whose own winning class equals the cell's
+winning class. It measures spatial agreement, not calibrated certainty.
+Output scene_id, cell_id, predicted_class, probability per class, certainty,
+frac_top, pixel_count. Evaluate labelled cells only; predict all mask cells.
+
+LIGHTWEIGHT TELEMETRY AND DEBUG
+-------------------------------
+Each run writes to a new explicit directory. Configured paths are resolved
+from the script root, not whichever directory Spyder happens to be using.
+run.py has editable CONFIG globals and main(cfg=None, **overrides); kwargs
+override globals. No environment-variable overrides or CLI framework needed.
+
+Write outputs early so a quiet folder cannot hide the current phase:
+    config.json, manifest.csv, run_log.txt
+    preparation.csv -- joins, raw/scaled stats, class and cell counts
+    debug/prep_scene.png -- raw/scaled markers, superstains, label overlay
+    debug/train_batch.png -- the actual first augmented batch
+    metrics.jsonl -- step/loss/timings and validation per-cell scores
+    best.pt, last.pt
+    predictions.csv, test_metrics.json
+    debug/test_scene.png -- input | truth | prediction | errors
+    debug/errors.png -- capped gallery of confident wrong labelled cells
+
+One shared metric function reports a fixed-order confusion matrix, class
+support, per-class precision/recall/F1, and macro-F1. Define empty denominators
+as 0 and show support; do not hide absent classes in an average. The synth
+split generator supplies all four classes. Report case tags where populated.
+Text identifies why an error crop was selected and its cell/scene IDs.
+
+Render a fixed small selection of scenes, never every training batch. Log
+every 10 steps, validate/render every 50 steps. Record generation, loading,
+prep, train, validation, and render durations separately. After the first
+10 steps estimate remaining training time from measured throughput.
+No promised runtime: target a few minutes on this workstation and reduce
+width/scene count/steps if measurements exceed that. Never shrink silently.
+
+FIRST-PASS COMPLETION CHECKS
+----------------------------
+1. One seeded command/IDE call generates on-disk data and completes through
+   held-out synthetic testing, predictions, metrics, and readable PNGs.
+2. A second inference-only call loads the saved checkpoint and reproduces
+   its cell probabilities on the same input within numerical tolerance.
+3. A few direct checks prove missing labels/background have zero loss,
+   each labelled cell contributes weight 1, max pooling occurs after scaling,
+   and a known probability map aggregates to the expected cell calls.
+4. A tiny fixed-batch overfit check demonstrates gradients/label alignment.
+   Synthetic held-out metrics and errors remain visible even if poor; do not
+   declare biological success or tune a large simulator to guarantee a score.
+5. The encoder/head seam is exercised with a minimal shape/gradient check,
+   not a second full training pipeline. No train/val/test scene overlap.
+
+BUILD ORDER
+-----------
+1. config.py + synth.py + data.py: disk round trip, normalization/max pooling,
+   target painting. report.py: inspect preparation and known-map metrics.
+2. model.py + train.py: tiny U-Net and fixed-batch overfit check.
+3. infer.py + report.py: checkpoint reload, per-cell results and error gallery.
+4. run.py: one short complete synthetic run with timings and all debug output.
+5. Review the observed failures; try changes to the encoder/head inside the
+   same harness. Then add a minimal real-scene reader for a chosen TMA core.
+
+These eight small files are responsibility boundaries, not mandatory shells;
+avoid an extra utility layer until code is actually repeated. Add tests only
+for the named silent failures. Data/metric/report code must not branch on
+which ML model is selected.
+
+LATER, AFTER THE HARNESS IS USEFUL
+--------------------------------
+Real data/curated labels, better normalization, larger spatial context, MLP
+or CoE experiments, nuclear/cell mask comparisons, full-scene tiled inference,
+prospective evaluation, comparison with existing gating/classification, and
+finally DAS integration. No scene-discovery UI, panel policy engine, new
+baseline classifier, automatic stain-quality rejection, FB/ENDO expansion,
+or production curation workflow in this first pass.

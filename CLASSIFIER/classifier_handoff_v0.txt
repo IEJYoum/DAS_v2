@@ -1,0 +1,97 @@
+CLASSIFIER implementation handoff / request for design context
+=============================================================
+
+To the agent who drafted or discussed classifier_plan_v0.txt:
+
+I have read the plan and will handle implementation after we reconcile the
+context. Please explain the reasoning and constraints that were discussed
+with the user but are not explicit in the document. This is a request for
+context and proposed revisions, not a request to implement in parallel.
+
+Purpose and scope
+-----------------
+We want one broad-lineage classifier that works across heterogeneous CycIF
+and mIHC panels. The user wants to pursue an in-house model after mixed
+PhenoBIC results; PhenoBIC due diligence and author discussions continue
+separately. Start standalone in CLASSIFIER; DAS integration comes later.
+
+The proposed model reads lineage superstains plus a nuclear channel and
+produces pixel probabilities, aggregated over existing cell masks. We are
+not replacing segmentation. The plan's U-Net is a reasonable starting point.
+
+Latest user preferences (some tentative; please reconcile with prior context)
+---------------------------------------------------------------------------
+1. Curate a dataset of agreed-upon cells. This supersedes my suggestion to
+   depend primarily on a large noisy pool and a 0.8 signal-agreement filter.
+   Do not assume the plan's unverified 100k-200k-cell strategy is still wanted.
+2. Use one model for broad strokes across varying panels. No separate models
+   per marker combination. Preserve the superstain approach as the starting
+   design; evaluating panel generalization does not require separate models.
+3. Drop uncertain/ignored cells from training labels. No IGNORE output class
+   is needed. The output should include a certainty score.
+4. A background of zero is sensible for zero-heavy stains. Refine scaling
+   through actual tests rather than prescribing elaborate alternatives now.
+5. Compare against existing manual gating/classification workflows. The user
+   does not want effort spent inventing a second prototype baseline method.
+6. Inspect real data earlier. Keep initial work small and useful.
+7. Erosion was questioned: there is no established reason to erode masks by
+   default. Start without erosion unless prior context supplies a reason.
+8. Separate development validation from final testing. Not-yet-stained data
+   may be used for evaluation; clarify the intended split terminology.
+
+Questions for you
+-----------------
+A. Curation: what labels, scenes, assays, patients, and reviewers are already
+   available? What counts as agreement, and how are disputed cells handled?
+   Are trusted labels independent of the thresholds we will compare against?
+   We need an achievable first dataset, not an invented annotation workload.
+
+B. Classes: are IMMUNE/EPI/UNCLASSIFIED/ARTIFACT mutually exclusive biological
+   calls or calls supported by the available panel? CD3 alone cannot identify
+   every immune lineage. Does UNCLASSIFIED mean a known out-of-scope cell,
+   missing evidence, or both? What defines artifact, and which artifact types
+   have agreed labels? Does artifact override an otherwise identifiable lineage?
+
+C. Input semantics: why max superstains, and what marker aliases/panels were
+   discussed? Any known marker combinations that change a channel's meaning?
+   Which nuclear stains occur in each assay? What are the actual pixel sizes,
+   stain polarity, intensity ranges, and mask kinds? Marker identity is not
+   a requested model input; please flag any prior assumptions we would lose.
+
+D. Scaling: was the histogram/noise-unit estimator chosen from inspected data
+   or only proposed? Zero background is fine, but zero estimated noise creates
+   division by zero; we need a defined fallback. What scope was intended for
+   scaling statistics: scene, slide, or dataset?
+
+E. Training labels and masks: excluding uncertain cells from the label table
+   still requires zero loss on their image pixels. Their image context remains
+   visible, and they must not become UNCLASSIFIED by default. Confirm that
+   this matches your intent. Were erosion or mixed nuclear/whole-cell masks
+   motivated by specific alignment problems?
+
+F. Certainty: is maximum class probability enough for v0, with the score named
+   honestly as uncalibrated confidence, or was a separate mechanism intended?
+   Low confidence and a confident UNCLASSIFIED call should stay distinguishable.
+
+G. Evaluation: what existing gating/classification outputs can we compare on
+   the same held-out cells? How many independent patients and datasets support
+   each assay? Reserve validation for tuning, and freeze test labels/splits.
+   Future newly stained data can serve as prospective evaluation; meanwhile
+   development needs held-out data available now. Does this match prior plans?
+
+H. Practical context: GPU hardware/environment, preferred dependencies,
+   existing data access, representative example paths, and intended first
+   deliverable? Confirm the cell-key format against actual supplied triplets;
+   previous DAS datasets have used more than one index convention.
+
+Suggested immediate sequence
+----------------------------
+Reconcile the above, then select a few real scenes with agreed labels from
+each assay. Implement the scene adapter, explicit joins, scaling previews,
+and minimal synthetic checks. Train a small U-Net and evaluate per cell on
+independent patients against existing workflow calls. Keep synthetic tests
+as pipeline checks; success there does not establish tissue performance.
+
+Please respond with: (1) missing context, (2) corrections to this reading,
+(3) decisions the user already made, and (4) remaining choices and your
+recommendations. Do not silently rewrite the plan or start implementation.

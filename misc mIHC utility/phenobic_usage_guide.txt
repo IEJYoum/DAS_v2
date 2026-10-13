@@ -1,0 +1,307 @@
+PhenoBIC: current usage, status, and DAS integration plan
+=========================================================
+
+Purpose
+-------
+PhenoBIC is a published CNN that assigns a per-marker positive/negative call
+to individual segmented cells from a marker image and a labelled cell mask.
+This checkout is being evaluated as a possible component of DAS, not yet as a
+production DAS feature.
+
+Published sources
+-----------------
+Code: https://github.com/Shachi-Mittal-Lab/PhenoBIC
+Reference images, masks, and labels:
+https://huggingface.co/datasets/mittal-research-lab/PhenoBIC-Data
+
+Important model scope
+---------------------
+The published training data are multiplex fluorescence breast-tissue images
+(Opal/Vectra); the external validation package additionally includes Vectra and
+PhenoCycler/CODEX data.  The current D10 test uses ColorDecon-derived mIHC
+images.  Those are not assumed to be equivalent inputs.  A correct execution
+of PhenoBIC on D10 does not establish that its calls are biologically valid.
+
+Current implementation
+----------------------
+The standalone launcher is in this same folder:
+
+    run_phenobic_standalone.py
+
+It has no DAS imports and does not modify a DAS triplet.  It is deliberately a
+small execution boundary that a later DAS adapter can call.  It supports both
+editing global settings at the top of the file and programmatic main()/run_*
+keyword arguments.
+
+Three input modes are available:
+
+1. masks (one or more already staged patches)
+   Required layout:
+
+       <base_dir>/cell_segmentations/<patch>.tif or .tiff
+       <base_dir>/multiplex_images/<patch>/<marker>.tif or .tiff
+
+   The output CSV contains Patch, Cell_label, and one pos/neg column per
+   marker.  Cell_label is the integer label in the segmentation mask.
+
+2. batch_masks (the intended DAS-oriented path)
+   Takes a glob of DAS-style ColorDecon ROI folders.  It stages their labelled
+   masks and V_reg marker TIFFs into the masks layout, then calls PhenoBIC once
+   for the complete ROI batch and all discovered markers.  It produces one
+   combined CSV, rather than one CSV per ROI.
+
+   Requirements enforced by the launcher:
+   - each ROI has exactly one label_*.tif or label_*.tiff mask;
+   - each ROI has one or more V_reg_*.tif or V_reg_*.tiff marker images;
+   - all ROIs in a batch have exactly the same marker panel;
+   - the staging directory must be new/empty.
+
+3. coordinates
+   Upstream OME-TIFF plus measurements-table workflow.  Available for
+   completeness, but not the current DAS integration target.
+
+Environment and model
+---------------------
+Use the clean, pinned PhenoBIC environment, not an arbitrary DAS Python
+environment.  The current working environment is named phenobic-clean:
+
+    conda run -n phenobic-clean python "C:\Users\youm\Desktop\src\DAS_v2\misc mIHC utility\run_phenobic_standalone.py"
+
+The model is expected at:
+
+    C:\Users\youm\Desktop\src\phenobic\PhenoBIC_model1.h5
+
+The public download is a legacy HDF5 model despite its published .keras-style
+name.  The launcher contains a narrow Keras-3 compatibility shim for its
+obsolete DepthwiseConv2D configuration; it does not alter model weights or
+image preprocessing.
+
+Example A: run one D10 ColorDecon ROI by editing the .py configuration
+-----------------------------------------------------------------------
+Edit the top settings in run_phenobic_standalone.py to the following.  A glob
+with one matching folder is valid, so batch_masks is the easiest safe route
+for a single raw DAS ROI:
+
+    MODE = "batch_masks"
+
+    BATCH_MASKS_KWARGS = {
+        "source_glob": r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon\BTK153\Processed\ROI01",
+        "staging_dir": PHENOBIC_ROOT / "temp_inputs" / "BTK153_ROI01_phenobic",
+        "out_dir_path": PHENOBIC_ROOT / "temp_outputs" / "BTK153_ROI01_phenobic",
+        "debug_dir": PHENOBIC_ROOT / "temp_outputs" / "BTK153_ROI01_phenobic" / "debug",
+        "write_debug": True,
+        "debug_channels": [],
+        "num_cells_batch": 4000,
+        "buffer_ratio": 0.1,
+        "lower_percentile": 10.0,
+        "upper_percentile": 90.0,
+    }
+
+Then run:
+
+    conda run -n phenobic-clean python "C:\Users\youm\Desktop\src\DAS_v2\misc mIHC utility\run_phenobic_standalone.py"
+
+This copies inputs to phenobic/temp_inputs/BTK153_ROI01_phenobic, writes one
+combined CSV to phenobic/temp_outputs/BTK153_ROI01_phenobic, and writes QA PNGs
+under its debug subfolder.  It does not modify the source ROI folder.
+
+Example B: run a D10 server batch by editing the .py configuration
+--------------------------------------------------------------------
+For all identically panelled BTK153 ROIs, change only the batch-specific paths:
+
+    MODE = "batch_masks"
+
+    BATCH_MASKS_KWARGS["source_glob"] = (
+        r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon\BTK153\Processed\ROI*"
+    )
+    BATCH_MASKS_KWARGS["staging_dir"] = PHENOBIC_ROOT / "temp_inputs" / "BTK153_all_rois_phenobic"
+    BATCH_MASKS_KWARGS["out_dir_path"] = PHENOBIC_ROOT / "temp_outputs" / "BTK153_all_rois_phenobic"
+    BATCH_MASKS_KWARGS["debug_dir"] = BATCH_MASKS_KWARGS["out_dir_path"] / "debug"
+    BATCH_MASKS_KWARGS["write_debug"] = True
+
+Run the same conda command as Example A.  This makes one result CSV with a
+Patch column that identifies the ROI.  It intentionally stops if any selected
+ROI has a different marker panel, rather than silently producing a partial
+multi-marker result.
+
+Example C: call the launcher with kwargs instead of editing it
+---------------------------------------------------------------
+The easiest kwargs path is the editable job file beside the launcher:
+
+    run_phenobic_kwargs.py
+
+Edit only these settings near its top:
+
+    MODE = "batch_masks"
+    SOURCE_GLOB = r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon\BTK153\Processed\ROI*"
+    RUN_NAME = "BTK153_kwarg_batch"
+
+Then, from an activated phenobic-clean Command Prompt, run:
+
+    python run_phenobic_kwargs.py
+
+It calls the standalone launcher's existing main(..., batch_masks_kwargs=...)
+interface, stages the inputs, and writes results to:
+
+    C:\Users\youm\Desktop\src\phenobic\temp_outputs\BTK153_kwarg_batch
+
+No PowerShell syntax or separate wrapper creation is needed.  For a single
+raw ROI, use the same job file with SOURCE_GLOB set to the exact ROI01 folder.
+
+For use from another Python script, the underlying kwargs call is:
+
+    from pathlib import Path
+    import runpy
+
+    launcher_path = (
+        Path(r"C:\Users\youm\Desktop\src\DAS_v2\misc mIHC utility")
+        / "run_phenobic_standalone.py"
+    )
+    phenobic = runpy.run_path(str(launcher_path))
+
+    output_csv = phenobic["main"](
+        mode="batch_masks",
+        batch_masks_kwargs={
+            "source_glob": r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon\BTK153\Processed\ROI*",
+            "staging_dir": Path(r"C:\Users\youm\Desktop\src\phenobic\temp_inputs\BTK153_kwarg_batch"),
+            "out_dir_path": Path(r"C:\Users\youm\Desktop\src\phenobic\temp_outputs\BTK153_kwarg_batch"),
+            "debug_dir": Path(r"C:\Users\youm\Desktop\src\phenobic\temp_outputs\BTK153_kwarg_batch\debug"),
+            "write_debug": True,
+            "debug_channels": [],
+            "num_cells_batch": 4000,
+            "buffer_ratio": 0.1,
+            "lower_percentile": 10.0,
+            "upper_percentile": 90.0,
+        },
+    )
+    print(output_csv)
+
+Run it with:
+
+    conda run -n phenobic-clean python "C:\Users\youm\Desktop\src\phenobic\run_d10_phenobic_batch.py"
+
+This uses the existing kwargs interface; it is the preferred pattern for a
+future DAS adapter because DAS can supply project-specific paths without
+editing standalone source code.
+
+Example D: published-reference tests
+------------------------------------
+The extracted publisher data are currently at:
+
+    C:\Users\youm\Desktop\src\phenobic\external_val_TMA_cores
+
+Their archive is organized as one directory per TMA/marker, such as
+TMA1_CD3/core_6_2, rather than directly in the standalone masks layout.  Use
+the dedicated reference harness, which stages the selected published core and
+uses the same model/mask workflow as the standalone launcher.  The following
+commands are for PowerShell:
+
+    $env:PHENOBIC_REFERENCE_SET = "TMA1_CD3"
+    $env:PHENOBIC_REFERENCE_PATCH = "core_6_2"
+    $env:PHENOBIC_REFERENCE_CHANNEL = "CD3"
+    conda run -n phenobic-clean python "C:\Users\youm\Desktop\src\phenobic\run_reference_test.py"
+
+Another verified publisher example is:
+
+    $env:PHENOBIC_REFERENCE_SET = "TMA3_CD8"
+    $env:PHENOBIC_REFERENCE_PATCH = "core_1_1_5"
+    $env:PHENOBIC_REFERENCE_CHANNEL = "CD8"
+    conda run -n phenobic-clean python "C:\Users\youm\Desktop\src\phenobic\run_reference_test.py"
+
+The expected artifacts are named
+phenobic/temp_outputs/reference_<set>_<patch>.csv and
+phenobic/temp_outputs/reference_<set>_<patch>_all_cells_debug.png.
+
+If the prompt begins with "(phenobic-clean) C:\...>" you are in Command
+Prompt, not PowerShell.  Use Command Prompt's set syntax instead:
+
+    set PHENOBIC_REFERENCE_SET=TMA1_CD3
+    set PHENOBIC_REFERENCE_PATCH=core_6_2
+    set PHENOBIC_REFERENCE_CHANNEL=CD3
+    python "C:\Users\youm\Desktop\src\phenobic\run_reference_test.py"
+
+Visual quality-control output
+-----------------------------
+Debug PNGs use the marker image as a red background.  Positive PhenoBIC cells
+have thick cyan outlines; negative segmented cells have thin dark-gray
+outlines.  This is intended to distinguish:
+
+  - bright signal in a cell called positive;
+  - bright signal in a segmented cell called negative;
+  - bright signal with no nearby cell outline (a segmentation/registration
+    concern rather than a cell-classification call).
+
+Recent validation record
+------------------------
+The model and public mask workflow have run successfully in the pinned
+environment on native publisher-supplied external-validation cores:
+
+  - TMA3 CD8, core_1_1_5: 8,122 cells classified.
+  - TMA1 CD3, core_6_2: 11,212 cells classified (848 positive, 10,364
+    negative).  Its all-cell QA image is:
+    phenobic/temp_outputs/reference_TMA1_CD3_core_6_2_all_cells_debug.png
+
+This establishes that the downloaded model, clean environment, expected input
+layout, labelled-mask workflow, and QA renderer work together on source-like
+reference data.  It is visual operational validation only: the matching
+ground-truth CSVs have not yet been imported and scored here.
+
+The D10 CD45 test completed technically, but its overlay appears poorly
+correlated with signal.  Geometry checks already performed found matching
+image/mask dimensions and correct CellProfiler-object/mask-label alignment.
+The leading unresolved concern is input-domain mismatch (ColorDecon mIHC
+representation versus the fluorescence reference domain), not a failed model
+load or a broken segmentation-label mapping.  Treat D10 PhenoBIC calls as
+experimental until measured against manually reviewed D10 cells.
+
+Known implementation limitations
+-------------------------------
+  - The public mask runner creates a new multiprocessing pool for each
+    4,000-cell batch.  It works but has substantial Windows startup overhead.
+  - The public runner writes its native output inside the staged input folder;
+    the standalone launcher copies it to the requested output folder afterward.
+  - Batch mode requires identical marker names across all included ROIs.
+  - The batch debug helper currently expects staged mask/image filenames with
+    a .tif suffix.  The usual DAS ColorDecon inputs satisfy this; support for
+    .tiff in the standalone debug helper should be completed before treating
+    arbitrary .tiff batches as routine.
+  - The current output is marker-specific binary phenotype calls, not a
+    multiclass cell-state model.
+
+Planned DAS integration
+-----------------------
+PhenoBIC should appear under analysis/cell typing, but should not use DAS's
+ordinary "do for each category" behavior.  Its unit of work is an explicitly
+selected ROI glob/batch, analogous to the HTML viewer asset workflow:
+
+  1. Prompt for the ROI glob, output folder, optional QA figure folder, and
+     selected/all markers.
+  2. Stage the complete batch once and run PhenoBIC once.
+  3. Map Patch to DAS slide_scene and Cell_label to ObjectNumber.
+  4. Add marker-specific annotation columns to obs, for example
+     PhenoBIC_CD45, while preserving df, dfxy, and existing annotations.
+  5. Save one combined result CSV plus debug PNGs and record their paths in
+     DAS metadata/logging.
+  6. Report any missing Patch/ObjectNumber matches loudly and require explicit
+     confirmation before applying a partial import.
+
+The mapping must be audited on real projects before enabling writes: DAS
+indices may be reconstructed as slide_scene + ObjectNumber, but ObjectNumber
+is not guaranteed to remain as an obs column.
+
+Due-diligence position and possible in-house successor
+------------------------------------------------------
+The evaluation so far supports a fair statement that we acquired the authors'
+public model and reference data, reproduced inference in the specified
+environment, ran it successfully on native reference inputs, and tested it on
+the intended D10 input domain with visual QA.  The D10 result is currently not
+adequate for use as an annotation method.
+
+An in-house CNN for cell-state identification remains reasonable if it is
+benchmarked against a manually annotated D10 holdout set.  A defensible next
+comparison would use the same cells and masks for: (1) current threshold/gate
+calls, (2) PhenoBIC calls, and (3) the in-house model; report precision,
+recall, F1/PR-AUC where appropriate, calibration, failure modes by tissue
+region/stain run, and reviewable overlay examples.  This distinguishes a
+genuine input-domain limitation of PhenoBIC from a claim based only on a
+visually disappointing run.
