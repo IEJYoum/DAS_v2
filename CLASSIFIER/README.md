@@ -5,6 +5,9 @@ press Run.** [RUN_PROJECT.md](RUN_PROJECT.md) explains the central launcher,
 disposable BCC/AH08 adapters and prepare/predict/train-test modes. Dataset-specific
 launchers are now compatibility wrappers; their paths are configured centrally.
 
+[BCC_TUNING_PLAN.md](BCC_TUNING_PLAN.md) records the frozen old-data checkpoint,
+affirmative other-cell mapping, proposed larger split and required tuning/scale work.
+
 This is a standalone broad-lineage classifier harness. It reads stain images,
 uses existing cell masks for supervision, trains a small PyTorch U-Net, and
 exports one prediction per mask cell. It currently runs synthetic experiments

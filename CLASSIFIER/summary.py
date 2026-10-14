@@ -47,6 +47,22 @@ def write_debug_summary(run_directory, status="complete", phase=None, error=None
     if cfg.get("report_source_run"):
         lines.extend([f"Source training run (read-only): {cfg['report_source_run']}",
                       "This invocation performs inference/reporting only; no retraining."])
+    if cfg.get('initial_checkpoint'):
+        lines.extend([f"Fine-tuning parent (read-only): {cfg['initial_checkpoint']}",
+                      f"Parent SHA256: {cfg.get('initial_checkpoint_sha256', 'recorded when training initializes')}",
+                      f"Optimizer: fresh; learning rate: {cfg.get('lr')}"])
+    lines.extend([f"Epoch budget: {cfg.get('epochs')}; steps per epoch: {cfg.get('steps_per_epoch', 'computed after tile indexing')}",
+                  f"Old TRAIN replay sample fraction: {cfg.get('replay_fraction', 0)}",
+                  f"Bounded image memory: {cfg.get('bounded_memory', False)}"])
+    if (folder / 'results' / 'debug_summary.txt').is_file():
+        lines.append(f"Detailed engine summary: {folder / 'results' / 'debug_summary.txt'}")
+    split_csv = folder / 'roi_splits.csv'
+    if split_csv.is_file():
+        import csv
+        from collections import Counter
+        with split_csv.open(encoding='utf-8-sig', newline='') as stream:
+            counts = dict(Counter(row['split'] for row in csv.DictReader(stream)))
+        lines.append(f"BCC source-ROI allocation: {counts}; saved: {split_csv}")
     if manifest_path.is_file():
         import csv
         with manifest_path.open(encoding="utf-8-sig", newline="") as stream:

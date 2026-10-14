@@ -26,6 +26,10 @@ CONFIG = {
     "device": "cpu",
     "threads": 2,
     "steps": 200,                  # optimizer updates, not epochs
+    "epochs": None,                # when set, overrides steps using full training tile passes
+    "bounded_memory": False,       # central real-data launcher enables disk-backed ROIs
+    "initial_checkpoint": None,    # warm start weights only; fresh optimizer
+    "replay_fraction": 0.0,        # old TRAIN sample share added to each primary-data epoch
     "batch_size": 4,
     "lr": 1e-3,
     "class_weighting": "capped_inverse_frequency",  # "none" gives the original cell-only loss

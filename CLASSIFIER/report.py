@@ -30,6 +30,19 @@ def score_cells(predictions, labels, class_names):
     confusion = np.zeros((len(class_names), len(class_names)), np.int64)
     for truth, pred in matched[["class", "predicted_class"]].itertuples(index=False, name=None):
         confusion[class_names.index(truth), class_names.index(pred)] += 1
+    metrics = metrics_from_confusion(confusion, class_names, len(predictions))
+    if "case_tag" in matched:
+        metrics["by_case"] = {}
+        for tag, rows in matched.groupby("case_tag"):
+            case_labels = rows[keys + ["class"]]
+            case_predictions = rows[keys + ["predicted_class"]]
+            metrics["by_case"][str(tag)] = score_cells(case_predictions, case_labels, class_names)
+    return metrics
+
+
+def metrics_from_confusion(confusion, class_names, predicted_cells):
+    """Shared scoring for in-memory tables and streamed source-ROI accumulators."""
+    confusion = np.asarray(confusion, dtype=np.int64)
     per_class = {}
     for i, cls in enumerate(class_names):
         tp, support, called = int(confusion[i, i]), int(confusion[i].sum()), int(confusion[:, i].sum())
@@ -39,15 +52,8 @@ def score_cells(predictions, labels, class_names):
         per_class[cls] = {"precision": precision, "recall": recall, "f1": f1, "support": support}
     metrics = {"class_order": list(class_names), "confusion_matrix": confusion.tolist(),
                "per_class": per_class, "macro_f1": float(np.mean([v["f1"] for v in per_class.values()])),
-               "accuracy": float(np.trace(confusion) / len(matched)) if len(matched) else 0.0,
-               "labelled_cells": len(matched), "predicted_cells": len(predictions)}
-    if "case_tag" in matched:
-        metrics["by_case"] = {}
-        for tag, rows in matched.groupby("case_tag"):
-            # Match IDs only; do not recursively retain the case_tag column.
-            case_labels = rows[keys + ["class"]]
-            case_predictions = rows[keys + ["predicted_class"]]
-            metrics["by_case"][str(tag)] = score_cells(case_predictions, case_labels, class_names)
+               "accuracy": float(np.trace(confusion) / confusion.sum()) if confusion.sum() else 0.0,
+               "labelled_cells": int(confusion.sum()), "predicted_cells": int(predicted_cells)}
     return metrics
 
 

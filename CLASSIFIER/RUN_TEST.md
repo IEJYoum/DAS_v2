@@ -2,7 +2,7 @@
 
 **Current entry point:** edit `run_project.py` and press Run. See
 [RUN_PROJECT.md](RUN_PROJECT.md) for shared I/O paths, glob patterns and adapters.
-Defaults are BCC forward-only. For the previous training experiment choose
+Defaults now tune the frozen AH08 model on the larger BCC selection. For the previous training experiment choose
 `DATASET='ah08'`, `MODE='train_test'`; choose `MODE='prepare'` to inspect it first.
 The following older walkthrough records the original AH08 setup; dataset launcher
 options and reusable input-cache behavior have since been replaced by the central

@@ -85,7 +85,10 @@ class ClassifiedAdapterTests(unittest.TestCase):
                 settings['csv_pattern'] = '{scene_id}/labels.csv' if adapter == 'bcc' else 'obs.csv'
                 manifest = adapters.stage(settings, root / ('staged_' + adapter), .5)
                 _, mask, labels, _ = data.read_scene(manifest.parent / settings['scenes'][0]['scene_id'] / 'scene.json')
-                self.assertEqual(labels.to_dict('records'), [{'cell_id': 1, 'class': 'EPI'}])
+                expected = [{'cell_id': 1, 'class': 'EPI'}]
+                if adapter == 'bcc':
+                    expected.append({'cell_id': 2, 'class': 'UNCLASSIFIED'})
+                self.assertEqual(labels.to_dict('records'), expected)
                 self.assertEqual(mask.shape, (3, 3))
             # Both original and staged mask now match this deliberately broad glob.
             with self.assertRaises(ValueError):

@@ -29,6 +29,8 @@ def main(cfg=None, **overrides):
     for key in ("steps", "batch_size", "threads", "log_every", "validate_every"):
         if settings[key] < 1:
             raise ValueError(f"{key} must be >= 1")
+    if settings.get('epochs') is not None and (not isinstance(settings['epochs'], int) or settings['epochs'] < 1):
+        raise ValueError('epochs must be a positive integer or None')
     if not 0 <= settings["gain_jitter"] < 1:
         raise ValueError("gain_jitter must be in [0, 1)")
     if not math.isfinite(settings["noise"]) or settings["noise"] < 0:
@@ -126,6 +128,8 @@ def _execute(settings, out):
     (out / "config.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
     log("Loading/preparing scenes: scene normalization, superstains, label joins")
     start = time.perf_counter()
+    if settings.get('bounded_memory'):
+        return _execute_streamed(settings, out, timings, total_start, log)
     scenes = data.load_scenes(manifest, settings)
     timings["loading_and_preparation"] = time.perf_counter() - start
     preparation = []
@@ -172,6 +176,29 @@ def _execute(settings, out):
     timings["total_seconds"] = time.perf_counter() - total_start
     (out / "timings.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
     log(f"Training/test outputs written in {timings['total_seconds']:.1f}s | test macro-F1 {metrics['macro_f1']:.3f} | accuracy {metrics['accuracy']:.3f}")
+    return out
+
+
+def _execute_streamed(settings, out, timings, total_start, log):
+    """Same train/test engine with disk-backed tiles and bounded image memory."""
+    from CLASSIFIER import streaming, train, infer
+    import shutil
+    records = streaming.cache_manifest(settings['manifest'], settings, out / 'normalized_cache', log)
+    pools = {split: streaming.Scenes(records, settings, split) for split in ('train', 'val', 'test')}
+    checkpoint = train.main(settings, pools, log)
+    model, saved = infer.load_checkpoint(checkpoint, settings['device'])
+    log('Final whole-ROI validation reports from the selected checkpoint')
+    metrics = streaming.evaluate(model, pools['val'], saved, out / 'validation',
+                                 prefix='best__', render=True, galleries=True, log=log)
+    (out / 'validation' / 'best__metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
+    log('Held-out test: whole ROIs, one probability map at a time')
+    metrics = streaming.evaluate(model, pools['test'], saved, out / 'test', render=True, galleries=True, log=log)
+    shutil.copy2(out / 'test' / 'predictions.csv', out / 'predictions.csv')
+    (out / 'test_metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
+    timings.update(json.loads((out / 'training_summary.json').read_text(encoding='utf-8')))
+    timings['total_seconds'] = time.perf_counter() - total_start
+    (out / 'timings.json').write_text(json.dumps(timings, indent=2), encoding='utf-8')
+    log(f"Training/test complete | test macro-F1 {metrics['macro_f1']:.3f} | accuracy {metrics['accuracy']:.3f}")
     return out
 
 

@@ -375,6 +375,9 @@ def verify_run(run_directory):
     # whether the image represents one ROI or an entire slide.
     folder = Path(run_directory)
     cfg = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    if cfg.get('bounded_memory'):
+        from CLASSIFIER import streaming
+        return streaming.verify_run(folder)
     manifest = data.read_manifest(folder / "manifest.csv")
     assert not manifest.scene_id.duplicated().any()
     metadata = [json.loads((folder / p).read_text(encoding="utf-8")) for p in manifest.scene_json]

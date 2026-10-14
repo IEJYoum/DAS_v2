@@ -12,12 +12,12 @@ Edit the constants and `DATASETS['bcc']` at the top of `run_project.py`:
 
 - `image_root`, `mask_root`, `csv_root`: the supplied Z-drive folders.
 - `scenes`: initially slide `001127`, ROI `ROI01`, the first ROI in sorted order.
-- `CHECKPOINT`: explicitly selected `20261013_141553_804757/best.pt` on D.
+- `CHECKPOINT`: the frozen `baseline_AH08_only_20261013_174917_436166/best.pt` on D
+  (same weights as the originally selected `20261013_141553_804757/best.pt`).
   Change this when comparing models; there is no automatic latest-model selection.
 - `OUTPUT_ROOT`: `D:\CLASSIFIER_OUTPUT`. Every invocation creates a new folder.
-- `marker_patterns`: exact cycle/marker filenames, currently dsDNA cycle 13,
-  CD45 cycle 2, CD3 cycle 3, PANCK cycle 11. Filename construction also contains
-  `D23`; change it or replace the explicit paths if another slide uses a different scheme.
+- `marker_patterns`: dsDNA follows the selected mask's filename; CD45, CD3 and PANCK
+  resolve uniquely by marker name inside the selected ROI. Their cycles vary by slide.
 - `marker_groups`: preserve channel order **NUC, IMMUNE, EPI**. Immune is the
   pixelwise maximum of individually normalized CD45 and CD3. EPI uses PANCK.
   This transfers a model originally trained with H2B/CD45/PANCK to different inputs.
@@ -37,11 +37,12 @@ In PowerShell:
 ```powershell
 Set-Location C:\Users\youm\Desktop\src\DAS_v2
 & C:\Users\youm\Anaconda3\envs\das-v2\python.exe CLASSIFIER/run_project.py --mode prepare
-& C:\Users\youm\Anaconda3\envs\das-v2\python.exe CLASSIFIER/run_project.py
+& C:\Users\youm\Anaconda3\envs\das-v2\python.exe CLASSIFIER/run_project.py --mode predict
 ```
 
-The optional first command stages/checks the ROI without loading the checkpoint or
-running model prediction. The second independently stages inputs and predicts the
+The optional first command now stages/checks the larger training selection without
+loading the checkpoint or running model prediction. The second explicitly selects
+prediction mode, independently stages inputs and predicts the
 whole ROI in overlapping tiles, blends pixel probabilities, then aggregates them
 per mask cell. It performs zero training updates and does not modify the checkpoint.
 The printed output directory is the directory to inspect. All-error galleries can
@@ -57,18 +58,22 @@ Sources on Z and historical outputs on D are read-only inputs.
 ## Understand the scoring
 
 The supplied CSV calls epithelial cells `PanCK+`; map these to EPI. Map the listed
-immune categories to IMMUNE. `Other Cells`, `aSMA+`, and cells missing from the CSV
-remain unscored. Unknown CSV categories fail explicitly so you can decide their
+immune categories to IMMUNE. `Other Cells` and `aSMA+` now map to the affirmative
+other-cell class, retaining the checkpoint name `UNCLASSIFIED`. Cells missing
+from the CSV remain unscored. Unknown CSV categories fail explicitly so you can decide their
 mapping. Cell IDs must match the supplied segmentation; coordinates are not used
 to invent matches. Initial inspection found 15,040 mask cells, 13,384 CSV rows,
-and 8,253 scored proxy labels (7,080 immune, 1,173 epithelial).
+and initially 8,253 immune/epithelial proxy labels (7,080 immune, 1,173 epithelial).
+With the other-cell mapping, all 13,384 CSV cells are labelled, including 5,131 other
+cells. The 1,656 mask cells absent from the CSV remain unlabelled.
 
 Every mask cell still receives one of the model's four classes. In Excel, filter
 `labelled=True` to score, then sort `correct`; blank correctness means unscored.
 `source_class` retains the original workflow category. Predictions of ARTIFACT or
-UNCLASSIFIED on scored cells count as incorrect; predictions are never forced into
+UNCLASSIFIED on immune/epithelial truth count as incorrect; UNCLASSIFIED on other-cell
+truth counts as correct. Predictions are never forced into
 two classes. `proxy_macro_f1` averages IMMUNE and EPI F1. The existing `macro_f1`
-averages all four classes, including the two without truth support. Neither measures
+averages all four classes, including ARTIFACT when it has no truth support. Neither measures
 artifact performance here. These are agreement scores against marker-derived
 workflow labels, not independent verification; PANCK/CD45-related input and labels
 can agree for reasons that do not establish performance on another batch.
@@ -84,9 +89,11 @@ Use separate validation and held-out test ROIs, ideally including entire held-ou
 slides when measuring transfer to new slides.
 
 For later training, expand `DATASETS['bcc']['scenes']` with separate train/val/test
-ROIs and set `MODE='train_test'` in the same central script. Its adapters prepare
+ROIs (or use the default automatic discovery) and set `MODE='train_test'` for a
+fresh model or `MODE='tune_test'` to start from CHECKPOINT. Its adapters prepare
 complete-coverage training windows automatically; no second dataset launcher is needed.
-Ignoring two categories leaves no supervision for ARTIFACT/UNCLASSIFIED here;
-decide whether to retain the four-class task or explicitly build a two-class
-experiment before training. The default remains forward-only. Model comparisons
-and learning curves remain deferred.
+The other-cell mapping supplies UNCLASSIFIED supervision; these CSVs still provide
+no ARTIFACT labels. See [BCC_TUNING_PLAN.md](BCC_TUNING_PLAN.md) for old-data replay,
+parent-checkpoint tuning and memory requirements before the larger experiment.
+The central default is now tune_test for the overnight experiment; use --mode predict
+for the first-ROI forward baseline. Model comparisons and learning curves remain deferred.
