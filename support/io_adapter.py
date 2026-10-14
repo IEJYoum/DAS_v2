@@ -16,12 +16,19 @@ import re
 import sys
 from typing import Any, Optional
 
-import ds_transport
+try:
+    from . import ds_transport
+except ImportError:
+    import ds_transport
 
 # Preserve original builtins so adapter input/print remain stable even when
 # legacy contexts monkey-patch builtins.input/print.
 _BASE_INPUT = input
 _BASE_PRINT = print
+
+# Package and legacy bootstrap imports must share the same active UI/session.
+sys.modules.setdefault('io_adapter', sys.modules[__name__])
+sys.modules.setdefault('support.io_adapter', sys.modules[__name__])
 
 
 # Runtime mode: "terminal" (default) or "gui".

@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 import time
+import argparse
+import json
 
 import matplotlib
 matplotlib.use("Agg")
@@ -10,6 +12,15 @@ from PIL import Image
 from skimage.measure import regionprops
 from skimage.segmentation import find_boundaries
 import tifffile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support import io_adapter as io
+from support.path_compat import resolve_native_path
+from support.project_config import load_project_settings, save_project_settings, select_project_path
+from support.image_sources import ChannelSource, read_channel
+from support.shared_utils import append_artifact_manifest_row
+
+print = io.legacy_print
 
 
 if __name__ == "__main__":
@@ -33,6 +44,11 @@ MASK_FILE_EXCLUDES = []
 DAPI_DECONVOLVE_RGB = True
 DAPI_INVERT = False
 OUTPUT_ROOT = Path(r"C:\Users\youm\Desktop\projects\segmentation_mIHC")
+# Optional exact paths/templates bypass the legacy filename selector.
+DAPI_PATH_FORMAT = None
+MASK_PATH_FORMAT = None
+CHECKPOINT_PATH = None
+RUN_CONTEXT = None
 
 # Older one-off examples:
 # CORE_FOLDER_FORMAT = r"Z:\Multiplex_IHC_studies\Isaac_Youm\Thresholding_Example\{core}"
@@ -110,7 +126,7 @@ def scene_name():
 
 def core_folder(folder_format):
     for core in core_name_variants():
-        folder = Path(str(folder_format).format(core=core, core_raw=str(CORE)))
+        folder = resolve_native_path(str(folder_format).format(core=core, core_raw=str(CORE)))
         if folder.is_dir():
             return folder
     raise FileNotFoundError("no folder found for core " + core_name() + " using " + str(folder_format))
@@ -146,10 +162,14 @@ def find_file_by_text(folder_format, file_contains, file_excludes, label, requir
 
 
 def dapi_path():
+    if DAPI_PATH_FORMAT:
+        return resolve_native_path(str(DAPI_PATH_FORMAT).format(core=core_name(), core_raw=str(CORE)), must_exist=True, kind='file')
     return find_file_by_text(CORE_FOLDER_FORMAT, DAPI_FILE_CONTAINS, DAPI_FILE_EXCLUDES, "DAPI", True)
 
 
 def mask_path():
+    if MASK_PATH_FORMAT:
+        return resolve_native_path(str(MASK_PATH_FORMAT).format(core=core_name(), core_raw=str(CORE)), must_exist=True, kind='file')
     return find_file_by_text(MASK_FOLDER_FORMAT, MASK_FILE_CONTAINS, MASK_FILE_EXCLUDES, "mask", RUN_MODE == "train")
 
 
@@ -219,14 +239,15 @@ def ss_aec_cmyk_deconvolve(rgb):
 
 def read_2d_tiff(path, label):
     try:
-        array = tifffile.imread(str(path))
+        path = resolve_native_path(path, must_exist=True, kind='file')
+        array = read_channel(ChannelSource(path=str(path)))
     except FileNotFoundError:
         fallback_path = zero_padded_scene_path(path)
         if fallback_path == path:
             raise
         print("missing", label, "file:", path)
         print("trying", fallback_path)
-        array = tifffile.imread(str(fallback_path))
+        array = read_channel(ChannelSource(path=str(resolve_native_path(fallback_path, must_exist=True, kind='file'))))
     if array.ndim == 3 and label == "DAPI":
         rgb = rgb_from_clear_rgb_array(array)
         if not DAPI_DECONVOLVE_RGB:
@@ -292,7 +313,11 @@ def next_output_folder():
 
 
 def latest_model_path():
-    if START_FRESH or not OUTPUT_ROOT.exists():
+    if START_FRESH:
+        return None
+    if CHECKPOINT_PATH:
+        return resolve_native_path(CHECKPOINT_PATH, must_exist=True, kind='file')
+    if not OUTPUT_ROOT.exists():
         return None
     found = []
     for folder in OUTPUT_ROOT.iterdir():
@@ -560,6 +585,9 @@ def run_one_core(run_prototype=None, run_stardist=None, prototype_runner=None, s
         return None
 
     output_folder = next_output_folder()
+    if RUN_CONTEXT is not None:
+        (output_folder / 'launch_context.json').write_text(json.dumps(
+            {**RUN_CONTEXT, 'core': str(CORE), 'mode': RUN_MODE}, indent=2), encoding='utf-8')
     engine_timings = make_engine_timings()
     engine_lines = []
     saved_paths = {}
@@ -579,11 +607,19 @@ def run_one_core(run_prototype=None, run_stardist=None, prototype_runner=None, s
     saved_paths["training_txt"] = text_path
     for path in saved_paths.values():
         print_saved(path)
+    for kind, path in saved_paths.items():
+        if path is None:  # reference-mask debug images are optional in test mode
+            continue
+        if not Path(path).is_file():
+            raise RuntimeError('Missing segmentation output: ' + str(path))
+        append_artifact_manifest_row(output_folder, {'producer': 'seg_v0', 'kind': kind,
+            'status': 'complete', 'path': str(Path(path).resolve()), 'scene_id': scene_name()})
     return text_path
 
 
-def run_all(run_prototype=None, run_stardist=None, prototype_runner=None, stardist_runner=None, stardist_check=None):
+def run_all(run_prototype=None, run_stardist=None, prototype_runner=None, stardist_runner=None, stardist_check=None, *, strict=False):
     global CORE, RUN_MODE
+    outputs = []
     for i, core in enumerate(CORES):
         RUN_MODE = RM_0
         CORE = core
@@ -593,11 +629,106 @@ def run_all(run_prototype=None, run_stardist=None, prototype_runner=None, stardi
             else:
                 RUN_MODE = "train"
         print("=== CORE", CORE, "RUN_MODE", RUN_MODE, "===")
-        run_one_core(run_prototype, run_stardist, prototype_runner, stardist_runner, stardist_check)
+        result = run_one_core(run_prototype, run_stardist, prototype_runner, stardist_runner, stardist_check)
+        if strict and result is None:
+            raise RuntimeError('Input loading failed for core ' + str(CORE))
+        if result is not None:
+            outputs.append(result)
+    return outputs
+
+
+def configure(*, project_root=None, interactive=False, image=None, mask=None,
+              output_root=None, checkpoint=None, cores=None, mode=None, base_dir=None,
+              config_changed=None, input_fn=None, print_fn=None):
+    """Resolve DAS path defaults without changing the training/postprocess knobs.
+
+    Explicit arguments > nearest project config > editable module settings.
+    Paths with {core}/{core_raw} are checked per core before allocating output.
+    """
+    global DAPI_PATH_FORMAT, MASK_PATH_FORMAT, CHECKPOINT_PATH, OUTPUT_ROOT, CORES, RUN_MODE, RM_0
+    global CORE_FOLDER_FORMAT, MASK_FOLDER_FORMAT, CORE
+    global RUN_CONTEXT
+    input_fn, print_fn = input_fn or io.iget, print_fn or io.iprint
+    values, origins = load_project_settings(project_root) if project_root else ({}, {})
+    def choose(argument, key, fallback, *, kind='file', optional=False):
+        value = argument if argument is not None else values.get('seg_custom_'+key, fallback)
+        return select_project_path(value, 'custom segmentation '+key, base_dir=base_dir,
+            kind=kind, optional=optional, interactive=interactive, input_fn=input_fn, print_fn=print_fn)
+    selected_mode = mode or RUN_MODE
+    if selected_mode not in {'train', 'test'}:
+        raise ValueError('Segmentation mode must be train or test')
+    selected_image = choose(image, 'image', DAPI_PATH_FORMAT, optional=True)
+    selected_mask = choose(mask, 'mask', MASK_PATH_FORMAT, optional=True)
+    selected_checkpoint = choose(checkpoint, 'checkpoint', CHECKPOINT_PATH, optional=True)
+    selected_output = choose(output_root, 'output_root', OUTPUT_ROOT, kind='directory')
+    # Legacy folder selectors remain supported; migrate their path mechanics too.
+    folder = choose(None, 'image_folder_format', CORE_FOLDER_FORMAT, kind='directory') if not selected_image else CORE_FOLDER_FORMAT
+    mask_folder = (selected_image.parent if selected_image else
+        choose(None, 'mask_folder_format', MASK_FOLDER_FORMAT, kind='directory')) if not selected_mask else MASK_FOLDER_FORMAT
+    selected_cores = list(cores) if cores is not None else json.loads(values.get('seg_custom_cores', json.dumps(CORES)))
+    if (not isinstance(selected_cores, list) or not selected_cores
+            or any(not isinstance(core, str) or not core.strip() for core in selected_cores)):
+        raise ValueError('Cores must be a nonempty list of names')
+    if selected_checkpoint:
+        resolve_native_path(selected_checkpoint, must_exist=True, kind='file')
+    DAPI_PATH_FORMAT, MASK_PATH_FORMAT = selected_image, selected_mask
+    CHECKPOINT_PATH, OUTPUT_ROOT, CORES = selected_checkpoint, selected_output, selected_cores
+    CORE_FOLDER_FORMAT, MASK_FOLDER_FORMAT = str(folder), str(mask_folder)
+    RUN_MODE = RM_0 = selected_mode
+    if selected_mode == 'test' and RUN_PROTOTYPE and latest_model_path() is None:
+        raise ValueError('Test mode needs --checkpoint or an existing model in output_root')
+    # Validate every association before saving defaults or creating run folders.
+    inputs, previous_core = [], CORE
+    try:
+        for selected_core in CORES:
+            CORE = selected_core
+            nuclear, reference = dapi_path(), mask_path()
+            inputs.append({'core': selected_core, 'image': str(nuclear),
+                           'mask': str(reference) if reference else None})
+    finally:
+        CORE = previous_core
+    updates = {'seg_custom_'+key: str(value or '') for key, value in {
+        'image': selected_image, 'mask': selected_mask, 'checkpoint': selected_checkpoint,
+        'output_root': selected_output, 'image_folder_format': folder, 'mask_folder_format': mask_folder}.items()}
+    if project_root:
+        updates['seg_custom_cores'] = json.dumps(selected_cores)
+        save_project_settings(project_root, updates, on_update=config_changed)
+    print_fn('Custom segmentation:', selected_mode, '| output:', OUTPUT_ROOT)
+    RUN_CONTEXT = {'mode': selected_mode, 'paths': updates, 'config_origins': origins,
+        'inputs': inputs, 'initial_checkpoint': str(latest_model_path()) if latest_model_path() else None,
+        'working_directory': str(Path.cwd()), 'project_root': str(project_root) if project_root else None}
+    return RUN_CONTEXT
+
+
+def cli(argv=None, *, prototype_runner=None):
+    parser = argparse.ArgumentParser(description='Custom segmentation with DAS project/path setup')
+    parser.add_argument('--project')
+    parser.add_argument('--interactive', action='store_true')
+    parser.add_argument('--image', help='nuclear TIFF or path template containing {core}')
+    parser.add_argument('--mask', help='instance mask TIFF or {core} path template')
+    parser.add_argument('--checkpoint')
+    parser.add_argument('--output-root')
+    parser.add_argument('--cores', nargs='+')
+    parser.add_argument('--mode', choices=['train','test'])
+    parser.add_argument('--base-dir')
+    parser.add_argument('--no-stardist', action='store_true')
+    parser.add_argument('--result-json', help=argparse.SUPPRESS)  # parent/child receipt
+    args = parser.parse_args(argv)
+    configure(project_root=args.project, interactive=args.interactive, image=args.image,
+        mask=args.mask, output_root=args.output_root, checkpoint=args.checkpoint,
+        cores=args.cores, mode=args.mode, base_dir=args.base_dir)
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    # Per-run provenance is written by run_one_core; no model or image is copied here.
+    outputs = run_all(RUN_PROTOTYPE, RUN_STARDIST_AFTER and not args.no_stardist,
+                      prototype_runner=prototype_runner, strict=True)
+    if args.result_json:
+        resolve_native_path(args.result_json).write_text(json.dumps(
+            {'artifact_manifests': [str(p.parent / '_ds_manifest.jsonl') for p in outputs]}, indent=2), encoding='utf-8')
+    return outputs
 
 
 def main():
-    run_all(RUN_PROTOTYPE, RUN_STARDIST_AFTER)
+    return cli()
 
 
 if __name__ == "__main__":

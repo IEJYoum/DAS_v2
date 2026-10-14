@@ -97,6 +97,8 @@ class ClassifiedAdapterTests(unittest.TestCase):
     def test_central_predict_does_not_enter_training(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            checkpoint = root / 'mock_parent.pt'
+            checkpoint.touch()
             settings = self.fixture_settings(root)
             cfg = deepcopy(CONFIG)
             cfg['marker_groups'] = settings['marker_groups']
@@ -106,6 +108,7 @@ class ClassifiedAdapterTests(unittest.TestCase):
                                      'true_class': ['EPI', None], 'certainty': [.8, .7]})
                 return infer.report_correctness(rows), {scenes[0]['metadata']['scene_id']: None}
             with patch.dict(run_project.DATASETS, {'fixture': settings}), \
+                    patch.object(run_project, 'CHECKPOINT', str(checkpoint)), \
                     patch.object(run_project, 'OUTPUT_ROOT', str(root / 'outputs')), \
                     patch.object(infer, 'load_checkpoint', return_value=(object(), cfg)), \
                     patch.object(infer, 'evaluate_scenes', side_effect=fake_evaluate), \

@@ -1,4 +1,4 @@
-"""Compatibility entry point for AH08. Edit settings only in run_project.py."""
+"""Deprecated filename: forwards to the settings in run_project.py."""
 import sys
 from pathlib import Path
 
@@ -7,7 +7,8 @@ from CLASSIFIER.run_project import main as project_main
 
 
 def main(prepare_only=False):
-    return project_main(mode='prepare' if prepare_only else 'train_test', dataset='ah08')
+    print('run_real.py is deprecated; using run_project.py dataset/mode settings.', flush=True)
+    return project_main(mode='prepare' if prepare_only else None)
 
 
 if __name__ == '__main__':

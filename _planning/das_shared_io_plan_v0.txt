@@ -1,0 +1,368 @@
+DAS shared I/O plan v0
+=====================
+2026-10-14
+
+Scope and status
+----------------
+This is the consolidated planning document for I/O shared across DAS as a whole:
+configuration, interactive collection, paths/source discovery, source/grid/object
+identity, physical image access, output publication, provenance and transport.
+It supplements the evidence audit runtime_ingest_io_audit_20261014.md.
+The companion developer-facing contract is ../_usage_guides/io_contract_v0.txt.
+
+Updated after the CNN path/config/transport migration. CURRENT describes code;
+PLANNED describes remaining work. Usage: ../_usage_guides/cnn_das_io_v0.md.
+CNN training, losses, model heads, normalization recipes and prediction stitching
+are deliberately outside this plan. A common reader does not imply a common
+scientific transformation. Preserve existing external-file and standalone use.
+
+1. Central ownership: expand these surfaces, do not create parallel stacks
+------------------------------------------------------------------------
+support/io_adapter.py
+  CURRENT: iget(prompt, default=None, *, prompt_meta=None), iprint, dprint,
+  legacy_print; terminal/GUI/DS initialization; reset/tick/clear_progress;
+  session logs and support capture. DS transport is support/ds_transport.py.
+  This is the interaction/transport owner, not a file parser or project resolver.
+  PLANNED: explicit long-operation cancellation/event contracts using this
+  transport, rather than another prompt, logging or progress implementation.
+
+support/shared_utils.py
+  CURRENT: checkChange, flexMenu, multiObMenu; load/write_key_value_config;
+  load_project_config_values, save_project_config_updates;
+  load_inherited_config_value; saveF and append_artifact_manifest_row;
+  figure-summary helpers and other existing shared utilities.
+  CURRENT: IFA.flexMenu delegates to the shared collector with IFA.logInput.
+  Project policy is in support/project_config.py over these existing raw helpers.
+  Do not turn this file into an all-purpose filesystem or runtime module.
+
+support/path_compat.py
+  CURRENT: native_path_text and is_foreign_path_text translate/check the known
+  Coussens UNC aliases <-> /mnt/rdscoussens. Unknown drive mappings are not guessed.
+  CURRENT: resolve_native_path validates foreign forms, home/base and file kind.
+  CNN wrappers apply it before reading/creating paths. Keep lexical
+  path/mount handling here, not in each runtime's prompts or filename parser.
+
+support/ingest_sources.py
+  CURRENT: has_glob_magic, split_source_specs, join_source_specs,
+  expand_source_spec(spec, want, base_dir=None), source_display_id. Structural expansion;
+  supports literal files/folders and recursive ** globs; list storage uses ||.
+  CURRENT: base/home/translation handling and prompt_source_specs, an injected
+  wrapper over checkChange/flexMenu plus generic expansion. No GUI parser or lab
+  selector is embedded. PLANNED: remaining consumer adoption after parity tests.
+
+support/project_config.py
+  CURRENT: load_project_settings returns strings and declaring config files;
+  nearest nonempty keys win after Windows/POSIX overlay at each ancestor.
+  save_project_settings reuses the existing merging writer and host callback.
+  select_project_path offers shared use/change or strict noninteractive errors.
+  CNN wrappers and StarDist bridge adopt it; viewer/controller legacy policy stays.
+
+support/image_conventions.py
+  CURRENT: known filename/layout parsers, marker/scene interpretation, panel
+  metadata, coordinate-column conventions, segmentation-pair and asset discovery.
+  It currently contains filesystem matching as well as pure parsing.
+  PLANNED: retain known defaults here. Consumers/adapters supply explicit unknown
+  conventions; do not reject a lab because its filenames are unfamiliar. Separate
+  discovery candidates from a consumer's ambiguity/selection decision.
+
+support/image_sources.py
+  CURRENT: ImageSourceInfo and ChannelSource; TIFF/OME inspection; channel/series
+  descriptors and serialization; read_channel/read_channel_preview;
+  open_channel_window_reader/read_channel_window; percentile infrastructure;
+  file_signature_for_source; disk-backed label TIFF sink and tile rectangles.
+  PLANNED: use these physical-access primitives instead of new TIFF readers;
+  supplement optional spatial-grid metadata and explicit capability reporting.
+  This is not the owner of marker semantics, display gamma or label assignment.
+
+support/filesystem_utils.py
+  CURRENT: retry_io and atomic_write_with_retry for network-backed outputs.
+  PLANNED: unique temporary names, safe concurrent publication, cancellation-aware
+  retry where needed. Current fixed <final>.tmp does not support competing writers
+  of the same artifact. These utilities do not decide scientific cache recipes.
+
+Other central surfaces to preserve
+  support/das_config.py: code-adjacent machine-local das_config.txt preferences.
+  controler.py: SessionState, project selection, config cache, action boundaries.
+  analysis/if_progress.py: existing lazy wrappers over io_adapter progress.
+  support/state_log.py: state/action history, not a second filesystem resolver.
+  support/shared_utils.append_artifact_manifest_row: existing _ds_manifest.jsonl
+  publication pointer, not a mandatory source-data format.
+
+2. Interactive mechanics and GUI/DS hooks
+----------------------------------------
+CURRENT checkChange
+  The central implementation is support/shared_utils.checkChange. It displays the
+  current value, emits use/change option metadata, accepts a direct replacement,
+  and supports a before_change callback/custom replacement prompt. Blank/use/no
+  preserves the current value; change/yes asks for replacement. It does not
+  validate that a path exists or persist a project config by itself.
+
+  analysis/cmifAnalysis50.checkChange is already a compatibility wrapper around
+  that shared implementation; its paths=True behavior adds example paths.
+  The controller directly calls checkChange(..., input_fn=io.iget).
+  Preserve these wrappers rather than maintaining another use/change loop.
+
+CURRENT flexMenu
+  IFA.flexMenu(title) repeatedly calls logInput until blank and returns a list of
+  strings. It is a list collector, not a numbered single-choice menu. Under the
+  controller, IFA.logInput is replaced with the routed legacy input function.
+  Other existing selectors include shared_utils.multiObMenu for numeric column
+  lists and controller menu helpers for action choices. Use the right behavior.
+
+COMPLETED flexMenu extraction
+  The list-collection body is now shared_utils.flexMenu with input_fn injection.
+  IFA.flexMenu is a thin wrapper which calls it
+  with IFA.logInput, preserving callers and their logging/GUI route.
+  New shared callers must not import IFA solely to collect a list: importing IFA
+  brings analysis, visualization and optional-runtime dependencies with it.
+  Retain blank-means-done and list order; any validation/deduplication is a caller
+  policy. Do not duplicate this loop in image, mask and CSV prompts.
+
+Interaction routing rule
+  Frontends own init_terminal/init_gui/init_ds. Task helpers never reset the mode.
+  Host-facing wrappers use the active io_adapter.iget/iprint or injected equivalents.
+  Call checkChange with input_fn=io.iget explicitly: its default input callable
+  was bound when the function was defined, so later builtins patching is not a
+  dependable route. Preserve prompt_meta rather than parsing a custom prompt in
+  another GUI layer. Keep dprint for technical traces and iprint for user actions.
+  Let UserAbortError/KeyboardInterrupt reach the established action boundary.
+
+Legacy compatibility and module identity
+  controler.legacy_ifa5_context temporarily routes builtins.input, module.logInput
+  and module print functions, supplies project metadata and changes CWD; it
+  restores them afterward. Existing code relies on this. New helpers should use
+  injection rather than another monkey-patching context.
+  Current application bootstrap loads the active transport as 'io_adapter' from
+  support on sys.path. Loading the same stateful file separately as
+  'support.io_adapter' now uses a compatibility alias to the same mode/session/log
+  object, tested in both import orders. Reuse the host's callbacks; no ad hoc
+  second initialization in a standalone/task library.
+
+Viewer residual interaction
+  cvh_input already delegates to io_adapter; cvh_check_change duplicates richer
+  use/change behavior with hints and optional clearing. Converge on the shared
+  checkChange implementation by extending optional metadata/hooks and keeping a
+  viewer wrapper. Characterize clear/hint/default behavior first. Do not lose GUI
+  controls while reducing code duplication. IFA.navigate remains an explicit
+  browse fallback; source expansion must not silently invoke it.
+
+3. Configuration: current behavior and the shared target
+------------------------------------------------------
+CURRENT scopes
+  Project: project_config.txt beside a selected data/project folder, optionally
+  ancestor configs. Stores data/figure/viewer/segmentation roots, source specs,
+  selectors and operation-specific project metadata such as subset definitions.
+  Viewer on POSIX: merges project_config.txt metadata, then overlays
+  project_config_posix.txt. Viewer on Windows: project_config.txt.
+  Machine/application: support/das_config.py reads DAS_v2/das_config.txt. Controller
+  also has application-state project registry/master config under APP_STATE_DIR.
+  Session: SessionState holds the resolved active data/build/figure/project roots.
+  Run/artifact metadata: snapshots record effective execution/provenance; they are
+  not another location from which interactive project defaults should be guessed.
+
+CURRENT persistence functions
+  load_project_config_values(folder, filename=...) returns raw string values.
+  save_project_config_updates merges keys and preserves unrelated settings; a blank
+  update removes the local key. Raw config readers ignore comments/blank lines.
+  load_inherited_config_value checks nearest ancestors for a nonempty key but
+  returns only its text, using one selected filename.
+  Clearing a local override can therefore expose the ancestor value again. It
+  does not mean 'disable this feature everywhere'. Explicit disable semantics,
+  where needed, require a consumer-supported setting rather than a fake path.
+
+CURRENT gaps
+  Shared OS merge/inheritance/origins are adopted by the CNNs and StarDist bridge.
+  Rich saved-list compatibility remains viewer-local. Controller cache invalidation
+  is explicit for host launches, not a cross-process watcher. Several legacy
+  consumers still implement their own config policy. CWD-relative values remain;
+  project-relative and universal machine/application fallback are unimplemented.
+
+PLANNED policy, preserving legacy behavior during migration
+  Explicit validated request/session values override selected-project values;
+  nearest ancestor supplies missing values; supported machine/app preferences
+  and operation defaults fill remaining gaps. The user can change selected
+  values through the existing routed helpers. Record the effective origin.
+  Apply viewer's Windows-metadata/POSIX-override behavior per ancestor before
+  choosing the nearest nonempty value; do not copy foreign paths into active use.
+  Return raw text, origin file/folder, scope, OS profile and path-base policy.
+  Resolve newly versioned project-relative values against their declaring config
+  directory. Keep explicit legacy CWD policy until existing settings are migrated.
+  Never silently reinterpret all old paths as project-relative.
+
+  Implement shared project policy beside/over existing shared_utils entry points.
+  One focused support policy module is acceptable if it keeps shared_utils small;
+  do not create one resolver per runtime. Keep OS lexical rules in path_compat.
+  Preserve existing keys and read compatibility for ||/JSON/newline saved lists.
+  Call the shared update writer only after validating selected inputs/outputs;
+  commit newly generated artifact paths after successful artifact validation.
+  Refresh controller config cache through an update callback or shared generation
+  mechanism. Standalone writers and DAS must observe one another's changes.
+
+Filepath selection/persistence flow
+  Load saved value and origin -> offer use/change through checkChange -> collect
+  optional additional entries through shared flexMenu -> translate and expand ->
+  validate structural kind and consumer semantics -> persist the user's usable
+  specifications through shared project updates -> snapshot resolved execution.
+  Save original globs/specifications, not only today's expanded file list. Keep
+  the resolved list in run provenance so an experiment remains inspectable.
+
+4. Paths and discovery
+----------------------
+Shared lexical boundary: trim input quotes; apply only known mount translation;
+check foreign/unusable forms; expand home consistently; resolve with an explicit
+base; preserve POSIX case; then pass native paths/specs to ingest_sources.
+Path existence, readability and directory creation are separate validation steps.
+An output root must not accidentally create a literal Windows drive name on Linux.
+
+Current native_path_text supports the known UNC aliases and /mnt/rdscoussens,
+not arbitrary Z: mappings. Foreign detection rejects arbitrary POSIX roots on
+Windows. Generic expand_source_spec translates known mounts, rejects foreign forms
+and expands literal/glob ~ before discovery. It does not read configs. Remaining
+consumers should adopt these extensions rather than copy fixes.
+
+expand_source_spec returns sorted, de-duplicated structural matches using OS-aware
+normcase. It does not itself recursively walk a literal directory. Keep consumer
+policies explicit: literal-folder recursion versus direct children, exact file
+glob versus convention discovery, permitted extensions, zero/multiple matches.
+Show an unmatched spec rather than broadening it to a parent folder. Unknown
+conventions get an explicit selector/manual fallback. Never select an arbitrary
+image/channel/mask from an ambiguous result. Existing heuristic consumers need
+compatibility tests and explicit policy before stricter behavior is adopted.
+
+Preserve display labels separately from filesystem identity and biological IDs.
+source_display_id is useful for paths, not a replacement for slide_scene.
+Existing image_conventions parsers provide defaults; generic source expansion
+must not embed known labs, marker names, masks or biological labels.
+
+5. Source, grid, mask and table identity
+--------------------------------------
+CURRENT physical descriptor: image_sources.ChannelSource includes source path,
+kind, series/channel, channel name/marker, axes, shape and dtype. Channel/series
+indices are zero-based; convention filename channel tokens can be one-based.
+Use channel_source_to_json/from_json rather than inventing another TIFF-channel
+string notation. resolve_channel currently returns first matching name/index/
+contains result; strict unique resolution must be an explicit tested extension.
+
+PLANNED interoperable records, preferably small dictionaries/existing records
+  Source reference: original spec, resolved native path, biological scene ID,
+  distinct physical source identity, ChannelSource selection and fingerprint.
+  Grid: YX shape, known spacing/units, crop/origin/orientation/reference frame,
+  source-to-working transform and provenance/assumption state. Unknown stays
+  unknown. Machine-default pixel size is not measured acquisition metadata.
+  Mask product: source scene/grid, mask role (cell/nucleus/etc.), dtype/background
+  convention, label namespace and exact mask identity/version.
+  Table association: scene and object-key mapping, coordinates and their frame,
+  missing/duplicate policy, provenance of the mask which produced object IDs.
+
+Shape equality alone is not spatial alignment. A resampled mask may retain object
+IDs while original table coordinates still belong to the original grid. Do not
+reinterpret coordinates or equate cell/nuclear masks without a declared mapping.
+Join observations/products on scene plus validated object ID, never object number
+alone across scenes or a guessed string suffix. Preserve triplet index/order.
+External files remain first-class inputs: no DAS-generated segmentation manifest
+is required. Optional output records improve subsequent handoff without becoming
+a new prerequisite for ordinary discovery and manual association.
+
+6. Physical access, artifacts and publication
+---------------------------------------------
+Use image_sources for TIFF/OME inspection, channels, previews and bounded windows.
+Expose capabilities before reading: current true window access supports specific
+uncompressed tiled or memory-mappable layouts, not every compressed/pyramidal
+format. A bounded-memory request must not silently become a whole-image read.
+Non-TIFF figures and browser assets keep their appropriate format-specific layer.
+Statistics infrastructure may be shared; scientific/display recipes remain local.
+Do not force common tile ownership, instance stitching or probability blending.
+
+Common artifact record: version, kind/status, producer/recipe version, actual path,
+dependency/source identities, optional scene/grid/mask association, creation time
+and validation facts. Reuse append_artifact_manifest_row and existing result
+records where appropriate; supplement fields, not another unrelated manifest log.
+_ds_manifest.jsonl is a save-time pointer, not proof an image is valid nor a required
+input dataset. Portable artifact references should be relative to a declared root;
+retain source provenance separately from relocatable output paths.
+
+Use filesystem_utils retry/atomic publication where applicable. Extend its fixed
+temporary-name behavior before shared concurrent cache writes. Validate payload
+shape/dtype/completeness, then publish a completed record. Handle failed partials
+explicitly. Retry limits and cancellation must remain observable to the host.
+
+All runtimes need source/recipe identity and publication mechanics. Cache recipes,
+storage formats and domain-specific contents remain with their producers. Source
+size/integer-second mtime alone is weak: supplement nanosecond signatures and an
+optional stronger identity without rehashing enormous data on every read.
+Missing/offline, current-valid, recipe-mismatch and corrupt are distinct states.
+Display proxies are not substitutes for quantitative input data.
+
+7. Callable operations, standalone behavior and session commits
+-------------------------------------------------------------
+Thin DAS/terminal/standalone wrappers should call the same task core with explicit
+settings, source associations, output policy and injected observer/cancel hooks.
+No core prompts by surprise; optional interactive recovery belongs to its wrapper.
+Keep operation-specific results, using common status/warning/artifact fields.
+Controller state/config adopts validated successful results; a subprocess exit
+code or directory name alone does not establish a usable output product.
+
+Reuse io_adapter and if_progress for host progress; reuse log/manifest surfaces
+for durable results. A child runtime can emit events/text which its parent routes
+through active I/O. It must not accidentally initialize a second GUI/DS session.
+Current prompt-driven UserAbortError and child KeyboardInterrupt handling are not
+yet a complete long-operation cancellation contract; add that centrally later.
+
+Keep standalone wrappers usable without loading IFA, a GUI or an active project.
+Their top-level caller may choose terminal mode; helpers must not reset host mode.
+Avoid importing a heavy consumer just to reuse checkChange, flexMenu, a path rule
+or a config reader. Maintain one active io_adapter module identity during migration.
+
+8. Implementation sequence and acceptance gates
+----------------------------------------------
+Pass A: characterize and extract interaction mechanics.
+  CNN adoption implemented; flexMenu and transport alias tests pass. Viewer richer
+  prompt parity/adoption and long-operation cancellation remain.
+  checkChange remains central; delegate viewer wrapper after parity checks.
+  Extract flexMenu once; preserve IFA.logInput routing and legacy call signatures.
+  Tests: use/change/direct/blank/clear; prompt_meta; injected prompt-only callables;
+  GUI/DS/terminal paths; abort propagation; one active transport module identity.
+
+Pass B: shared project policy and path boundary.
+  CNN/StarDist adoption implemented; controller save callbacks invalidate its
+  cache. Viewer migration and cross-process cache notification remain.
+  Supplement existing config/path/list helpers; include value origin, explicit
+  anchor and controller cache refresh. Characterize OS merge/inheritance/clearing,
+  unrelated-key preservation, literal/glob ~, UNC prefixes, unknown drives, Linux
+  case and exact-glob versus literal-directory traversal. Migrate viewer last after
+  equivalent behavior is established; do not modify an active long-running job.
+
+Pass C: source/grid/object association and output records.
+  Extend existing ChannelSource-related metadata without duplicating the reader.
+  Tests: multi-series/channels, ambiguous candidates, duplicate scene leaf names,
+  same-shape different grids, sparse object IDs, duplicates/missing join keys,
+  replacement masks, subset tables, original/working coordinate frames, external
+  masks without DAS provenance. Preserve established naming/parser fallbacks.
+
+Pass D: publication/event adoption.
+  Extend filesystem/artifact helpers; inject host progress/cancellation and commit
+  validated products through existing session/config update surfaces.
+  Tests: interrupted/concurrent writes, source mutation, unavailable originals,
+  moved output roots, subprocess success without product, partial batches and
+  cancellation without success-state commits. Domain/CNN cache work follows.
+
+Evidence map
+------------
+support/{shared_utils,io_adapter,path_compat,ingest_sources,image_conventions,
+image_sources,filesystem_utils,das_config,ds_transport,state_log}.py
+controler.py: _prompt_project_root, _load_project_config,
+  _load_inherited_project_value, _save_project_config_updates, legacy_ifa5_context
+IFA.py: logInput, flexMenu, navigate
+analysis/cmifAnalysis50.py: checkChange wrapper
+analysis/if_progress.py: lazy io_adapter progress wrappers
+visualization/call_visu_html_7.py: normalize_stored_path, load_project_config,
+  load_inherited_project_value, cvh_input, cvh_check_change, build_viewer_run
+data_extraction/{tabular_ingest,segmentation_bridge}.py: injected source prompts
+Existing tests: tests/test_cnn_project_io.py, tests/test_path_compat.py, tests/test_ingest_sources.py,
+tests/test_viewer_segmentation_roots.py, tests/test_viewer_output_contract.py,
+tests/test_triplet_io.py. CNN setup tests cover injected prompt metadata,
+controller callbacks, transport identity, origins/overlays, TIFF parity and an
+isolated custom segmentation forward pass. Full browser/DS-session testing and
+execution on Linux filesystems remain gates for broader migration; simulated OS
+config/path tests do not replace those runs.
+Runtime-specific audit evidence remains in runtime_ingest_io_audit_20261014.md.

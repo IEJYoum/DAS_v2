@@ -12,14 +12,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from CLASSIFIER.config import CONFIG, ROOT
 from CLASSIFIER.outputs import new_run_folder
+from support import io_adapter as io
+from support.path_compat import resolve_native_path
 
 
-def main(cfg=None, **overrides):
+def main(cfg=None, *, print_fn=None, **overrides):
     """Run generation/preparation -> training -> held-out test; return a new folder.
 
     Config precedence is CONFIG < cfg < kwargs; nested dictionaries replace
     whole values. Relative paths resolve against the CLASSIFIER directory.
     """
+    print_fn = print_fn or io.iprint
     settings = deepcopy(CONFIG)
     for supplied in (cfg or {}, overrides):
         unknown = set(supplied) - set(settings)
@@ -61,10 +64,10 @@ def main(cfg=None, **overrides):
     from CLASSIFIER import summary
     summary.write_debug_summary(out, status="starting")
     try:
-        folder = _execute(settings, out)
+        folder = _execute(settings, out, print_fn=print_fn)
         from CLASSIFIER import checks
         summary.write_debug_summary(out, status="checking saved model", phase="reload model and compare exported predictions")
-        print("Checking saved model: reload it and compare with exported predictions", flush=True)
+        print_fn("Checking saved model: reload it and compare with exported predictions")
         verification_start = time.perf_counter()
         checks.verify_run(folder)
         (out / "verification.json").write_text(json.dumps({"passed": True,
@@ -78,17 +81,18 @@ def main(cfg=None, **overrides):
         summary.write_debug_summary(out, status="failed", error=traceback.format_exc())
         raise
     summary.write_debug_summary(out, status="complete", phase="saved model/export checks passed")
-    print(f"Run complete. Saved model/export checks: PASS\nDebug summary: {out / 'debug_summary.txt'}", flush=True)
+    print_fn(f"Run complete. Saved model/export checks: PASS\nDebug summary: {out / 'debug_summary.txt'}")
     return folder
 
 
-def _execute(settings, out):
+def _execute(settings, out, *, print_fn=None):
     """Run phases inside main's failure-summary boundary."""
     from CLASSIFIER import summary
+    print_fn = print_fn or io.iprint
 
     def log(message):
         line = f"{datetime.now().strftime('%H:%M:%S')} {message}"
-        print(line, flush=True)
+        print_fn(line)
         with (out / "run_log.txt").open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
         summary.write_debug_summary(out, status="running", phase=message)
@@ -115,8 +119,7 @@ def _execute(settings, out):
             raise ValueError("Synthetic data needs >= 4 cells/scene and train/val/test split counts")
         manifest = synth.main(settings)
     else:
-        manifest = Path(settings["manifest"])
-        manifest = (ROOT / manifest).resolve() if not manifest.is_absolute() else manifest.resolve()
+        manifest = resolve_native_path(settings['manifest'], base_dir=ROOT, must_exist=True, kind='file')
         # Snapshot the manifest with absolute scene paths, not copies of images.
         # The referenced dataset must remain available for checkpoint inference.
         table = pd.read_csv(manifest)

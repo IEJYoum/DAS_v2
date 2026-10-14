@@ -8,20 +8,29 @@ libraries and script-level globals do not leak back into the controller.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 
 DAS_ROOT = Path(__file__).resolve().parents[1]
 MISC_SEG_DIR = DAS_ROOT / "misc mIHC utility"
-DEFAULT_MODELS_DIR = Path(r"C:\Users\youm\Desktop\src\IFA_v1\data_extraction\segmentation_models")
+DEFAULT_MODELS_DIR = DAS_ROOT / "data_extraction" / "segmentation_models"
 
 sys.path.insert(0, str(DAS_ROOT / "support"))
-from shared_utils import checkChange, load_project_config_values, save_project_config_updates
-from ingest_sources import expand_source_spec, has_glob_magic, join_source_specs, split_source_specs
+sys.path.insert(0, str(DAS_ROOT))
+from support.shared_utils import checkChange
+from support.ingest_sources import expand_source_spec, has_glob_magic, join_source_specs, split_source_specs, prompt_source_specs
+from support.project_config import load_project_settings, save_project_settings, select_project_path
+from support.path_compat import resolve_native_path
+from support import io_adapter as io
+
+# Keep existing internal print calls routed in both standalone and DAS launches.
+print = io.legacy_print
 try:
     import image_sources
 except Exception:
@@ -100,24 +109,7 @@ def _ask_text(input_fn: Callable[..., str], prompt: str, *, default: str = "") -
 def _prompt_source_specs(default_spec: str, *, input_fn: Callable[..., str], print_fn: Callable[..., None]) -> list[str]:
     """Collect one or more source specs; each must resolve before it is kept."""
 
-    first = str(checkChange(default_spec, "image source path, folder, or glob", input_fn=input_fn)).strip()
-    while True:
-        first_specs = split_source_specs(first)
-        if first_specs and all(expand_source_spec(spec, want="either") for spec in first_specs):
-            break
-        print_fn("No file or folder matched:", first)
-        first = _ask_text(input_fn, "image source path, folder, or glob:")
-
-    specs = list(first_specs)
-    while True:
-        extra = _ask_text(input_fn, "additional image source path, folder, or glob (blank when done):")
-        if extra == "":
-            return specs
-        extra_specs = split_source_specs(extra)
-        if extra_specs and all(expand_source_spec(spec, want="either") for spec in extra_specs):
-            specs.extend(extra_specs)
-            continue
-        print_fn("No file or folder matched:", extra)
+    return prompt_source_specs(default_spec, input_fn=input_fn, print_fn=print_fn)
 
 
 def _scene_jobs_from_source_spec(
@@ -454,15 +446,17 @@ def run_stardist_interactive(
     default_input: Path | None = None,
     default_output: Path | None = None,
     project_root: Path | None = None,
-    input_fn: Callable[..., str] = input,
-    print_fn: Callable[..., None] = print,
+    input_fn: Callable[..., str] | None = None,
+    print_fn: Callable[..., None] | None = None,
+    config_changed=None,
 ) -> Path | list[Path] | None:
     """Prompt through injected I/O, then run the existing StarDist child process."""
 
+    input_fn, print_fn = input_fn or io.iget, print_fn or io.iprint
     print_fn("StarDist segmentation wrapper")
     print_fn("Expected input: image paths, folders, or globs. Training remains standalone for now.")
 
-    cfg = load_project_config_values(project_root) if project_root else {}
+    cfg, _origins = load_project_settings(project_root) if project_root else ({}, {})
     def _cfg_default(key, fallback):
         saved = cfg.get(key, "").strip()
         return saved if saved else str(fallback or "")
@@ -489,7 +483,7 @@ def run_stardist_interactive(
                 print_fn=print_fn,
             )
         )
-    unique_sources: dict[str, Path] = {str(path.resolve()).lower(): path.resolve() for path in source_paths}
+    unique_sources: dict[str, Path] = {os.path.normcase(str(path.resolve())): path.resolve() for path in source_paths}
     source_paths = [unique_sources[key] for key in sorted(unique_sources)]
     if not source_paths:
         print_fn("No scene folders or TIFFs contained exactly one nuclear image matching", repr(dapi_contains))
@@ -519,11 +513,9 @@ def run_stardist_interactive(
         print_fn("StarDist outputs will use each source's sibling", sibling_name, "folder.")
         manual_output_root = None
     else:
-        output_text = str(checkChange(_cfg_default("seg_output_root", default_output), "segmentation output root", input_fn=input_fn)).strip()
-        if output_text == "":
-            print_fn("segmentation output root is required")
-            return None
-        manual_output_root = Path(output_text).expanduser().resolve()
+        manual_output_root = select_project_path(_cfg_default("seg_output_root", default_output),
+            "segmentation output root", kind='directory', interactive=True,
+            input_fn=input_fn, print_fn=print_fn)
         output_roots = [manual_output_root for _scene_job in scene_jobs]
     unique_outputs = list(dict.fromkeys(output_roots))
 
@@ -537,7 +529,7 @@ def run_stardist_interactive(
             "seg_dapi_contains": dapi_contains,
             "seg_scene_name": scene_jobs[0][1] if len(scene_jobs) == 1 else "",
         }
-        save_project_config_updates(project_root, config_updates)
+        save_project_settings(project_root, config_updates, on_update=config_changed)
 
     for idx, ((source_path, scene_name), output_root) in enumerate(zip(scene_jobs, output_roots), start=1):
         print_fn("StarDist scene", str(idx) + "/" + str(len(scene_jobs)) + ":", scene_name)
@@ -555,8 +547,65 @@ def run_stardist_interactive(
 def print_training_standalone_note() -> None:
     print("Segmentation model training is intentionally left standalone for now.")
     print("Training script:", MISC_SEG_DIR / "train_seg_v0.py")
-    print("Custom model folder:", DEFAULT_MODELS_DIR)
-    print("Copy updated model files into that folder manually until the training runtime is stabilized.")
+    print("Use --project for DAS filepath defaults; --mode train requires reference masks.")
+    print("Select a saved model with --checkpoint; no manual copy into DAS is required.")
+
+
+def run_custom_interactive(*, project_root, default_output=None, input_fn=None,
+                           print_fn=None, config_changed=None):
+    """Collect one ROI using DAS I/O, then isolate the custom CNN in a child.
+
+    Batch templates and training are available through the standalone launcher.
+    The checkpoint is explicit: this wrapper never silently selects another model.
+    """
+    input_fn, print_fn = input_fn or io.iget, print_fn or io.iprint
+    values, _ = load_project_settings(project_root)
+    paths = {}
+    for key, label, fallback, required, kind in [
+        ('image', 'nuclear TIFF', '', True, 'file'),
+        ('mask', 'optional reference instance mask TIFF', '', False, 'file'),
+        ('checkpoint', 'custom segmentation checkpoint', '', True, 'file'),
+        ('output_root', 'custom segmentation output root', default_output, True, 'directory'),
+    ]:
+        paths[key] = select_project_path(values.get('seg_custom_'+key, fallback), label,
+            must_exist=kind=='file', kind=kind, optional=not required, interactive=True,
+            input_fn=input_fn, print_fn=print_fn)
+    updates = {'seg_custom_'+key: str(value or '') for key, value in paths.items()}
+    # One exact image, so core is only a label in this entry point.
+    updates['seg_custom_cores'] = '["ROI"]'
+    save_project_settings(project_root, updates, on_update=config_changed)
+    cmd = [sys.executable, '-u', str(MISC_SEG_DIR / 'seg_v0.py'), '--mode', 'test',
+           '--no-stardist', '--cores', 'ROI', '--project', str(resolve_native_path(project_root))]
+    for key, value in paths.items():
+        if value is not None:
+            cmd += ['--'+key.replace('_','-'), str(value)]
+    with tempfile.TemporaryDirectory(prefix='das_seg_receipt_') as temporary:
+        receipt = Path(temporary) / 'result.json'
+        cmd += ['--result-json', str(receipt)]
+        if _stream_subprocess(cmd, DAS_ROOT) != 0:
+            raise RuntimeError('Custom segmentation failed; see the routed child log')
+        if not receipt.is_file():
+            raise RuntimeError('Custom segmentation exited without an output receipt')
+        manifests = json.loads(receipt.read_text(encoding='utf-8')).get('artifact_manifests', [])
+        if not manifests:
+            raise RuntimeError('Custom segmentation returned no artifacts')
+        for filename in manifests:
+            manifest = resolve_native_path(filename, must_exist=True, kind='file')
+            if not manifest.is_relative_to(paths['output_root']):
+                raise RuntimeError('Segmentation output is outside the selected output root')
+            rows = [json.loads(line) for line in manifest.read_text(encoding='utf-8').splitlines() if line.strip()]
+            labels = [row for row in rows if row.get('kind') == 'labeled_cells_tif' and row.get('status') == 'complete']
+            if not labels:
+                raise RuntimeError('Custom segmentation produced no completed label TIFF')
+            for row in labels:
+                product = resolve_native_path(row['path'], must_exist=True, kind='file')
+                if not product.is_relative_to(paths['output_root']):
+                    raise RuntimeError('Segmentation label TIFF is outside the selected output root')
+                info = image_sources.inspect_image_source(product)
+                if len(info.shape) != 2 or not info.dtype.startswith(('uint', 'int')):
+                    raise RuntimeError('Segmentation output must be a 2-D integer instance mask')
+                print_fn('Custom segmentation label TIFF:', product)
+    return paths['output_root']
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -576,8 +625,9 @@ def main(argv: list[str] | None = None) -> int:
     stardist_stream.add_argument("--scene-name", required=True)
 
     args = parser.parse_args(argv)
+    args.output_root = resolve_native_path(args.output_root, kind='directory')
     if args.command == "stardist":
-        input_folder = args.input_folder
+        input_folder = resolve_native_path(args.input_folder, must_exist=True)
         if input_folder.is_file() and input_folder.suffix.lower() in TIFF_SUFFIXES:
             input_folder = _materialize_stardist_input_image(
                 input_folder,
@@ -594,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "stardist-stream":
         _run_stardist_streaming_runtime(
-            input_path=args.input_file,
+            input_path=resolve_native_path(args.input_file, must_exist=True, kind='file'),
             output_root=args.output_root,
             dapi_contains=args.dapi_contains,
             scene_name=args.scene_name,

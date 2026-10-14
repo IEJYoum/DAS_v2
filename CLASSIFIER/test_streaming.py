@@ -103,6 +103,8 @@ class StreamingTests(unittest.TestCase):
     def test_central_tune_routes_parent_and_only_old_training_replay(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            checkpoint = root / 'mock_parent.pt'
+            checkpoint.touch()
             primary_root, old_root = root / 'primary', root / 'old'
             primary_root.mkdir(); old_root.mkdir()
             helper = test_classified.ClassifiedAdapterTests()
@@ -119,6 +121,7 @@ class StreamingTests(unittest.TestCase):
             parent.update(marker_groups=primary['marker_groups'], target_um_per_px=.25)
             training_settings = {**run_project.TRAIN_SETTINGS, 'inference_tile_px': 4, 'inference_overlap': 0}
             with patch.dict(run_project.DATASETS, {'bcc': primary, 'ah08': old}), \
+                    patch.object(run_project, 'CHECKPOINT', str(checkpoint)), \
                     patch.object(run_project, 'OUTPUT_ROOT', str(root / 'outputs')), \
                     patch.object(run_project, 'TRAIN_SETTINGS', training_settings), \
                     patch.object(infer, 'load_checkpoint', return_value=(None, parent)), \

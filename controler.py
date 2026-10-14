@@ -828,6 +828,11 @@ def _save_project_config_updates(data_folder: str | Path, updates: dict[str, obj
     }
 
 
+def invalidate_project_config(folder: str | Path) -> None:
+    """Callback for runtimes that save shared project settings outside this module."""
+    _PROJECT_CONFIG_CACHE.pop(str(Path(folder).expanduser().resolve()), None)
+
+
 def _stem_triplet_exists(data_folder: str | Path, stem: str) -> bool:
     text = str(stem or "").strip()
     if text == "":
@@ -1378,6 +1383,7 @@ def loading_menu(state: SessionState) -> None:
         auto_clean_full,
         save_current,
         startup_spectral_flow_import,
+        startup_cell_classifier,
     ]
     while True:
         io.flush_session_log()
@@ -1464,6 +1470,7 @@ def startup_prepare_data(state: SessionState) -> None:
         "format tabular data (formerly import and clean data)",
         "high-plex feature reduction (RNA path)",
         "Spectral deconvolution (Spectral flow path)",
+        "CNN cell classification",
     ]
     descriptions = [
         "Register raw or per-round image stacks into a registered image set for downstream extraction.",
@@ -1472,6 +1479,7 @@ def startup_prepare_data(state: SessionState) -> None:
         "Build and clean a tabular dataset from raw input tables using the legacy import-and-clean path.",
         "Run the RNA / high-plex reduction path.",
         "Run the spectral flow import and deconvolution path.",
+        "Run the central classifier with project paths and an explicit experiment mode.",
     ]
     while True:
         idx = menu_index("Prepare Data", options, option_descriptions=descriptions)
@@ -1521,12 +1529,14 @@ def startup_cell_segmentation(state: SessionState) -> None:
         "Mesmer segmentation",
         "segmentation model training (standalone)",
         "Cellpose segmentation (stub)",
+        "custom CNN segmentation",
     ]
     descriptions = [
         "Run the current StarDist wrapper on one folder containing a DAPI/nuclear image.",
         "Run the existing Mesmer DAS path.",
         "Print the standalone training script and model-folder locations.",
         "Placeholder for a future Cellpose runtime.",
+        "Predict one ROI using an existing custom CNN checkpoint.",
     ]
     idx = menu_index("Cell Segmentation", options, option_descriptions=descriptions)
     if idx is None:
@@ -1539,6 +1549,29 @@ def startup_cell_segmentation(state: SessionState) -> None:
         importlib.import_module("segmentation_bridge").print_training_standalone_note()
     elif idx == 3:
         io.iprint("Cellpose segmentation is not wired yet.")
+    elif idx == 4:
+        output = importlib.import_module('segmentation_bridge').run_custom_interactive(
+            project_root=state.data_folder, default_output=state.build_folder / 'segmentation_custom',
+            input_fn=io.iget, print_fn=io.iprint, config_changed=invalidate_project_config)
+        if output is not None:
+            _adopt_project_context(state, data_folder=state.data_folder, build_folder=state.build_folder,
+                figure_folder=state.figure_folder, segmentation_root=Path(output))
+
+
+def startup_cell_classifier(state: SessionState) -> None:
+    """Use the standalone launcher; prompts and saves use the active DAS session."""
+    modes = ['predict', 'prepare', 'train_test', 'tune_test']
+    selected = menu_index('Classifier mode', modes)
+    if selected is None:
+        return
+    project = importlib.import_module('CLASSIFIER.run_project')
+    datasets = list(project.DATASETS)
+    dataset = menu_index('Classifier dataset adapter', datasets)
+    if dataset is None:
+        return
+    project.main(modes[selected], datasets[dataset], project_root=state.data_folder,
+        interactive=True, config_changed=invalidate_project_config,
+        input_fn=io.iget, print_fn=io.iprint)
 
 
 def _default_stardist_input_folder(state: SessionState) -> Path:
@@ -1571,6 +1604,7 @@ def _run_stardist_segmentation(state: SessionState) -> None:
             project_root=state.data_folder,
             input_fn=io.iget,
             print_fn=io.iprint,
+            config_changed=invalidate_project_config,
         )
     finally:
         builtins.input = old_input

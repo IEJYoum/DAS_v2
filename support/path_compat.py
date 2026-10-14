@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 
 
 POSIX_MOUNT = "/mnt/rdscoussens"
@@ -45,4 +46,22 @@ def is_foreign_path_text(path_like: object, *, os_name: str | None = None) -> bo
         return bool(re.match(r"^[A-Za-z]:/", slash_path)) or (
             slash_path.startswith("//") and not slash_path.startswith("//mnt/")
         )
-    return slash_path.startswith("/mnt/") or slash_path.startswith("/home/")
+    return text.startswith('/') and not text.startswith('//')
+
+
+def resolve_native_path(path_like, *, base_dir=None, must_exist=False, kind=None) -> Path:
+    """Resolve a native path with an explicit anchor; never invent a foreign mount."""
+    text = native_path_text(path_like)
+    if not text or is_foreign_path_text(text):
+        raise ValueError(f'Empty or foreign path for this operating system: {path_like!r}')
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = (resolve_native_path(base_dir) if base_dir is not None else Path.cwd()) / path
+    path = path.resolve()
+    if must_exist and not path.exists():
+        raise FileNotFoundError(path)
+    if path.exists() and kind == 'file' and not path.is_file():
+        raise ValueError(f'Expected a file: {path}')
+    if path.exists() and kind == 'directory' and not path.is_dir():
+        raise ValueError(f'Expected a directory: {path}')
+    return path

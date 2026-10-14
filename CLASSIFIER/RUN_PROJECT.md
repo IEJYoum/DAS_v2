@@ -11,7 +11,13 @@ Set-Location C:\Users\youm\Desktop\src\DAS_v2
 The defaults **tune the frozen AH08 model on the larger BCC selection**, then test.
 No command-line arguments are needed. Set `MODE` to `prepare`, `predict`,
 `train_test` (fresh model), or `tune_test` (parent weights); set `DATASET` to
-`bcc`, `ah08`, or `manifest`. No real tuning run has been launched by the agent.
+`bcc`, `ah08`, or `manifest`.
+
+The launcher now supports DAS project defaults and routed setup through
+`PROJECT_ROOT` / `INTERACTIVE_SETUP`, or `--project` / `--interactive`.
+See [CNN DAS I/O guide](../_usage_guides/cnn_das_io_v0.md) for precedence,
+project keys, standalone examples and the DAS menu hooks. With no project set,
+the existing editable-path workflow still applies.
 
 ## What to edit
 
@@ -31,6 +37,9 @@ unique marker identity within the selected ROI directory.
 `split` per complete ROI. Adding recursive discovery does not automatically add
 every ROI to the experiment. Each ROI occurs exactly once, in train, val or test;
 all its tiles inherit that assignment. A repeated source mask is rejected.
+Full-coverage training adds centred windows for labelled cells that fit the tile
+size but straddle regular grid seams. Cells truly larger than a tile still fail
+with their dimensions; increase tile size rather than silently dropping labels.
 For BCC prepare/train/tune, `discover_for_training=True` overrides the small
 manual `scenes` list: discover all classified CSV ROIs, resolve their inputs, and
 save `source_inventory.csv` and `roi_splits.csv`. With 195 ROIs the allocation is
@@ -119,8 +128,11 @@ include full-coverage `windows` for train ROIs (see `prepare_real.sample_windows
 validation/test scenes stay complete. Labels use `cell_id,class`, matching positive
 mask IDs. The model and reporting code require no source-format changes.
 
-The old `run_bcc.py` and `run_real.py` are compatibility wrappers only; edit no
-paths there. `run.py` remains the engine/library and synthetic mechanics entry
+The old `run_bcc.py` and `run_real.py` are deprecated aliases which now forward to
+the central dataset/mode settings. They no longer force their original dataset or
+training mode. Edit no paths there. Startup prints the resolved dataset, mode,
+parent checkpoint and image root; `launch_context.json` records these along with
+the entry point and command arguments. `run.py` remains the engine/library and synthetic mechanics entry
 point. Older `run_real.py --preflight/--steps/--class-weighting` options are retired;
 use MODE='prepare' and edit `TRAIN_SETTINGS` centrally instead.
 

@@ -9,6 +9,7 @@ import torch
 
 from prototype_seg_v0 import NucleusSegNet
 import seg_v0 as seg
+print = seg.io.legacy_print
 
 
 def setup_torch():
@@ -355,12 +356,8 @@ def run_prototype(output_folder, dapi_array, mask_labeled, dapi_scale, engine_ti
     return {"lines": lines, "saved_paths": saved_paths}
 
 
-def main():
-    seg.run_all(
-        run_prototype=True,
-        run_stardist=seg.RUN_STARDIST_AFTER,
-        prototype_runner=run_prototype,
-    )
+def main(argv=None):
+    return seg.cli(argv, prototype_runner=run_prototype)
 
 
 if __name__ == "__main__":

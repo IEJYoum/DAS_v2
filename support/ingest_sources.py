@@ -6,6 +6,10 @@ import glob
 import os
 from pathlib import Path
 from typing import Literal
+try:
+    from .path_compat import native_path_text, is_foreign_path_text, resolve_native_path
+except ImportError:
+    from path_compat import native_path_text, is_foreign_path_text, resolve_native_path
 
 
 SOURCE_SPEC_SEPARATOR = "||"
@@ -35,12 +39,17 @@ def join_source_specs(specs: object) -> str:
     return SOURCE_SPEC_SEPARATOR.join(values)
 
 
-def expand_source_spec(spec: object, want: SourceKind = "either") -> list[Path]:
+def expand_source_spec(spec: object, want: SourceKind = "either", *, base_dir=None) -> list[Path]:
     """Expand one literal file, directory, or glob without domain assumptions."""
 
-    text = str(spec or "").strip().strip('"')
+    text = native_path_text(spec)
     if text == "":
         return []
+    if is_foreign_path_text(text):
+        raise ValueError(f'Foreign source specification for this operating system: {spec}')
+    text = os.path.expanduser(text)
+    if base_dir is not None and not Path(text).is_absolute():
+        text = str(resolve_native_path(base_dir) / text)
     candidates = [Path(value) for value in glob.glob(text, recursive=True)] if has_glob_magic(text) else [Path(text).expanduser()]
     unique: dict[str, Path] = {}
     for candidate in candidates:
@@ -58,6 +67,30 @@ def expand_source_spec(spec: object, want: SourceKind = "either") -> list[Path]:
             continue
         unique[os.path.normcase(str(resolved))] = resolved
     return sorted(unique.values(), key=lambda path: os.path.normcase(str(path)))
+
+
+def prompt_source_specs(default_spec, *, input_fn, print_fn=print, want='either', base_dir=None):
+    """Routed source collection; GUI semantics live in the shared prompt helpers."""
+    try:
+        from .shared_utils import checkChange, flexMenu
+    except ImportError:
+        from shared_utils import checkChange, flexMenu
+    def validated(text):
+        while True:
+            specs = split_source_specs(text)
+            try:
+                valid = specs and all(expand_source_spec(s, want, base_dir=base_dir) for s in specs)
+            except (ValueError, OSError) as exc:
+                print_fn(str(exc))
+                valid = False
+            if valid:
+                return specs
+            print_fn('No file or folder matched:', text)
+            text = input_fn('source path, folder, or glob: ')
+    specs = validated(checkChange(default_spec, 'source path, folder, or glob', input_fn=input_fn))
+    for extra in flexMenu('additional source path, folder, or glob', input_fn=input_fn):
+        specs.extend(validated(extra))
+    return specs
 
 
 def source_display_id(path: str | Path, anchor: str | Path | None = None) -> str:

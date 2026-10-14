@@ -22,7 +22,8 @@ def sample_windows(mask, labels, tile_px, count, rng, overlap=0):
     """count=None: full overlapping coverage; otherwise the small seeded sample.
 
     Keep windows with complete labelled cells. Full coverage includes far image
-    edges and checks that every supplied label can supervise at least one tile.
+    edges and adds centred rescue windows for cells straddling grid seams.
+    Every supplied label must supervise at least one complete-cell tile.
     """
     # A cell supervises a tile only if all its original mask pixels fit there.
     # Artifact retention makes this a coverage sample, not population sampling.
@@ -44,6 +45,30 @@ def sample_windows(mask, labels, tile_px, count, rng, overlap=0):
                 has_artifact.append(bool(complete[artifacts].any()))
                 covered.update(ids[complete[ids]].tolist())
     if count is None:
+        missing = set(ids) - covered
+        existing = {tuple(window) for window in candidates}
+        for cell_id in sorted(missing):
+            if cell_id in covered:
+                continue  # another rescue window may also cover this cell
+            yy, xx = np.where(mask == cell_id)
+            if not len(yy):
+                raise ValueError(f'Labelled cell {int(cell_id)} is absent from mask')
+            y0, y1, x0, x1 = int(yy.min()), int(yy.max())+1, int(xx.min()), int(xx.max())+1
+            if y1-y0 > tile_px or x1-x0 > tile_px:
+                raise ValueError(f'Labelled cell {int(cell_id)} spans {y1-y0} x {x1-x0} pixels, '
+                                 f'larger than training tile {tile_px}; increase tile_px. '
+                                 'Increasing overlap cannot fit an oversized cell.')
+            y = min(max((y0+y1-tile_px)//2, 0), mask.shape[0]-tile_px)
+            x = min(max((x0+x1-tile_px)//2, 0), mask.shape[1]-tile_px)
+            window = (y, x, tile_px, tile_px)
+            counts = np.bincount(mask[y:y+tile_px, x:x+tile_px].ravel(), minlength=len(full))
+            complete = (counts > 0) & (counts == full)
+            if not complete[cell_id]:
+                raise ValueError(f'Could not construct a complete tile for cell {int(cell_id)}')
+            if window not in existing:
+                candidates.append(list(window))
+                existing.add(window)
+            covered.update(ids[complete[ids]].tolist())
         missing = set(ids) - covered
         if missing:
             raise ValueError(f"{len(missing)} labelled cells never fit wholly in a training tile; "

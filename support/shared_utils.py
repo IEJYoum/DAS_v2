@@ -122,6 +122,16 @@ def onlyPrimaries(
 # User-interaction utilities
 # ---------------------------
 
+def flexMenu(title="String to include in list", *, input_fn=input):
+    """Ordered text entries until blank; shared implementation for legacy/UI callers."""
+    values = []
+    while True:
+        value = input_fn(title + " (send blank when done): ")
+        if value == '':
+            return values
+        values.append(value)
+
+
 def checkChange(
     current_value: str,
     label: str = "value",

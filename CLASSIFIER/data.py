@@ -6,12 +6,14 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 import tifffile
+from support.path_compat import resolve_native_path
+from support.image_sources import ChannelSource, read_channel
 
 
 def read_plane(path):
-    path = Path(path)
+    path = resolve_native_path(path, must_exist=True, kind='file')
     if path.suffix.lower() in {".tif", ".tiff"}:
-        return tifffile.imread(path)
+        return read_channel(ChannelSource(path=str(path)))
     with Image.open(path) as image:
         return np.array(image)
 

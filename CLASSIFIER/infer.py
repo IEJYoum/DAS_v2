@@ -114,8 +114,8 @@ def label_table(scenes):
 
 def load_checkpoint(path, device="cpu"):
     # Checkpoints created here contain only tensors and plain dict/list/scalar config.
-    path = Path(path)
-    path = ROOT / path if not path.is_absolute() else path
+    from support.path_compat import resolve_native_path
+    path = resolve_native_path(path, base_dir=ROOT, must_exist=True, kind='file')
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     cfg = checkpoint["config"]
     cfg["device"] = device

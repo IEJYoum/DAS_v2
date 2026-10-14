@@ -17,7 +17,8 @@ def initialize_model(cfg):
     """Fresh model or explicit parent weights; never restore optimizer state."""
     model = build_model(cfg['model']).to(cfg['device'])
     if cfg.get('initial_checkpoint'):
-        path = Path(cfg['initial_checkpoint']).resolve()
+        from support.path_compat import resolve_native_path
+        path = resolve_native_path(cfg['initial_checkpoint'], must_exist=True, kind='file')
         parent = torch.load(path, map_location=cfg['device'], weights_only=True)
         old = parent['config']
         if (old['model'] != cfg['model'] or old['class_names'] != cfg['class_names']

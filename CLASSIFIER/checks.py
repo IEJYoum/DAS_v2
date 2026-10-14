@@ -16,6 +16,8 @@ from CLASSIFIER import data, infer, prepare_real, report, synth
 from CLASSIFIER.config import CLASS_NAMES, CONFIG
 from CLASSIFIER.model import build_model
 from CLASSIFIER.train import cell_weighted_loss, training_class_weights
+from support import io_adapter as das_io
+print = das_io.legacy_print
 
 
 def main():
@@ -353,7 +355,7 @@ def check_launcher():
         assert "Prepared 3 scenes" in (base / "preparation" / "run_log.txt").read_text()
         assert "AttributeError" not in (base / "preparation" / "debug_summary.txt").read_text()
 
-        def fake_execution(settings, out):
+        def fake_execution(settings, out, **kwargs):
             (out / "timings.json").write_text(json.dumps({"total_seconds": 0}))
             return out
 

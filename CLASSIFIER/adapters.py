@@ -10,6 +10,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import tifffile
+from support.ingest_sources import expand_source_spec
+from support.path_compat import resolve_native_path
+from support import io_adapter as io
 
 from CLASSIFIER import data, prepare_classified, prepare_real
 
@@ -26,7 +29,8 @@ BCC_MAPPING.update({'PanCK+': 'EPI', 'Other Cells': 'UNCLASSIFIED',
 
 def one_match(root, pattern, spec):
     """Patterns are relative to roots; ** enables recursion; ambiguity is an error."""
-    matches = sorted(p.resolve() for p in Path(root).glob(pattern.format(**spec)) if p.is_file())
+    root = resolve_native_path(root, must_exist=True, kind='directory')
+    matches = expand_source_spec(str(root / pattern.format(**spec)), want='files')
     if len(matches) != 1:
         raise ValueError(f"Expected one file under {root} matching {pattern.format(**spec)}; found {len(matches)}")
     return matches[0]
@@ -132,9 +136,10 @@ def discover_bcc(settings, output_dir, seed=7, log=print):
     return selected
 
 
-def stage(settings, output_dir, target_um_per_px, training=False, tile_px=256, overlap=64):
+def stage(settings, output_dir, target_um_per_px, training=False, tile_px=256, overlap=64, print_fn=None):
+    print_fn = print_fn or io.iprint
     if settings['adapter'] == 'manifest':
-        manifest = Path(settings['manifest']).resolve()
+        manifest = resolve_native_path(settings['manifest'], must_exist=True, kind='file')
         data.read_manifest(manifest)
         return manifest
     if settings['adapter'] not in {'bcc', 'ah08'}:
@@ -146,7 +151,7 @@ def stage(settings, output_dir, target_um_per_px, training=False, tile_px=256, o
     folder.mkdir(parents=True, exist_ok=False)
     rows, sources = [], set()
     for spec in specs:
-        print(f"Stage {spec['split']} ROI: {spec['scene_id']}", flush=True)
+        print_fn(f"Stage {spec['split']} ROI: {spec['scene_id']}")
         if Path(spec['scene_id']).name != spec['scene_id'] or spec['scene_id'] in {'.', '..'}:
             raise ValueError('scene_id must be a plain directory name')
         markers, mask = resolve_sources(settings, spec)

@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 
 from CLASSIFIER import data, infer, report
+from support import io_adapter as io
+print = io.legacy_print
 
 
 def close_scene(scene):

@@ -1527,12 +1527,8 @@ def fillNA(df,obs,dfxy):
 
 def flexMenu(title="String to include in list"):
     """Collect a variable-length list of strings from user input."""
-    lis = []
-    while True:
-        ch=logInput(title+" (send blank when done): ")
-        if ch == "":
-            return(lis)
-        lis.append(ch)
+    from shared_utils import flexMenu as collect_list
+    return collect_list(title, input_fn=logInput)
 
 
 
