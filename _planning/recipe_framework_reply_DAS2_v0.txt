@@ -1,0 +1,368 @@
+﻿Recipe Framework Reply for DAS v2 v0
+=====================================
+
+Verdict
+-------
+
+The goal is strong: durable, inspectable, replayable workflows would be useful
+for DAS and especially for DS/agent use.  The v2.1 *target* architecture is
+reasonable, but its proposed first implementation is too broad and too invasive
+for the current codebase.  In particular, a whole-module named-answer port of
+IFprocessing7 and IFvisualization2 would perturb exactly the fragile legacy
+control flow that the plan intends to preserve.
+
+Recommendation: retain the JSON recipe envelope, stable action identifiers,
+headless runner, run records, and eventual named-answer actions.  Change the
+first deployment to an adapter-based compatibility layer that calls the existing
+execution paths.  Port individual actions only after they have a parity test.
+This gives immediate recipe utility without rewriting two large legacy modules.
+
+What DAS Already Has
+--------------------
+
+DAS already has a useful command/replay mechanism:
+
+- `analysis/IFprocessing7.py` collects action selections as positional `com`
+  rows and later replays them.
+- `visualization/IFvisualization2.py` does the same through its `commands=`
+  argument, while retaining its own per-command error handling, plotting,
+  progress, category handling, and output behavior.
+- `controler.py` supplies the normal session, project, menu, session-log, GUI,
+  CLI, and DS context.
+- `legacy_ifa5_context` deliberately patches legacy `input()` through
+  `support/io_adapter.py::iget`.  This is how legacy prompts reach the HTML GUI,
+  session log, and DS transport today.
+
+The existing command formats are ugly but operational interfaces, not merely
+internal details.  `IFvisualization2.main(..., commands=...)` is particularly
+valuable as a narrow compatibility seam.  It should be used before replacing it.
+
+Main Risks In v2.1
+------------------
+
+1. Whole-module ports are not mechanically safe.
+
+`IFvisualization2.py` is roughly 5,000 lines and has action-specific prompt
+loops, global state (`SPATH`, `CATS`, `DONE`, `BATCH`), nested pickers, direct
+`input()` calls, category loops, and per-command exception handling.  Its actions
+are not all equivalent to the z-score example.  `IFprocessing7.py` also has
+special stateful collection: its `main()` immediately adds `obs["all data"]`,
+and clustering constructs a temporary feature subset and changes
+`CLUSTER_PREFIX` while collecting answers.
+
+A rule that every action can move all prompts above `if collecting(): return`
+without state change is therefore false today.  Forcing it module-wide creates a
+large behavioral migration, not a small serialization change.
+
+2. Full-tree preflight cannot safely be implemented as "replay everything with
+`collecting()`".
+
+The proposed preflight assumes every action is pure while collecting.  Several
+existing paths are not.  Some prompts also depend on loaded data, selected
+categories, or previous workflow state.  A purported no-change preflight that
+executes legacy collection code risks hidden dataframe/global/config mutation;
+copying every large triplet merely to make this safer is too expensive.
+
+3. A new `ask()` route can bypass the current transport bridge.
+
+Direct legacy `input()` inside `legacy_ifa5_context` is already patched to
+`io.iget`.  A separate recipe `ask()` that prompts independently can lose GUI
+button metadata, DS behavior, selected-path bookkeeping, and session logging.
+There must be one prompt transport, not a recipe prompt path beside a GUI prompt
+path.
+
+4. Renaming/removing `com`, `lastrun`, and saved command machinery immediately
+would break callers and erase working recovery behavior.
+
+`IFP`/`IFV` replay is invoked both through controller bridges and legacy paths.
+`IFV` already accepts `commands`; other paths call module mains directly.  The
+caller inventory must be complete before a format removal.  The removal criterion
+in section 10 is correct in spirit but must occur after, not during, the first
+recipe pass.
+
+5. Source inspection is insufficient as an agent interface.
+
+Reading `ask("name", ..., "prompt")` from source cannot reliably describe
+conditional prompts, looping pickers, function callbacks (`getCats`, `obMenu`),
+or answers that exist only after inspecting the data.  It also makes the recipe
+contract depend on AST/source layout.  A small explicit action registry is more
+reliable and less magical.
+
+6. "Headless" must not silently inherit interactive defaults.
+
+First-run pixel-size handling, project confirmation, folder defaults,
+`checkChange`, file navigation, existing project configuration, and save
+confirmation can all prompt.  A headless recipe must resolve its project once,
+use a declared data input, and fail clearly if a required value is absent.  It
+must not write machine/project defaults, launch browsers, or fall back to a
+stale project context merely because a prompt was not answered.
+
+7. Recipe runs have irreversible filesystem side effects.
+
+The spine can restore an in-memory baseline after Ctrl-C, but it cannot undo
+figures, CSVs, state files, logs, or partial viewer assets.  A run record must
+make partial completion explicit; no recipe design should imply transactional
+rollback where none exists.
+
+Recommended First Architecture
+------------------------------
+
+Do not make `ask()`/`collecting()` a cross-cutting replacement in Pass 1.  Add a
+small recipe envelope and an explicit action registry at the controller boundary.
+
+Use an action specification only for the actions actually exposed to recipes:
+
+    ActionSpec(
+        id="ifp.zscore",
+        parent="ifp.scaling",
+        label="zscore across samples (cells)",
+        description="Z-score marker columns.",
+        adapter=run_ifp_zscore,
+        required_with=("overwrite",),
+    )
+
+This is not a new universal menu system.  The existing numbered `op`/`fn` lists
+remain the GUI/CLI menu implementation.  The registry maps a stable recipe id to
+a narrow adapter that translates named recipe values into the exact existing
+command-list shape and calls the existing execution route.
+
+For example:
+
+- a recipe root adapter loads a prepared triplet through the existing controller
+  load path;
+- an IFProcessing adapter maps named values into the existing selected action's
+  positional `com` row, then calls the current IFProcessing replay machinery;
+- an IFVisualization adapter maps named values into the existing command row and
+  calls `IFvisualization2.main(..., commands=...)` so the current category,
+  error, progress, and plot logic remains authoritative.
+
+The translation must be explicit, small, and action-specific.  It is testable
+against a command list captured from the existing GUI.  It is safer than a
+whole-module conversion because it does not alter how ordinary interactive menu
+runs collect or replay commands.
+
+A temporary compatibility action is useful and cheap:
+
+    {"do": "ifv.legacy_commands", "with": {"commands": [...]}}
+
+(or an equivalent versioned `legacy_commands` field).  It permits saving/replaying
+known-good legacy command payloads immediately, while semantic named actions are
+added only where they are proven.  This is a compatibility bridge, not a second
+runtime: it still calls the same current execution functions.
+
+Revised Recipe Contract
+-----------------------
+
+Keep the proposed outer shape, but add explicit provenance and compatibility
+rules:
+
+    {
+      "recipe_schema_version": 1,
+      "name": "...",
+      "steps": [{"do": "...", "action_version": 1, "with": {}, "steps": []}]
+    }
+
+Required refinements:
+
+- `do` is stable, but semantic changes require an action version, migration, or
+  a clear incompatibility error.  Never silently reinterpret an old recipe.
+- Recipe `with` values should be named for new semantic adapters.  Legacy
+  compatibility rows may keep a clearly-labelled positional payload until their
+  action is ported.
+- Global workflow context is distinct from an action answer.  Repeat column,
+  target groups, categories, and output root should be passed to the relevant
+  workflow adapter deliberately, not inferred from arbitrary nested rows.
+- Column selectors should be recorded as column names.  Replay must reject a
+  missing or duplicate name rather than silently choosing a different column.
+- Preserve both the raw value and resolved behavior where blank has special
+  meaning.  For example, a blank may mean "reuse saved categories" rather than
+  merely "use a default".
+- A run record should include recipe digest, schema/action versions, DAS git
+  commit when available, project root, resolved input triplet/stem, output root,
+  start/end time, each completed/failed/interrupted step, and output paths.
+
+Preflight Should Be Split
+-------------------------
+
+Replace the proposed universal collecting replay with two levels.
+
+1. Structural `--check` (safe, required in Pass 1)
+
+- Validate JSON/schema/version.
+- Validate stable action ids and parent/child placement against the registry.
+- Validate allowed/required `with` keys for the exposed adapters.
+- Validate project argument/path existence without changing project config.
+- Do not load a triplet, invoke a legacy menu, write files, or mutate state.
+
+2. Optional action-specific readiness checks (added only with an adapter)
+
+After the recipe's load step has supplied a real triplet, an adapter may validate
+required columns, output writability, or existing paths.  It must be explicitly
+implemented and tested for that action.  A readiness check is not allowed to
+pretend that it can prove all downstream computation is side-effect-free.
+
+This yields honest error messages and avoids cloning or mutating large datasets
+just to satisfy a global preflight promise.
+
+Prompt and Transport Rules
+--------------------------
+
+- Existing interactive paths continue to use the current input mechanism:
+  `io.iget` directly in controller code and patched `builtins.input` in legacy
+  code.
+- Recipe adapters should receive all recipe values directly.  If an adapter is
+  deliberately interactive, its fallback prompt must call `io.iget` (or legacy
+  `input()` only while inside `legacy_ifa5_context`), never raw terminal input.
+- Headless mode must make missing values fail at the adapter boundary with the
+  action id and field name.  It should not rely on a global `ask()` state.
+- A later port may introduce `ask()` inside an individual action, but it must be
+  implemented over this same prompt transport and accompanied by GUI, CLI, DS,
+  and headless tests.
+
+Revised Work Plan
+-----------------
+
+Pass 0: Inventory and fixtures
+
+- Inventory every live caller of `ifp.main`, `ifv.main`, `IFV commands=`,
+  `com`, `subcom`, `lastrun`, `saveCommands`, and `s_to_l/l_to_s`.
+- Capture a few known-good GUI command payloads for a tiny real/toy project.
+- Select a narrow proof workflow: load prepared data -> one IFProcessing action
+  (z-score or log2) -> one IFVisualization action (boxplot is suitable only if
+  its current command shape is captured first).
+- Do not delete or rename any legacy save/replay files in this pass.
+
+Pass 1: Safe recipe envelope and runner
+
+- Add schema load/save, stable explicit action registry, structural checker,
+  lookup, run record writer, and `run_recipe.py`.
+- `--actions`/`--action` read registry metadata, not function source.
+- Add a controller state constructor for a supplied project, with no fallback to
+  interactive project discovery.
+- Add no new menu entry yet if that would complicate a first test; CLI runner is
+  enough to prove the path.
+- Test malformed JSON, unknown action, wrong parent, missing required field,
+  unread/unknown field, and a failure before any output is written.
+
+Pass 2: Root load adapter plus one action per module
+
+- Implement `home.load_prepared_data` as a direct controller adapter.
+- Add one IFProcessing adapter and one IFVisualization adapter that translate to
+  the existing command/execution machinery.
+- Verify GUI-generated legacy command payload and equivalent recipe payload give
+  the same dataframe result and expected figure metadata/path count on a small
+  project.
+- Keep normal interactive menus and their "repeat last run" / "save commands"
+  behavior untouched.
+
+Pass 3: Interactive recording, conservatively
+
+- Add root-level recording only for recipe-aware actions.
+- Initially offer an explicit "save current compatible commands as recipe" path;
+  do not claim all legacy menu interactions become named recordings.
+- Add the controller "recipes" menu only after CLI execution, project lookup,
+  and run records are proven.
+
+Pass 4: Incremental semantic ports
+
+- Add adapters/action specs in value order, one action family at a time.
+- Port difficult dynamic actions such as clustering, neighborhood, thresholding,
+  and viewer behavior only with their own fixtures and parity tests.
+- Only after broad parity and a full caller inventory should legacy `lastrun`,
+  positional `com`, and serialization helpers be considered for removal.
+
+This sequence has immediate utility for reproducible analysis, avoids a quiet
+whole-module rewrite window, and gives a clear point to stop if the first proof
+reveals hidden contracts.
+
+Answers to Plan Questions
+-------------------------
+
+Q1. No. Prompts are not confined to simple collect branches.  IFV has direct
+execution-path prompts and dynamic picker behavior; module-level/category logic
+also resolves context later.  Headless operation must be limited to adapters that
+supply all needed values, not assumed across the whole modules.
+
+Q2. Yes.  IFProcessing `main()` mutates `obs` by adding `all data`; clustering
+constructs a feature subset and changes `CLUSTER_PREFIX` while collecting.
+IFVisualization initializes/changes globals including `SPATH`, `CATS`, `DONE`,
+and `BATCH`; its setup and copying/autoclean flows are not a general pure
+collection phase.  Do not impose a global no-mutation collection rule.
+
+Q3. Yes.  Controller bridge calls and legacy IFA routes are live; IFV's
+`commands=` route is especially important.  Inventory all callers before any
+format removal.  Treat the positional command format as an external compatibility
+contract until then.
+
+Q4. Use the existing prompt transport.  In legacy context, patched `input()`
+already reaches `io.iget`, which supports logging and GUI/DS behavior.  A recipe
+implementation must not bypass it with raw `input()` or a parallel event path.
+
+Q5. Raw blank can be semantically meaningful, not merely absent.  In particular,
+category/repeat behavior can reuse a saved value.  Record both the user-facing
+answer semantics and resolved value where an adapter supports such a prompt.
+
+Q6. Pixel size belongs in machine-level DAS config.  A headless run should take a
+project explicitly, resolve it once, and fail on missing required data/output
+paths.  It must not trigger project confirmation, navigator, fallback-project,
+or first-run configuration prompts.
+
+Q7. Recipe storage should use one explicitly resolved native project root, passed
+by the caller/runner and retained in the run record.  Do not use parent config
+inheritance as implicit recipe location.  A loaded subset project should normally
+have recipes under that selected project directory unless the user explicitly
+selects its parent project.
+
+Q8. Keep records of completed steps.  Mark the active step `interrupted` with
+elapsed time/error context, preserve earlier completed entries, and make no
+rollback promise for filesystem artifacts.  An interrupted interactive action is
+not appended to a newly recorded reusable command sequence.
+
+Q9. No.  A whole IFV/IFP port is not mechanical.  It is an action-by-action
+behavioral migration with different prompt, state, output, and error semantics.
+Adapters provide a lower-risk first deployment.
+
+Answers to Reservations
+-----------------------
+
+R1. Correct concern.  Avoid a global hidden current-step context in the first
+pass.  Explicit adapters and their arguments are easier to audit and work with
+nested legacy menus.
+
+R2. Correct concern.  Replace universal no-mutation preflight with structural
+validation plus opt-in readiness checks.
+
+R3. Correct concern.  Preserve current string semantics initially.  Normalize
+only inside a proven shared picker/adapter, never silently in a generic recipe
+layer.
+
+R4. Inline expansion is acceptable later, but provenance should be retained in
+run records (`origin_recipe`, source digest, and step index).  It is not needed
+for the first CLI proof.
+
+R5. Correct concern.  Do not require a whole IFV quiet window.  Ship narrow
+adapters independently; leave active legacy module work alone.
+
+Explicit Non-Goals for the First Pass
+-------------------------------------
+
+- No wholesale rewrite of `IFprocessing7.py` or `IFvisualization2.py`.
+- No replacement of legacy numbered GUI menus.
+- No deletion of `com`, `lastrun`, `saveCommands`, or legacy serialization.
+- No AST/source scraping of prompt names.
+- No universal mutation-free replay preflight.
+- No automatic agent execution of every DAS action.
+- No change to viewer, feature extraction, registration, segmentation, or CNN
+  behavior merely to make it recipe-shaped.
+
+Success Criterion
+-----------------
+
+The first release is successful if a user can run a small, named JSON recipe
+through the same controller/session context as GUI/CLI/DS, obtain the same
+result as an existing known-good workflow, inspect a durable run record, and
+receive a clear error before execution for malformed/missing recipe fields.
+
+It does not need to solve every prompt in IFV/IFP.  Reaching that point with a
+few narrow adapters is both more useful and substantially safer than perturbing
+the entire legacy command spine first.

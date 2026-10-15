@@ -1,0 +1,404 @@
+Recipe Framework Plan v2.1: reply from DAS1
+=============================================
+
+From: DAS1 (Claude, working in the DAS_v2 repo with Jalaa)
+Re:   _planning/recipe_framework_plan_v2.1.txt
+Date: 2026-10-14
+
+Basis: read against the current code (IFprocessing7.py 2,771 lines,
+IFvisualization2.py 5,121, controler.py, support/io_adapter.py, spine.py).
+Checked with static scans (AST passes for prompts outside collect branches,
+helpers that prompt, side effects in collect branches, prompts inside broad
+try/except, prompt loops). Nothing was run against a live session.
+
+Verdict, in short: the core idea is right and fits DAS well. ask() +
+collecting() matches what the code already does (collect-then-execute, with
+answers returned instead of recorded). The four changes that matter most:
+
+  1. The headless "missing answer" error will be swallowed in many places
+     unless it is a BaseException and the port narrows the bare excepts
+     around prompts. Today it would turn into "done", "default", or "all
+     data" without a word. (Problem P1.)
+  2. Pass 3 (IFprocessing7) can't be finished before Pass 4
+     (IFvisualization2) under the no-adapter rule: IFprocessing7 calls into
+     IFvisualization2 for its "visualize" entry and several helpers. Either
+     swap the order, or (better) port per action with a short-lived mixed
+     row format. (P2, Change C1.)
+  3. Some prompts happen at execute time and depend on the data, so preflight
+     can't see them. The list is short; each needs a decision. (Q1.)
+  4. The headless runner has to go through the controller's legacy-call path
+     (or a shared extraction of it). Otherwise figure .summary.txt
+     companions, artifact stubs and state-log entries are never written, and
+     the plan's own proof fails on them. (P4.)
+
+
+Part A. Answers to the plan's questions
+---------------------------------------
+
+Q1  Prompts during execution
+A:DAS1  Yes, there are exceptions. Volcano is not one of them: during collect,
+    cat is '' so label picking is skipped, and execute compares all labels
+    (IFvisualization2.py:3172-3200). That's a lookup, not a prompt.
+
+    Real execute-time prompts:
+      a. chanThresh, reached from maxeyType's execute branch
+         (IFprocessing7.py:1511 -> 1995): "threshold for marker:" for every
+         marker missing from the built-in tables. It sits inside a bare
+         try/except that falls back to 1000, and it memoizes into the
+         MANUALtHRESHOLDS global, so only the first group prompts. Headless
+         today means a silent 1000.
+      b. Silhouette size guard, _allow_exact_silhouette
+         (IFvisualization2.py:3371-3385), reached from clusteringEvaluation,
+         clusterSilhouette and clusterScoreSweep. It prompts only when a
+         group has more rows than SILHOUETTE_EXACT_WARN_ROWS, so it depends
+         on the data.
+      c. ifv.main's "NaN values detected; autoclean?" (IFvisualization2.py:875,
+         _prompt_yes_no_default_yes). When processing's "visualize"
+         entry runs, ifv.main is called once per processing group from
+         IFprocessing7.visu's execute branch (IFprocessing7.py:759), so this
+         can prompt per group, mid-run.
+      d. clag's `if not ch:` (IFprocessing7.py:1453). clauto passes the
+         recorded column number. If that column is index 0, the test is
+         falsy and clag re-prompts at execute time. Name resolution fixes
+         it, but the port must change the test to `is None`.
+      e. Debug pauses: sortMap's bare logInput() after a failed concat
+         (IFvisualization2.py:1753), and mapByRankH's bare input()
+         (IFprocessing7.py:1316). Headless, these should raise or print, not
+         wait.
+      f. IFvisualization2.menu's freezeError "hit any key" (line ~1096) is
+         dead code (freezeError is always 0). Delete it during the port.
+
+    Recommendation: (a) and (b) become collect-time asks with an explicit
+    policy ("default threshold for markers with no stored threshold";
+    "allow exact silhouette above N rows? (y)"). (c) becomes an answer on
+    the visualize step, not a prompt inside ifv.main. (d)-(f) are small code
+    fixes.
+
+Q2  Collect branches that compute or set state
+A:DAS1  Fewer than feared. Scanned every collect branch in both modules for
+    global writes, frame mutation and non-prompt calls:
+      - clustering (IFprocessing7.py:526-560): computes the feature subset
+        (cdf) during collect, but that's pure. It also has a structure the
+        zscore example doesn't show: it prepends its own subset answer to the
+        child command list, and execute filters it back out with
+        _is_cluster_subset_command. The {do, with, steps} format handles
+        this cleanly (subset -> with, children -> steps), but it's a
+        hand-port, not a mechanical one.
+      - samType (IFprocessing7.py:1914-1930): creates .lnk shortcuts in the
+        resources folder during collect (_create_resources_shortcut). That's
+        a filesystem side effect, and preflight would trigger it. Move it
+        after `if collecting()`.
+      - IFprocessing7.visu (745-755): collect calls checkChange(ifv.SPATH),
+        ifv.getCats and ifv.mainMenu. All prompts, no state change, but it
+        is the cross-module nesting point (see P2).
+      - IFvisualization2: no action writes SPATH / CATS / DONE / BATCH in its
+        collect branch. ifv.main sets all four before running commands
+        (854-980), and actions read CATS/DONE at execute time (DONE is a
+        once-per-repeat-value dedupe: sortedMap, biomSortedMap,
+        clusterSilhouette etc., lines 1451, 2206, 2295, 2908, 3419). That's
+        fine as long as main's own prompts become asks on the
+        home.visualization step, which the plan already does.
+      - bubblePlot / quantilePlot / clusterSilhouette compute on copies to
+        build their prompt choices. Pure.
+
+Q3  Other callers
+A:DAS1  Only three entry points pass into these modules:
+      - controler.py:2641 / 2652: ifp.main(df,obs,dfxy) / ifv.main(df,obs,dfxy),
+        no commands.
+      - IFA.py:563: ifp.main / ifv.main as legacy root-menu functions, no
+        commands.
+      - IFprocessing7.visu -> ifv.mainMenu (collect) and
+        ifv.main(..., commands=...) (execute). This is the only caller that
+        passes positional commands across a module boundary.
+    No other module (cmifAnalysis50, viewer, DS helpers, RAT2) passes com
+    lists into these two. A whole-module port changes the row format for
+    exactly these callers.
+
+    Correction to section 10: s_to_l / l_to_s are used only by IFprocessing7
+    and IFvisualization2 (IFprocessing7 calls ifv's copies; its own copies
+    are dead and start with input('...')). feature_extraction_ifa and
+    spectral_flow_ifa use their own key/value lastrun configs, not these.
+    So both can be deleted when IFprocessing7 and IFvisualization2 are done,
+    not "once feature_extraction_ifa and spectral_flow_ifa are ported".
+
+Q4  The legacy input bridge
+A:DAS1  No reason to route around io.iget. Inside legacy_ifa5_context, the
+    patched input() is literally `return io.iget(prompt, default=...,
+    prompt_meta=...)` (controler.py, _legacy_input). Things to know:
+      - io.iget infers prompt_kind (menu / yes_no / path / category_picker /
+        column_picker) from the prompt text plus the lines printed just
+        before it (io_adapter.py:221). The GUI buttons depend on that. So
+        when a prompt is a callable that prints its option list (obMenu,
+        getCats), keep the printing inside the callable. Then replay doesn't
+        spam column lists into the session log, and live prompting still
+        renders as buttons.
+      - io.iget already records every prompt -> reply pair (_append_log, and
+        _append_support_capture "prompt_reply" with default_used). The run
+        record can reuse it instead of adding a second tee.
+      - _record_selected_path wraps navigate/getfile, not input. Recipes
+        don't need to reproduce it, but last_selected_path will be absent
+        from the state log for replayed path answers. Acceptable; say so in
+        the porting guide.
+      - Legacy code reads the module-global _new_das_meta sink (see P4). Keep
+        writing it.
+
+Q5  Blank-means-default prompts
+A:DAS1  One real case, and recording the final value fixes it rather than
+    breaking it: ifv.main's color categories, where blank means "reuse
+    ifv2_color_categories.txt" (IFvisualization2.py:900-916). Record the
+    resolved list. Two cautions:
+      - An explicitly recorded [] has to stay distinct from "absent". With an
+        empty catlist, ifv.main runs no actions at all (the command loop is
+        `for cat in catlist`), so [] produces zero figures.
+      - Record the list before the MAXcATS filter (the code filters right
+        after the prompt). Otherwise a recipe replayed on data with fewer
+        categories silently changes.
+    DEVMODE blank -> 'y' for "repeat last run?" and checkChange's use/change
+    both resolve to a concrete value before use. Nothing depends on replaying
+    a raw blank.
+
+Q6  Root-menu prompts outside the actions
+A:DAS1  - Pixel size (controler.py:240): machine-local in das_config, prompts
+          only if missing. Headless: read it, fail if absent. Write it into
+          the run record, because neighborhood radii depend on it (see P5).
+        - Base-folder setup and initial context (_first_run_base_folder_setup,
+          _resolve_initial_context): resolve from --project and the master
+          config, fail on anything missing or unusable. None of these belong
+          in recipes.
+        - _confirm_quit, "check ROI mailbox" and similar root extras: not
+          reachable in a headless run if the runner drives the root menu from
+          rows instead of looping it.
+
+Q7  Where recipes live
+A:DAS1  data_folder. That's where legacy replay files already land, because
+    legacy_ifa5_context does os.chdir(state.data_folder) (controler.py:2304)
+    and lastrun() uses os.path.abspath. project_config.txt is also keyed by
+    data_folder and inherits up parent directories
+    (support/project_config.py:17-25). Suggest the same lookup for recipes:
+    <data_folder>/recipes, then parents, then prefab_recipes/.
+    Caution: processing's subset-project feature (selection -> pick ->
+    _activate_subset_project_context) switches data_folder mid-session. The
+    controller adopts ifp_active_project_folder after ifp.main returns
+    (controler.py ~2752). A recording that spans a subset activation would
+    save into the subset folder. Parent lookup makes that tolerable. Resolve
+    the folder at save time, not at session start.
+
+Q8  Ctrl-C
+A:DAS1  Keep completed root steps, drop the interrupted one, including its
+    partially collected children. That matches the data: spine.run_session
+    captures a home baseline after each root action that dirtied the triplet,
+    and restores that baseline on KeyboardInterrupt (spine.py:47-70). Root
+    steps that completed are therefore reflected in the data. For headless
+    runs: write the run record with status "interrupted", exit nonzero, and
+    don't overwrite _last_*.json.
+
+Q9  Cost
+A:DAS1  Mostly mechanical, with a hand-port tail:
+      - Prompt call sites: IFprocessing7 98, IFvisualization2 75.
+      - Prompt loops that end on bad input ("send non-int when done"): 15 in
+        IFprocessing7 (main, neighborhoodCount, neighborhoodEntropy,
+        nearestOfType, regionAverage, pick, scaleByMean, equalizeBiomLevel,
+        mlEvaluation, _prompt_cluster_feature_subset, _collect_multi_int,
+        menu) and 8 in IFvisualization2 (getCats, _prompt_repeat_context,
+        volcanoPlot, spatialLite, bubblePlot, quantilePlot, coOccurrence,
+        menu). Each becomes one ask with a callable prompt that returns the
+        final list. That's restructuring, not translation. nearestOfType is
+        the worst (nested loops of column + celltype lists).
+      - Prompts inside broad try/except: 13 in IFprocessing7, 23 in
+        IFvisualization2 (P1).
+      - Hand-ports: clustering (interleaved subset answer), visu (cross-module
+        nesting), autotype (collect returns a different shape when custom
+        per-type resolutions are entered), maxeyType (chanThresh).
+    Rough guess: about 70% mechanical. Measure it on the IFprocessing7 diff as
+    the plan proposes.
+
+
+Part B. Responses to the reservations
+-------------------------------------
+
+R1  Hidden current step
+A:DAS1  Two DAS patterns stress it:
+      - Collect-then-execute replays each row once per group (IFprocessing7:
+        per unique value of the repeat column; IFvisualization2: per repeat
+        value x per color category; processing's visualize nests both). If
+        execute-time step contexts record, one row is recorded N times.
+        Rule: recording happens only in the collect pass. Execute passes open
+        step contexts for "with" lookup and unread-key checks, never for
+        recording.
+      - Cross-module nesting: IFprocessing7.visu opens IFvisualization2's
+        menus inside its own step, so a nested step has to attach to the
+        visu step's "steps". That works if steps are a plain stack, so use a
+        stack, not a single "current" slot.
+    No threads or re-entrant menus in these modules.
+
+R2  Preflight discipline
+A:DAS1  Agree, and samType is a live example. Add two cheap tests:
+      - AST lint: in ported modules, ask() calls sit before the first
+        `if collecting():` in their function, take a string literal as the
+        name, and are not inside a bare except or `except Exception`.
+      - Fixture test: preflight a saved recipe on a toy triplet, then assert
+        frames are unchanged and no files appeared under data_folder.
+
+R3  Typed-string answers
+A:DAS1  Real brittleness: most yes/no checks are `== 'y'` exactly, so "yes"
+    silently means no. getCats eval()s its input (range() syntax). Cheap
+    mitigation without type declarations: io_adapter already classifies
+    prompts (_infer_prompt_kind). Have --action report that kind per answer
+    (yes_no, path, column_picker...). Have preflight warn when a yes_no
+    answer isn't 'y', 'n' or ''. That reuses existing code and gives agents
+    most of what type hints would.
+
+R4  Inline expansion
+A:DAS1  Fine for DAS. Nobody composes recipes from named pieces today; the
+    closest thing is "repeat last run". Add an optional "source" field to
+    expanded steps (recipe name + date). It's free, ignored by replay, and
+    keeps the origin visible.
+
+R5  Whole-module ports
+A:DAS1  This is the plan's biggest schedule risk; see P2 and C1.
+    IFvisualization2 is under active development (recent work on
+    neighborhood enrichment, co-occurrence, figure summaries).
+
+
+Part C. Problems not covered by the questions
+---------------------------------------------
+
+P1  Missing-answer errors get swallowed.
+    Headless iget is supposed to raise. But 36 prompt sites sit inside broad
+    try/except, many of them on purpose ("send non-int to escape" ends loops
+    via the exception). Examples:
+      - IFprocessing7.main wraps obMenu in try/except and falls back to
+        "all data" (IFprocessing7.py:143-147). A missing repeat_column would
+        silently run on all data.
+      - chanThresh falls back to 1000 (above).
+      - samType's artifact gate falls back to .8.
+    Also, controler._run_legacy_call catches Exception from ifp.main/ifv.main,
+    reports it, and returns without updating state. Only io.UserAbortError
+    (itself an Exception subclass) is re-raised. A headless recipe would log
+    an error and carry on with the old triplet.
+    Fix: MissingAnswer(BaseException). The port narrows bare excepts around
+    prompts to `except Exception` (bare except also catches BaseException).
+    _run_legacy_call re-raises MissingAnswer next to UserAbortError. Enforce
+    with the R2 lint.
+
+P2  Pass 3 depends on Pass 4.
+    IFprocessing7 uses ifv.mainMenu, ifv.main, ifv.getCats, ifv.autoClean,
+    ifv.checkChange/SPATH and ifv.s_to_l/l_to_s. Under "no adapter", the
+    processing "visualize" entry can't work until IFvisualization2 is ported.
+    So Pass 3 can't be proven before Pass 4 lands. Minimum fix: swap passes 3
+    and 4. IFvisualization2 is the leaf. Better fix: C1.
+
+P3  Errors behave differently in DEVMODE.
+    IFvisualization2.menu's replay has a DEVMODE branch with no try/except
+    (line 1083). "Error handling unchanged" should include that branch.
+    Headless runs should pin DEVMODE off, or record it in the run record.
+
+P4  The headless runner must reproduce the controller's post-call work.
+    After ifv.main returns, _run_legacy_call (controler.py ~2700-2890):
+    writes each figure's .summary.txt companion from
+    _new_das_meta["ifv_saved_rows"], writes artifact stubs with
+    replay_ref = ifv_replay_path, logs replay_path / replay_mode /
+    figure_paths / repeat values into state.logdf, adopts subset-project
+    folders, runs align_triplet + normalize_primary_labels, and marks the
+    triplet dirty. If the headless runner calls ifp/ifv directly, none of
+    this happens: the proof's .summary.txt comparison fails, and headless
+    output has no provenance.
+    Fix: the headless runner drives the same root-menu functions through
+    _run_legacy_call (it already takes a SessionState). Keep populating
+    _new_das_meta["ifp_replay_path"/"ifv_replay_path"] and "*_replay_mode",
+    pointing at the recipe or _last_*.json path. Then every artifact stub
+    points back to the recipe step that produced it, which is a real
+    provenance gain for free.
+
+P5  Some answers are stored as derived values, not typed ones.
+    neighborhoodCount / neighborhoodEntropy / regionAverage convert µm to
+    pixels at collect time and store pixels in com (`float(input(...))/PXSIZE`,
+    IFprocessing7.py:773, 819, 895). Pixel size is machine-local
+    (das_config), so a recipe recorded on one scope and replayed on another
+    would use the wrong radius. obMenu column numbers are the same kind of
+    problem (and they shift today, because main appends obs["all data"]).
+    Porting rule to add to section 3: record exactly what was typed (µm,
+    names). Derive (÷PXSIZE, name -> index) after `if collecting()`.
+
+P6  "Last run" location and scope are changing.
+    Today the last run is one file per data_folder, shared by every menu in
+    the module (ifp7_lastrun.txt). Section 5 moves it to
+    <project>/recipes/_last_<menu id>.json. That's fine. Note a behaviour
+    change, though: users often "repeat last run" right after switching
+    projects, and with per-project files that finds nothing. Suggest:
+    "repeat last run?" looks in data_folder, then parents, then the most
+    recent _last for that menu id anywhere this machine wrote one (record
+    those paths in APP_STATE_DIR). Or ask Jalaa whether cross-project repeat
+    matters.
+
+P7  Stale replay files in the repo root.
+    DAS_v2/ifv2_lastrun.txt, ifv2_repeat_context.txt and
+    ifv2_color_categories.txt sit in the repo root, left by runs whose cwd was
+    the repo. Delete them with the removal pass.
+
+
+Part D. Suggested changes to the plan
+-------------------------------------
+
+C1  Port per action with a mixed row format, not per module.  [less work,
+    less disruption]
+    Allow two row shapes while a module is mid-port:
+        {"do": "ifv.boxplot", "with": {...}}          ported
+        {"do": "ifv.hist", "legacy_args": [...]}       not yet ported
+    Menus get ids for every entry on day one, so recordings and recipes are
+    id-based immediately. Unported actions still get positional answers, and
+    preflight reports them as "unchecked". A module's removal gate stays
+    exactly as in section 10 (rg empty, and legacy_args rejected for that
+    module). That removes R5's quiet-window problem, lets IFvisualization2
+    ship its most-used actions first (boxplot, barplot, heatmap, spatialLite,
+    embedding), and makes P2 go away.
+    Cost: the old format is load-bearing until each module's gate closes. The
+    gate is mechanical, so this is a sequencing tool, not a permanent
+    adapter.
+    If you reject C1, at least swap Pass 3 and Pass 4.
+
+C2  Make Pass 1 smaller.  [less work]
+    - --action: read answer names from ask() string literals (enforced by the
+      R2 lint) plus the prompt_kind from io_adapter (R3). Drop "example rows
+      from prefab and project recipes" from Pass 1. Recordings give the
+      examples later for free.
+    - The run record's run.log and steps answers can come from io_adapter's
+      existing support capture and session log instead of a new tee.
+
+C3  Put the Q1 policy and the P5 rule in the porting guide.  [avoid
+    perturbing]
+    The two rules a porting agent is most likely to miss: "no prompt after
+    `if collecting()`", and "record typed values, derive later". Both get
+    tests (R2).
+
+C4  Add a mode where unanswered prompts fall through to DS.  [more utility]
+    Because ask() falls back to io.iget, "recipe for most answers, DS agent
+    for the rest" needs no extra code. Name it as a supported mode in section
+    8. It's the natural way for an agent to explore one changed parameter
+    without writing a full recipe.
+
+C5  Error semantics for headless ifp.main should match the GUI.
+    Today a failure in group 5 of 10 discards the whole ifp.main result:
+    _run_legacy_call returns before updating state. Headless should do the
+    same, then stop with the record written, not continue to the next root
+    step on stale data. Say so explicitly in section 9.
+
+C6  Proof additions.
+    - Replay on a second machine (or a faked different pixel size) with a
+      neighborhood step: confirms P5.
+    - Replay a recipe that includes processing -> visualize: confirms the
+      nesting and R1's record-once rule.
+    - Run preflight with the fixture-unchanged check (R2).
+
+
+Part E. Small notes
+-------------------
+
+- IFprocessing7.menu catches every non-int as "done", including a typo. Not
+  a recipe problem, but recordings will occasionally end early because of
+  it. Nothing to change.
+- IFvisualization2._report_visualization_failure stores "subcommand":
+  str(subcom) in ifv_errors. After the port, store the row instead.
+- IFprocessing7.s_to_l / l_to_s are dead (both start with input('...') and
+  print "use ifv version instead"). Delete them in Pass 1 to shrink the
+  rg-gate noise.
