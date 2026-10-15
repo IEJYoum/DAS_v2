@@ -1,0 +1,376 @@
+Reply to Recipe Framework Plan v2.1 -- DAS3 / CNN integration
+==========================================================
+2026-10-14
+From: Codex, reporting the DAS-global I/O migration and classifier discussion.
+Audience: the agent revising/implementing recipe_framework_plan_v2.1.txt.
+
+Status and scope
+----------------
+This is an implementation-informed handoff, not authorization to extend the
+current recipe implementation scope. v2.1 explicitly excludes CNN workflows.
+Keep its initial controller/IFprocessing7/IFvisualization2 passes focused. The
+recommendations below identify existing reusable machinery and the requirements
+for a later CNN port. Proposed action IDs, answer names and result fields below
+are illustrative; they are not registered APIs or working recipe syntax today.
+
+The intended benefit is to make classifier experiments saved, inspectable and
+repeatable through the same DAS/standalone engine, without editing Python for
+each experiment. Recipes would capture operational choices. The classifier
+continues to own model construction, preprocessing, training and evaluation.
+
+This reply does not claim a fresh audit of every IFprocessing7/IFvisualization2
+collect branch or answer all Q1-Q9 in section 12. Findings about those modules
+must be checked in their own port. Code inspected for this reply is listed last.
+
+
+1. Existing integration: do not build it a second time
+-----------------------------------------------------
+CURRENT -- CLASSIFIER/run_project.py is the central real-dataset launcher.
+It is callable from Python, runs from the terminal/IDE, and is reached from
+controler.startup_cell_classifier under Prepare Data. The controller currently
+asks for mode and dataset, then calls the same main with the active data folder,
+interactive=True, io.iget/io.iprint and a config-cache invalidation callback.
+
+main(mode=None, dataset=None, *, project_root=None, interactive=None,
+     settings=None, output_root=None, checkpoint=None, base_dir=None,
+     config_changed=None, input_fn=None, print_fn=None)
+
+This is DAS I/O integration, not recipe integration. There are no ask()/collecting()
+guards in this launcher, and its controller wrapper still uses ordinary menus.
+
+CURRENT -- shared owners already adopted by the CNN launchers:
+
+  support/io_adapter.py
+    iget/iprint/dprint/legacy_print and the existing GUI/terminal/DS transport.
+    Bare io_adapter and support.io_adapter are aliases to the same stateful
+    module, tested in both import orders. Never initialize a fresh transport
+    inside a recipe action, path helper, or CNN engine.
+
+  support/shared_utils.py
+    checkChange carries use/change prompt_meta; flexMenu collects ordered raw
+    entries until blank. IFA.flexMenu delegates with IFA.logInput. Raw key/value
+    config readers/writers and append_artifact_manifest_row remain here.
+
+  support/project_config.py
+    load_project_settings -> (values, origins), with nearest nonempty inheritance
+    and OS overlays. save_project_settings uses the existing merging writer and
+    optional on_update callback. select_project_path provides routed use/change
+    plus validation, or strict noninteractive path errors.
+
+  support/path_compat.py and support/ingest_sources.py
+    resolve_native_path; known mount translation; foreign-path rejection;
+    home expansion; explicit base_dir; stable file/folder/glob expansion;
+    source-list storage with ||; prompt_source_specs uses checkChange/flexMenu.
+
+  support/image_sources.py and support/image_conventions.py
+    Physical TIFF/channel/window access and established DAS naming conventions.
+    CNN TIFF reads reuse image_sources while keeping scientific transformations
+    local. A recipe should not introduce another TIFF reader or layout parser.
+
+  controler.invalidate_project_config(folder)
+    Host save callback invalidates the controller cache. It is not a cross-process
+    watcher; a separate standalone writer cannot refresh a running DAS process's
+    memory. Project reload remains necessary after such external edits.
+
+Also retain support/filesystem_utils.py for applicable retry/atomic publication.
+Its fixed temporary filenames are not a general concurrent-cache solution.
+
+
+2. Separate the sources of configuration and provenance
+--------------------------------------------------------
+Recommended responsibility boundaries:
+
+  Project config    Reusable roots, source patterns and project-specific defaults.
+  Recipe           Selected operation and explicit experiment answers.
+  CNN run folder   Effective scientific config, source/split records, checkpoint
+                   provenance, predictions, scores and debug products.
+  Recipe run       Orchestration record: requested steps, answers used, status,
+                   elapsed time and errors, with links to the CNN products.
+
+CURRENT classifier precedence is explicit settings/path arguments over project
+defaults over editable module defaults. The future recipe adapter should bind
+its supplied answers as explicit operation settings. It should record the final
+effective values rather than only a raw 'use' or blank confirmation.
+
+The binding/default policy belongs to the action and existing config helpers.
+Keep ask() narrow as v2.1 proposes. In particular, distinguish an omitted answer
+from a legitimate explicit value such as zero replay fraction, False, an empty
+list, or an intentional optional-path clear. Avoid truthiness-based fallbacks.
+
+Clarify one detail before the CNN port: when project/module defaults are allowed
+to supply an omitted recipe value, resolve and record that value explicitly.
+Otherwise a required omitted answer must fail in headless mode. An action must
+not silently pass every module default into ask() and thereby bypass the plan's
+missing-answer checks. This needs a documented action-level policy.
+
+Recipes may remain convenient project-dependent templates. For an inspectable
+experiment, its completed run must additionally preserve resolved settings and
+their provenance. A saved recipe alone cannot freeze changing project defaults,
+new files matching a glob, altered labels, or a replacement checkpoint.
+
+
+3. What classifier operations a future recipe port should expose
+----------------------------------------------------------------
+CURRENT modes, whose meanings should remain explicit:
+
+  prepare     Adapt/validate real sources, check training windows and write
+              previews. This can be expensive and write large staged data.
+  predict     Existing checkpoint; forward pass and scoring/reports; no training.
+  train_test  Fresh model; training, validation-based checkpoint selection,
+              held-out testing, and automatic saved-model/export checks.
+  tune_test   Parent weights with a fresh optimizer; then the same evaluation
+              and verification path. This is not optimizer-state resume.
+
+The current BCC tuning workflow starts from the frozen AH08 model. It can replay
+only old AH08 TRAIN ROIs. Old validation/test ROIs are not replay training data.
+These semantics should remain visible in recipe answers and run summaries.
+
+Likely explicit choices for a future action:
+  - mode, dataset/adapter, source roots or standardized manifest;
+  - marker filename patterns, ordered super-signal groups and label mapping;
+  - source scale and any recorded assumption;
+  - parent checkpoint and output root;
+  - selected ROIs/allocation, split seed or a supported frozen split input;
+  - epochs, learning rate, replay fraction, class-weight mode/cap;
+  - model configuration, batch size, device and tiling/report controls where
+    actually supported by the engine.
+
+Do not imply all of these are already named launcher arguments. EPOCHS,
+TUNE_LR, REPLAY_FRACTION, SPLIT_SEED, DEVICE, PREDICT_SPLIT and TRAIN_SETTINGS
+currently include module-level knobs. The recipe port needs explicit settings
+plumbed through the central launcher before claiming recipe-level control.
+Use one settings path with clear validation; avoid temporary global patching as
+the production experiment API. Standalone editable defaults should continue to
+feed that same settings path.
+
+Recipe answers may follow v2.1's string conventions. Numeric parsing/range checks
+belong to the owning classifier action/config layer; the recipe framework need
+not become a general ML parameter type system. Add plain-language descriptions
+and recorded examples, including that tune means warm-start with fresh optimizer.
+
+Copying a recipe and changing a value supports deliberate experiment comparison.
+The v2.1 format has no sweep loops, learning-curve scheduler or conditions. An
+architecture answer also requires an actual supported model implementation;
+the recipe framework does not itself build the proposed interchangeable engines.
+
+
+4. Collection/preflight must not invoke the existing launcher
+-------------------------------------------------------------
+CURRENT run_project.main is not safe to call while collecting answers. It can
+load checkpoints, create a run folder, write launch/config/debug files, discover
+ROIs, check storage, stage large TIFFs and masks, save project settings, construct
+normalized caches, train and render reports. Custom segmentation configure()
+also mutates module globals and can save project config. Neither is a pure
+settings collector.
+
+Recommended future port shape:
+  1. Bind/ask for the action's named answers using existing routed pickers.
+  2. Return at collecting() with no data/config/filesystem mutations.
+  3. Resolve/validate execution settings and call the existing operation core.
+  4. Return/register validated product references and status.
+
+Extract pure settings binding where needed. Do not run the full launcher with
+steps=0 or MODE=prepare as an imitation recipe preflight. 'Prepare' is a real,
+potentially large operation, not v2.1's side-effect-free collecting pass.
+
+Keep validation levels distinct:
+  Recipe preflight: action IDs/placement, supplied/missing/read answer names.
+  Operation checks: native paths, unique source matches, table/mask association,
+                    scale/channel/class compatibility, storage and split checks.
+  Saved-model verification: reload checkpoint, compare exported predictions,
+                            check label independence and parent preservation.
+
+The first cannot establish biological correctness or guarantee a later training
+run will fit its resource budget. Some operation checks are cheap; others read
+real data. Label any separately offered input-validation operation honestly.
+
+v2.1 has a policy tension worth resolving before implementation: sections 1-2
+allow incomplete interactive recipes to prompt, while section 7 says preflight
+requires every answer and runs before interactive replay too. Define whether
+interactive preflight first gathers missing answers without executing, then
+validates a filled copy, or offers another explicit policy. CNN runs especially
+need missing choices settled before expensive staging/training begins.
+
+
+5. Product handoff is the important deferred requirement
+--------------------------------------------------------
+v2.1 correctly defers handing a produced file to a later prompt. This is needed
+for CNN chains because each classifier invocation allocates a unique run folder.
+Training and tuning currently write their engine products under results/, so a
+selected checkpoint is typically <parent run>/results/best.pt. Predict outputs
+use a different layout. Do not assume <parent run>/best.pt for every mode.
+
+CURRENT run_project.main returns its parent output Path, not a typed operation
+result or an updated observations table. The controller wrapper currently
+discards that return value. Merely replaying its existing menu cannot hand a
+checkpoint or predictions automatically to the next action.
+
+For the later port, return/register a small explicit product description, e.g.:
+  status, mode, run directory, selected checkpoint (if produced), prediction
+  file(s), metrics file(s), dataset/manifest association, split-record location,
+  verification outcome and config/provenance references.
+
+Those fields are a proposal, not an existing schema. Prefer actual paths returned
+by the operation to directory scans, filename inference or 'latest model' lookup.
+Record what each downstream action consumed, including checkpoint identity.
+Do not advertise a completed product merely because a directory exists.
+
+A small, explicit session result plus a documented way for a subsequent action
+to select it may be enough; the CNN port does not require inventing variables,
+loops or a second recipe language now. Define this separately from the current
+triplet-only 'steps feed each other through the session' assumption.
+
+Useful eventual chains:
+  tune -> predict another selected dataset -> attach predictions -> visualize;
+  segmentation -> use its instance masks for classification -> inspect results.
+
+Attaching predictions needs an explicit table-import action: join by biological
+scene identity plus validated object ID, preserve observation order, and apply
+declared duplicate/missing policies. This is not implemented by returning a CSV
+path. Replacing segmentation changes the object namespace; equal integer IDs
+are not enough to reattach old labels. Shape equality alone is not grid alignment.
+
+CURRENT custom segmentation already demonstrates part of the handoff pattern:
+the bridge runs an isolated child, receives an explicit output receipt, reads
+shared _ds_manifest.jsonl entries, checks a completed 2-D integer label TIFF,
+then lets DAS adopt the output root. Reuse the shared artifact writer and the
+principle of validated products; do not confuse segmentation and classifier
+checkpoint formats or blindly copy its task-specific receipt schema.
+
+
+6. Filepaths, project roots and recording details
+--------------------------------------------------
+CURRENT classifier project keys include classifier_output_root,
+classifier_checkpoint and classifier_<dataset>_{image_root,mask_root,csv_root,
+manifest,marker_patterns,mask_pattern,csv_pattern,label_column}. Marker patterns
+are JSON dictionaries in the key/value file. Full details are in
+../_usage_guides/cnn_das_io_v0.md.
+
+Windows uses project_config.txt; POSIX overlays project_config_posix.txt on the
+baseline at each ancestor. Blank updates remove a local key and can expose an
+ancestor value; they are not inherited disable/tombstone semantics. Unrelated
+keys are preserved. Origin files are returned by the shared loader.
+
+Known Coussens UNC aliases map to /mnt/rdscoussens and back. Arbitrary Z: values
+do not get invented Linux mappings. Relative paths retain CWD meaning unless an
+explicit base_dir is supplied; origin metadata does not silently re-anchor them.
+The low-level CLASSIFIER/run.py retains its documented CLASSIFIER-directory
+anchor for relative manifest/output paths. Make the caller's base explicit.
+
+For Q7, choose and record a canonical recipe storage root separately from the
+active operation's data/build roots. Do not infer it from whichever ancestor
+supplied a config value. CURRENT classifier GUI calls pass state.data_folder
+as project_root; that does not establish that all three SessionState folders
+are equivalent. Include a nested-project/subset acceptance test before settling
+the global recipe storage policy.
+
+For Q4/Q5, keep ask()/prompt callbacks on the active io_adapter route. Do not
+depend on monkey-patching a function's definition-time input default. Preserve
+checkChange prompt_meta and IFA wrapper logging. An automatic recipe answer
+should be recorded as its resolved semantic value; interactive path pickers
+should continue to use their existing helpers. Changing menus to stable IDs
+does not justify copying use/change or list-collection mechanics into recipes.
+
+
+7. Scientific and operational invariants to preserve
+-----------------------------------------------------
+  - Every tile of a biological ROI/slide_scene stays in the same split. Whole-ROI
+    coverage through tiles is distinct from subdividing an ROI across splits.
+  - Holdout/reserved data stays out of optimization, replay and checkpoint
+    selection. Validation selects best.pt; test data evaluates that selection.
+  - Fresh training, fine-tuning, forward prediction and any future resume mode
+    remain distinguishable operations.
+  - Parent checkpoints remain intact; tuning records their path/hash and saved-
+    model verification checks preservation. Each run gets a new output folder.
+  - Ordered input groups, class order, label mapping, normalization and physical
+    scale travel with the experiment/checkpoint compatibility checks.
+  - Current BCC labels are workflow proxies. 'Other Cells'/aSMA+ are affirmative
+    UNCLASSIFIED labels; absent CSV annotation remains ignored. A recipe name
+    must not imply independent ground truth or upgrade proxy agreement claims.
+  - Image memory remains bounded by the current ROI/batch policy. Recipe support
+    must not eagerly materialize all ROIs/maps or duplicate datasets per step.
+  - Existing cell-only supervision, class weighting and final native-resolution
+    reports remain engine behavior, not computations reimplemented in recipes.
+  - Preserve automatic checkpoint/export verification. Recipe '--check' and
+    training validation are different checks with different purposes.
+
+For Q8/R2, interruption/failure is not a filesystem rollback. A restored triplet
+does not undo a written checkpoint or a partially staged dataset. Record failed
+or interrupted orchestration plus actual product state. Never promote partial
+artifacts to successful handoff products. Keep existing completed historical
+runs; cancellation/resume/cleanup policy needs explicit work rather than an
+assumption that the recipe recorder provides transactionality.
+
+For R1, current custom segmentation launches in a child process. Recipe step
+context stays in the parent unless explicitly transported; a child cannot read
+the parent's implicit current-step state. Pass resolved settings to the child,
+route its output, then attribute the result/failure to the invoking parent step.
+Future parallel experiments would require context isolation; they are not part
+of v2.1's sequential replay contract.
+
+
+8. Acceptance tests for the later CNN recipe port
+--------------------------------------------------
+Use small fixture ROIs/checkpoints, not a production training dataset.
+
+  1. GUI-record -> save -> preflight -> headless replay yields the same effective
+     settings, input associations and frozen split allocation. New output paths
+     are expected; do not require byte-identical model training or timestamps.
+  2. Changing a menu's display order preserves stable classifier action meaning.
+  3. Missing/misspelled answers and wrong placement fail before staging/training.
+     Interactive partial recipes follow the clarified missing-answer policy.
+  4. Pure preflight neither invokes the engine nor loads a checkpoint, writes
+     config, creates output/cache folders, or mutates controller/module state.
+  5. Precedence tests cover explicit answers, inherited defaults, OS overlays,
+     origin records, optional clears, zero replay and a fixed path base.
+  6. Two recipes selecting different epoch/LR/weight-cap values reach the same
+     engine with those explicit values; no stale globals leak between runs.
+  7. Predict never enters training. train_test starts fresh. tune_test uses the
+     selected parent with a fresh optimizer and preserves that parent.
+  8. Product handoff consumes the exact returned best checkpoint/predictions,
+     including mode-specific paths; no ambiguous 'latest' lookup is involved.
+  9. A child exiting zero without its required product, an interrupted operation,
+     or a verification failure cannot register a successful completed result.
+ 10. Prediction import tests duplicate scene leaf names, sparse/repeated object
+     IDs across scenes, missing cells and changed segmentation identities.
+
+Existing evidence to retain: tests/test_cnn_project_io.py covers shared setup,
+transport alias identity, config overlays/origins, routed prompts/controller
+callbacks, TIFF parity and an isolated real custom-CNN forward pass preserving
+its parent. CLASSIFIER/test_classified.py, test_streaming.py, test_entrypoints.py,
+test_tile_rescue.py and CLASSIFIER/checks.py cover other relevant invariants.
+These are not recipe tests and do not prove full GUI/DS or Linux execution.
+
+
+9. Recommended treatment in the next recipe-plan revision
+------------------------------------------------------------
+Keep CNN implementation deferred. Add a short future-consumer note that:
+  - reusable path/config/prompt machinery already exists and should be called;
+  - CNN actions require pure collection plus explicit operation settings;
+  - recipe answers and effective run provenance serve different purposes;
+  - product references/session handoff are a concrete later requirement;
+  - recipe preflight must not call a real CNN 'prepare' operation;
+  - copied recipes enable comparisons; scheduling and model registries are
+    independent future features.
+
+Resolve the interactive-preflight/default-answer ambiguity within v2.1 itself.
+Avoid adding CNN-specific fields to the generic {do, with, steps} format now.
+When the CNN pass starts, return to the central launcher and its existing
+adapters/engine rather than creating a separate recipe-only training script.
+
+
+Evidence map
+------------
+_planning/recipe_framework_plan_v2.1.txt: sections 1-4, 7-10, 12.
+_usage_guides/io_contract_v0.txt; _usage_guides/cnn_das_io_v0.md.
+_planning/das_shared_io_plan_v0.txt; runtime_ingest_io_audit_20261014.md.
+CLASSIFIER/run_project.py: main, settings globals, CLI, returned parent folder.
+CLASSIFIER/run.py: engine run folder, logging and automatic saved-model checks.
+CLASSIFIER/adapters.py: source discovery, inventory and ROI split records.
+CLASSIFIER/train.py: initialization, class weights, best/last checkpoints.
+CLASSIFIER/streaming.py: bounded ROI evaluation and checkpoint verification.
+controler.py: startup_cell_classifier, invalidate_project_config.
+support/{project_config,path_compat,ingest_sources,shared_utils,io_adapter}.py.
+support/{image_sources,image_conventions,filesystem_utils}.py.
+data_extraction/segmentation_bridge.py: custom child receipt and product checks.
+misc mIHC utility/{seg_v0,train_seg_v0}.py: standalone setup and custom CNN.
