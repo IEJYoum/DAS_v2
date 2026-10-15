@@ -1,0 +1,329 @@
+Recipe Framework Plan v0
+========================
+
+Status: draft for review. Framework only. Porting DAS actions onto it (CLASSIFIER
+first, then the legacy menus) is follow-up work, done in many small passes.
+
+
+1. Goal
+-------
+
+Give agents a cheap way to chain DAS functions together:
+
+    write a small JSON recipe  ->  check it  ->  run it headless  ->  read the run record
+
+Requirements settled in discussion (2026-10-14/15):
+
+- Agents author recipes as JSON. Recording from the GUI is nice-to-have, later.
+- All of DAS ends up on this system. Start small; porting must be easy enough for
+  cheap agents to do in many passes.
+- A recipe configures an action by OVERWRITING THE ACTION MODULE'S GLOBALS. The
+  module's top-of-file settings block stays the standalone dev path (edit in IDE,
+  press Run). DAS + recipes are the deployment path. Unset globals keep defaults.
+- Recipes can set everything, including file paths and marker patterns.
+- Steps feed each other (e.g. a checkpoint from one step used by the next).
+- One recipe level. No per-limb recipe kinds, no separate "meta" recipe type. Any
+  recipe can call any action from any part of DAS and can call another recipe.
+  A sweep is just a longer recipe.
+- Headless run. Missing paths and unanswered prompts fail.
+- Shipped prefabs plus project-specific recipes.
+- Provenance is written into action output folders (config.json-style).
+- The CNNs are not wired in this plan.
+
+
+2. The whole language, by example
+---------------------------------
+
+A recipe file:
+
+    {
+      "name": "log2_then_report",
+      "description": "Load a stem, log-transform, save under a new stem, run report recipe.",
+      "vars": {"stem": "$required", "base": 2},
+      "steps": [
+        {"do": "data.load_triplet", "set": {"STEM": {"$var": "stem"}}},
+        {"do": "ifp.log2",          "set": {"LOG2_BASE": {"$var": "base"}}},
+        {"do": "data.save_triplet", "set": {"STEM": "demo_log2"}, "as": "saved"},
+        {"recipe": "make_report",   "vars": {"stem": {"$from": "saved.stem"}}, "as": "report"}
+      ]
+    }
+
+That is the entire language:
+
+- "do"      registered action id. The function to call.
+- "set"     values for that action's declared settings (module globals). They apply
+            only for this step and are restored afterward.
+- "as"      names the step's result so later steps can use it.
+- "recipe"  calls another recipe (in place of "do"), passing it "vars".
+- "$var"    a value from this recipe's vars (default, CLI override, or caller).
+- "$from"   a value from an earlier step's result: "step_as.key[.key...]".
+- "$required" as a var default means "the caller must supply this".
+
+A sweep is just repeated rows:
+
+    {"recipe": "log2_then_report", "vars": {"stem": "s1", "base": 2},  "as": "b2"},
+    {"recipe": "log2_then_report", "vars": {"stem": "s1", "base": 10}, "as": "b10"}
+
+Steps that feed each other:
+
+    {"do": "classifier.run", "set": {"MODE": "tune_test"}, "as": "tune"},
+    {"do": "classifier.run", "set": {"MODE": "predict",
+                                     "CHECKPOINT": {"$from": "tune.checkpoint"}}}
+
+(Classifier rows are illustration only. The classifier is not wired in this plan.)
+
+
+3. Decisions and contracts
+--------------------------
+
+3.1 Action ids come from one registry (the "deterministic function id")
+
+support/actions_v0.py holds one literal table:
+
+    ACTIONS = {
+        "data.load_triplet": ("support.triplet_actions_v0:load_triplet",
+                              ("FOLDER", "STEM"),
+                              "Load <STEM>_{df,obs,dfxy}.csv into the session."),
+        "ifp.log2":          ("analysis.IFprocessing7:log2_action",
+                              ("LOG2_BASE",),
+                              "Log-transform df values."),
+        ...
+    }
+
+    id -> (import target, declared settings, one-line description)
+
+- The id is stable and never encodes file names or version suffixes
+  (IFprocessing7, cmifAnalysis50). Renaming a module edits one row, not recipes.
+- Being in the table = "ported". The table is the porting progress tracker.
+- Imports are lazy, so listing or checking never imports torch or the viewer stack.
+- A setting usually names a global in the target's own module ("LOG2_BASE"). It
+  can name a global owned by another module ("CLASSIFIER.config:CONFIG").
+- Rejected: using the import path itself as the id. It bakes file and version
+  names into every recipe and lets recipes call unported functions.
+
+3.2 Action function contract (what a port must produce)
+
+    def some_action(state) -> dict | None
+
+- Takes the live SessionState and nothing else. All configuration comes from
+  module globals read AT CALL TIME.
+- Contains no input() and no use/change prompts. Interactive configuration later
+  belongs to one generic settings editor (section 7), not to each action.
+- Returns a small JSON-serializable dict (paths as strings). Large data goes on
+  state (df/obs/dfxy). A None return is stored as {}.
+- If the result has "output_dir", the framework writes recipe_step.json into it.
+  That is the generic config.json provenance; actions do nothing extra.
+
+3.3 Settings override semantics
+
+- "set" keys must be in the action's declared settings. Anything else fails.
+- Dict values deep-merge into the current global, so
+  {"DATASETS": {"bcc": {"csv_root": "..."}}} changes one path and keeps the rest.
+  Every non-dict value replaces the global.
+- The merged copy replaces the global for the duration of the step only, and is
+  restored in finally. Rows are independent. Use vars to share a value across rows.
+- Alias guard: before patching a dict/list setting, scan loaded modules for another
+  module holding the same object under the same name (from-imports). If found, fail
+  and name both modules. Fix by declaring the owner ("pkg.mod:NAME") or by changing
+  the reader to module-qualified access. No silent partial overrides.
+- Known blind spot the porting guide must cover: values captured at import time do
+  not see overrides. Two forms: defaults like def f(x=EPOCHS), and derived globals
+  like DATASETS built from _BCC_IMAGES. Override the derived value instead.
+
+3.4 One recipe level, shared state, scoped results
+
+- Every step in a run, including steps inside called recipes, shares one
+  SessionState. A recipe that loads data and a recipe it calls that transforms the
+  data work together without handoff syntax.
+- Results are scoped per recipe invocation. A called recipe sees only its own vars
+  and step results, so it stays reusable on its own. Its result, as seen by the
+  caller, is the dict of its named step results: "$from": "report.saved.stem".
+- No kinds, no limb wrappers, no meta type. "Meta" is just a recipe that calls
+  recipes.
+
+3.5 Storage and lookup
+
+- Prefabs: DAS_v2/prefab_recipes/*.json (shipped, read-only by convention).
+- Project recipes: <project>/recipes/*.json. A project recipe shadows a prefab with
+  the same name (same rule as EF_A).
+- A recipe can also be given as a direct path (agents drafting in scratch).
+- No index CSV. Listing reads name/description from the files themselves, so
+  nothing can go out of sync.
+- No schema version field. Recipes have no backwards compatibility. Patch them on disk.
+
+3.6 Run lifecycle
+
+    load tree -> check whole tree -> build headless state -> run steps in order -> write record
+
+- Check (no imports, instant) covers: JSON shape; every "do" in the registry; every
+  "set" key declared; vars supplied or defaulted (no unresolved $required); every
+  $var declared; every $from naming an EARLIER "as" in the same recipe; no recipe
+  reference cycles; "as" unique per recipe. Nothing runs if the check fails.
+- Execution resolves $var/$from per step, applies settings, calls, restores,
+  stores the result.
+- First failure stops the run, records the traceback, and exits nonzero.
+  KeyboardInterrupt does the same. No rollback.
+- Run record: <project>/recipe_runs/<UTC stamp>_<recipe name>/
+      recipe_resolved.json  full tree with vars substituted ($from kept symbolic)
+      steps.jsonl           one row per step: path in tree, id, applied settings
+                            (resolved), result, status, seconds
+      run.log               everything io printed
+  Plus recipe_step.json in each result output_dir (3.2).
+
+3.7 Headless I/O
+
+- io_adapter gains a "headless" mode. iprint goes to stdout and run.log. iget
+  raises HeadlessPromptError(prompt text). An unported prompt therefore fails
+  loudly and names itself. That is how porting agents find leftover prompts.
+- The controller gains one constructor, controler.headless_state(project_folder),
+  which builds a SessionState with project/data/figure folders resolved, no data
+  loaded, and no prompts. A missing folder fails.
+
+3.8 Launcher (the agent's whole interface)
+
+    python run_recipe.py --project P --run NAME_OR_PATH [--var k=v ...]
+    python run_recipe.py --project P --check NAME_OR_PATH [--var k=v ...]
+    python run_recipe.py [--project P] --list        # prefabs + project recipes
+    python run_recipe.py --actions                   # ids, settings, descriptions
+
+--var values parse as JSON and fall back to a plain string. --actions prints
+declared settings without importing, so it is cheap. A later flag can show current
+default values, which does import.
+
+
+4. Files and size budgets
+-------------------------
+
+New:
+  support/recipe_v0.py        load/lookup, check, resolve, settings patch/restore,
+                              run loop, run record.            ceiling ~300 lines
+  support/actions_v0.py       ACTIONS table + lazy resolve.    machinery ~30 lines
+                                                               (+1 row per action)
+  run_recipe.py               argparse launcher.               ceiling ~80 lines
+  prefab_recipes/             proof prefabs (section 6).
+  tests/test_recipe_v0.py     engine tests with fixture actions.
+  _usage_guides/recipe_authoring_guide_v0.txt   for agents writing recipes
+  _usage_guides/recipe_porting_guide_v0.txt     for agents porting actions
+
+Changed:
+  support/io_adapter.py       headless mode.                   ~20 lines
+  controler.py                headless_state().                ~25 lines
+
+recipe_v0 jobs: the language in section 2 and its lifecycle. Non-jobs: menus, GUI,
+prompting, data loading, domain knowledge, loops/scheduling, caching, parallelism.
+Growth past ~300 lines is a design event.
+
+
+5. What gets removed and how we verify it
+-----------------------------------------
+
+Not carried over from EF_A (verified by not existing in DAS):
+  per-limb recipe kinds and recipe_menu load/build/save wrappers; separate meta
+  recipe type; prefab_index.csv; recipe_schema_version gate; compiled-snapshot
+  recipe files (replaced by recipe_resolved.json in the run record);
+  DRY_BUILD_TAGS collect-then-execute.
+
+Removed from DAS per module, as each module is ported (not in this plan's passes):
+  numeric `com` rows and the collect/replay branch of each action;
+  *_lastrun.txt single-slot replay (ifp7_lastrun.txt, ifv2_lastrun.txt,
+  ifv2_repeat_context.txt and the feature-extraction/spectral equivalents);
+  per-action input() prompts.
+  A module's done condition: its actions are in ACTIONS, and
+      rg "lastrun|com=\[\]" <module>  is empty.
+  Whole-port done condition: the same grep over DAS_v2 is empty, and the
+  controller menus are built from ACTIONS (section 7).
+
+Until then old and new paths coexist module by module. That is deliberate but
+unfinished. The ACTIONS table plus that grep give the live status.
+
+Survives by design: each module's top-of-file settings block (the standalone dev
+path), plus ds.py interactive driving.
+
+
+6. Proof (exercise the real goal, not toys)
+-------------------------------------------
+
+Engine tests use fixture actions registered only in tests: patch/restore, deep
+merge, alias guard, $from/$var scoping, cycles, fail-stop, headless prompt error,
+run record contents.
+
+The real-DAS proof ports the smallest set that exercises every seam:
+  data.load_triplet / data.save_triplet  shared-state handoff and file outputs; wraps
+                                         controler.load_triplet/save_triplet
+  ifp.log2, ifp.zscore                   ported out of IFprocessing7, the 2000-line
+                                         legacy module with numeric com and
+                                         prompt/replay split. This is the hard case
+                                         for "porting is cheap".
+
+Proof prefabs:
+  proof_log2_save.json   load -> log2 -> save as "as": saved
+  proof_sweep.json       calls proof_log2_save twice with different bases, then a
+                         third step reads "$from": "b10.saved.stem" and reloads it
+Pass criteria:
+  - both run headless from run_recipe.py on a real project folder
+  - outputs match running the same transforms through the old menus
+  - an injected bad step (unknown setting, missing stem) fails at check or at that
+    step with a readable message, and steps.jsonl shows where
+  - the log2/zscore port diff is small and mechanical; record its line count as the
+    porting cost estimate for later passes.
+
+
+7. Deferred, with the reason it is safe and the trigger to revisit
+-----------------------------------------------------------------
+
+- CLASSIFIER port. Safe: engine contracts are checked against it on paper (below).
+  Trigger: framework proof passes.
+  Paper check against run_project.py: main() already reads MODE/DATASET/... globals
+  when args are None, so it fits. Needed: a das_action(state) wrapper returning
+  {"output_dir", "checkpoint", ...}; declare settings including
+  "CLASSIFIER.config:CONFIG"; remove the interactive select_project_path branch
+  from the recipe path; override DATASETS directly, not _BCC_IMAGES.
+  See open question Q4 on project_config precedence.
+- Interactive DAS menus built from ACTIONS, plus a generic settings editor over
+  declared settings that shows the current value and lets you use or change it.
+  Recording then comes free: the recorded row is {"do", "set": changed values}.
+  Safe because the no-prompts contract (3.2) keeps actions compatible. Trigger:
+  enough modules ported that the menus can switch over, or the GUI recording ask.
+  This is where spine_restructure_plan_v1.1 (not live) should be reconciled.
+- Loops / ARI-style repeat, pacing, clear-before-run. Trigger: a live-polling use.
+- Showing current defaults in --actions (needs imports). Trigger: agents asking.
+- "$replace" (overwrite a dict instead of merging it). Trigger: a real need to
+  drop dict keys.
+- Concurrency: none. Global patching assumes one run per process.
+
+
+8. Open questions for Jalaa
+---------------------------
+
+Q1 Row shape. Dict rows ({"do", "set", "as"}) instead of EF_A/IF_A positional lists
+   ([id, {...}]). Recommended: dicts are self-describing for cheap agents, and a
+   positional offset has nowhere to break. This departs from the IF_A shape.
+Q2 Settings scope. Per-step with restore (recommended; rows independent; vars for
+   sharing) or persist for the rest of the run (closer to "just set globals",
+   but row order then matters silently)?
+Q3 Declared settings per action (recommended; an allowlist, and it is what the
+   future settings editor shows) or any UPPERCASE module global?
+Q4 Project-config precedence. The classifier reads project_config.txt values over
+   its globals, so a recipe-set path would be silently overridden. It also writes
+   paths back after each run, so run A's paths become run B's defaults. Proposed
+   rule: recipe > project config > module default, with recipe runs not writing
+   project config. Decide whether the classifier keeps project-config reads at all.
+Q5 Generic settings editor as the only interactive config path for ported actions
+   (recommended; it is what makes porting mechanical and recording free), or keep
+   bespoke prompts behind an interactive flag?
+
+
+9. Skeptic's best objections
+----------------------------
+
+- "Overwriting globals is mutable global state." True. Bounded by per-step restore,
+  one run per process, and the alias guard. The standalone dev path already treats
+  globals as the configuration surface, so this reuses it instead of adding a
+  second config layer.
+- "The registry duplicates what the module knows." The table repeats the setting
+  names. Mitigation: one test imports every ACTIONS target and asserts every
+  declared setting exists. Drift fails CI-style, not at a user's run.
+- "Import-time capture makes overrides silently ineffective." This is the
+  surviving risk. The alias guard catches from-imports. Defaults and derived
+  globals are not caught automatically, only by the porting checklist. Revisit
+  with a cheap static check if a port gets it wrong.

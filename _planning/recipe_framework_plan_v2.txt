@@ -1,0 +1,302 @@
+Recipe Framework Plan v2
+========================
+
+Status: draft for review. Supersedes v0 and v1. v1 designed a new runtime with
+its own language, a sticky-value store and a prompt collector. That was the wrong
+direction. v2 is a translation of DAS's existing "repeat last run" replay into a
+durable, agent-friendly format.
+
+Scope: the shared replay machinery, the controller's root menus, and full ports
+of IFprocessing7 and IFvisualization2 as the first test cases. CNN workflows are
+out of scope.
+
+
+1. What a recipe is
+-------------------
+
+A recipe is a saved set of answers to prompts. It is not a second runtime.
+
+The same function runs whether a value comes from a person in the GUI or terminal,
+from an agent driving DS, or from a recipe. The function does not know or care.
+A recipe that leaves an answer out falls back to prompting for it. A headless run
+with a missing answer fails.
+
+DAS already has the core of this. Each legacy menu records what the user did
+while they do it:
+
+    # IFprocessing7.menu, collect mode
+    nn, com = functions[ch](dfs, com=[])     # function prompts, returns its answers
+    coms.append([ch] + com)                  # record [menu position, answers...]
+
+and later replays it ("repeat last run? (y)"):
+
+    # replay mode
+    ch = subcom[0]
+    dfs, nn = functions[ch](dfs, subcom, cat)   # function reads answers from subcom
+
+saved in a single slot per module (ifp7_lastrun.txt), in a custom string format.
+
+What's wrong with that, and the fix for each problem:
+
+  problem                                         fix
+  ----------------------------------------------  -----------------------------------------
+  rows identify actions by menu position,         each menu entry gets a stable string id
+  so reordering a menu breaks old runs
+  answers are positional (com[1], com[2]...),     answers are named: {"overwrite": "y"}
+  unreadable and easy to misalign
+  some answers record indices (obMenu returns     record names (column names), never indices
+  a column number), which break on other data
+  one "last run" slot per module                  named recipes, saved as JSON files, plus
+                                                  last-run kept per menu
+  each module keeps its own copy of menu()        one shared menu function
+  replay only within one module                   the root menus record too, so one recipe
+                                                  can span modules
+  agents can only drive prompts live (DS)         agents write or edit JSON and run it
+                                                  headless
+
+Nothing else changes. Prompts stay where they are, and the collect-then-execute
+behaviour of IFprocessing7/IFvisualization2 (collect a command list once, then run
+it per group and per category) stays.
+
+
+2. The function pattern
+-----------------------
+
+The pattern (as in the dev launcher style):
+
+    DATASET = "bcc"                          # module knob for standalone/IDE runs
+
+    def run(state, dataset=None):
+        dataset = ask("dataset", dataset, "dataset? ")
+        process(dataset)
+
+    if __name__ == "__main__":
+        run(None, dataset=DATASET)
+
+ask(name, value, prompt) is the only new call an action needs:
+  - if value was supplied (by a recipe, or a direct caller), return it
+  - else prompt the user (prompt is a string, which goes through io.iget, or a
+    function such as getCats, which is called)
+  - in a headless run with no value, fail with
+    "step <action id> has no answer for '<name>'"
+  - either way, record name -> value on the step currently being recorded
+
+So `ask` is the keylogger, with names. Every answer that reaches the function
+is recorded under its name, and every recorded name comes back as a keyword
+argument on replay.
+
+Collect-then-execute modules (IFprocessing7, IFvisualization2) translate their
+existing `if len(com) == 0: prompt; return answers` branch like this:
+
+    def zscore(dfs, cat="", overwrite=None):
+        overwrite = ask("overwrite", overwrite, "overwrite? (y)")
+        if collecting():                     # building the command list: answers only
+            return dfs
+        ... compute exactly as today ...
+
+    legacy                                   translated
+    ---------------------------------------  -----------------------------------------
+    if len(com) == 0:                        overwrite = ask("overwrite", overwrite, ...)
+        ow = input('overwrite? (y)')         if collecting():
+        return([], [ow])                         return dfs
+    ow = com[1]
+
+Answer naming rules:
+  - Names are unique within one action's prompts. If an action asks for two paths,
+    they get two names (IFV_outpath, IFV_outpath1).
+  - Because answers belong to the step that asked, the same name in two different
+    actions is not a conflict.
+  - A value the user typed once and the function reuses 100 times is recorded once,
+    at the prompt where it was asked, and reused by the function the same 100 times
+    on replay. Example: IFvisualization2.main asks for color categories once and
+    loops over them; that answer lives on the visualization step.
+  - A prompt that repeats inside one call (e.g. getCats asking until 'x') records
+    one answer holding the final list.
+  - Pickers record names, not positions: column names from obMenu/getCats, not
+    column numbers.
+  - In collect-then-execute modules, every ask comes before `if collecting():`, so
+    execution never prompts per group.
+
+
+3. The shared menu function
+---------------------------
+
+One menu function replaces the per-module menu() copies and the controller's
+menu_index-based root menus:
+
+    menu(state, entries, rows=None)
+      entries: [(action_id, label, fn), ...]   ids are stable; labels are display only
+
+    interactive (rows is None):
+      show numbered labels (same look, same GUI prompt_meta options as today)
+      on choice: open a new step record {"do": action_id}
+                 call fn(state)          -> asks fill step["with"]
+                                         -> nested menus fill step["steps"]
+                 append step to this level's recorded rows
+      non-int: return recorded rows
+
+    replay (rows given):
+      first check every row's "do" is an entry here; unknown id -> fail before
+      running anything at this level
+      for each row: open a step record, call fn(state, **row["with"]), and pass
+                    row["steps"] down to that fn's own nested menu call
+
+A submenu is just an action whose function calls menu() again. For example
+IFprocessing7's scaling() keeps its options list and becomes entries with ids. The
+nested menu reads its child rows from the current step and records child rows
+into it.
+
+collecting() is true while a collect-then-execute module is building its command
+list. The module main sets it around its collect call, exactly where it calls
+mainMenu(dfs) with empty com today.
+
+
+4. Recipe file
+--------------
+
+A recipe is the recorded rows, with a name and description:
+
+    {
+      "name": "zscore_boxplots_per_scene",
+      "description": "Load a stem, z-score per slide_scene, boxplots by celltype.",
+      "steps": [
+        {"do": "home.load_prepared_data", "with": {"stem": "AH08_v3"}},
+        {"do": "home.analysis",
+         "with": {"repeat_column": "slide_scene", "key_strings": []},
+         "steps": [
+           {"do": "ifp.scaling", "steps": [
+             {"do": "ifp.zscore", "with": {"overwrite": "y"}}
+           ]}
+         ]},
+        {"do": "home.visualization",
+         "with": {"repeat_column": "all data", "categories": ["Primary Celltype"]},
+         "steps": [
+           {"do": "ifv.boxplot",
+            "with": {"violin": "n", "outliers": "n", "relevant_only": "n",
+                     "color_columns": ["slide_scene"], "per_row": 6}}
+         ]}
+      ]
+    }
+
+- Recorded from the root menu, so a recipe can span modules naturally. There is
+  one kind of recipe.
+- "with" holds answers exactly as they were given (strings as typed; lists for
+  pickers). Agents may write them by hand in the same form.
+- An answer left out of "with" means "ask the user at this point": the user is
+  prompted in interactive runs, and headless runs fail. This is how a recipe can
+  fill most prompts and leave one or two for the user.
+- Sweeps: copy the recipe and change one value.
+- Steps feed each other the way they do today, through the session (the triplet
+  loaded or modified by earlier steps).
+
+
+5. Saving, loading, running
+---------------------------
+
+- Every completed root-menu action is appended to the session's recording.
+- The root menu gains a "recipes" entry with these options:
+      run saved recipe       prefab or project recipe, replayed from the root
+      save recording         name + description -> <project>/recipes/<name>.json
+      clear recording
+- "Repeat last run": each menu that offers it today keeps offering it. Its last
+  rows are saved as <project>/recipes/_last_<menu id>.json instead of
+  *_lastrun.txt.
+- Prefabs: DAS_v2/prefab_recipes/*.json. A project recipe with the same name
+  takes precedence. A direct file path also works (agent drafts).
+- Headless runner for agents:
+      python run_recipe.py --project P --recipe NAME_OR_PATH
+  It builds a SessionState for the project with no prompts, puts io in headless
+  mode (any io.iget raises with the prompt text), and replays the recipe from the
+  root menu. Missing paths and missing answers fail.
+- Each run writes <project>/recipe_runs/<UTC stamp>_<name>/ with:
+      recipe.json     the recipe as replayed
+      run.log         everything printed
+  A copy of recipe.json also goes into any output folder an action reports
+  creating.
+
+
+6. Files and size budgets
+-------------------------
+
+New:
+  support/recipe_v0.py     ask(), collecting(), menu(), step recording, recipe
+                           load/save/lookup, last-run files     ceiling ~250 lines
+  run_recipe.py            headless launcher                    ceiling ~60 lines
+  prefab_recipes/          proof recipes (section 7)
+  tests/test_recipe_v0.py  record -> save -> replay round trips with toy menus
+  _usage_guides/recipe_porting_guide_v0.txt   the section 2 translation table,
+                                              for agents porting modules
+  _usage_guides/recipe_authoring_guide_v0.txt how to read/edit/run recipes
+
+Changed:
+  support/io_adapter.py    headless mode (iget raises)          ~15 lines
+  controler.py             startup_menu/main_menu on the shared menu with ids;
+                           prompts in the actions they reach wrapped in ask();
+                           headless state constructor; "recipes" entry
+  analysis/IFprocessing7.py          full port (section 7)
+  visualization/IFvisualization2.py  full port (section 7)
+
+recipe_v0's job: record named answers and replay them through menus. It does not
+own prompting UI (io_adapter does), domain logic, loops or scheduling.
+
+
+7. Order of work and proof
+--------------------------
+
+Pass 1: support/recipe_v0.py, io headless mode, run_recipe.py, tests.
+Pass 2: controller root menus (startup + main) on the shared menu. Port the
+        load-prepared-data path's prompts to ask() so a headless recipe can load
+        a stem.
+Pass 3: IFprocessing7 full port. Replace menu()/mainMenu()/lastrun()/
+        saveCommands() with the shared machinery. Translate every action's com
+        branch per section 2. Main's repeat-column/key-string prompts become
+        asks on the "home.analysis" step.
+Pass 4: IFvisualization2 full port, the same way. repeat_context and color
+        categories become asks on the "home.visualization" step.
+        ifv2_repeat_context.txt and ifv2_color_categories.txt go away.
+
+A module is ported whole, not action by action. A half-ported menu would need two
+replay formats at once.
+
+Proof (after pass 4):
+  - Record a session in the GUI: load stem -> analysis (per slide_scene: zscore,
+    log2) -> visualization (boxplot, barplot). Save it. Replay it headless with
+    run_recipe.py and get the same triplet and figure files.
+  - Remove two answers from the saved recipe. An interactive replay prompts for
+    exactly those two. A headless replay fails naming the step and the answer.
+  - Reorder entries in a menu. The saved recipe still replays.
+  - Record the line count of the IFprocessing7 port as the cost estimate for
+    porting the remaining modules.
+
+
+8. What gets removed, and how we verify it
+------------------------------------------
+
+After passes 3-4:
+  - IFprocessing7 / IFvisualization2: menu(), lastrun(), saveCommands(), and every
+    com-indexed read (com[1], subcom[0], ...).
+  - s_to_l / l_to_s once nothing else uses them (feature_extraction_ifa and
+    spectral_flow_ifa still do until they are ported).
+  - ifp7_lastrun.txt, ifv2_lastrun.txt, ifv2_repeat_context.txt,
+    ifv2_color_categories.txt are no longer written.
+  - controler.menu_index / menu used only by unported paths.
+  Check per module:  rg "lastrun|com\[|subcom|com=\[\]" <module>  is empty.
+
+Not yet removed: feature_extraction_ifa, spectral_flow_ifa, IFA.py legacy menus,
+cmifAnalysis50. They keep the old replay until their own port pass, and the same
+grep tracks them.
+
+
+9. Deferred
+-----------
+
+- Declared recipe options: a recipe lists a few answers as user-configurable with
+  defaults, and an interactive run asks "configure recipe options? (y/N)" before
+  replaying. Nice to have. Today's equivalent is leaving those answers out of the
+  recipe. Trigger: users wanting defaults plus an easy override.
+- Handing a file produced by one step (e.g. a CNN checkpoint in a timestamped
+  folder) to a later step's prompt. Not needed until CNN workflows are ported,
+  because session state covers the triplet workflows.
+- Checking the whole tree before running. Replay validates ids per menu level
+  before running that level, so a typo deep in the tree surfaces only when replay
+  reaches it. Trigger: agents hitting late failures often.

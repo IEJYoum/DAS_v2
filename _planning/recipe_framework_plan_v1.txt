@@ -1,0 +1,471 @@
+Recipe Framework Plan v1
+========================
+
+Status: draft for review. Supersedes recipe_framework_plan_v0.txt.
+Scope: the framework, plus a small proof slice of IFprocessing7 and
+IFvisualization2. Porting the rest of DAS onto it is follow-up work, done in
+many small passes. The CNN workflows (CLASSIFIER etc.) are out of scope.
+
+
+1. Goal
+-------
+
+Give agents, and later GUI users, a cheap way to chain DAS functions together:
+
+    write a small JSON recipe -> check it -> run it headless -> read the run record
+
+and give GUI users the same thing interactively:
+
+    pick an action -> answer its prompts -> it runs -> the answers are recorded
+    as a recipe step
+
+Requirements:
+
+- Agents author recipes as JSON files. GUI recording is a bonus that falls out of
+  the shared input collector (section 5).
+- All of DAS ends up on this system. Porting one action must be small and
+  mechanical, so cheap agents can do it in many passes.
+- Actions are plain functions with keyword parameters and defaults. A recipe
+  supplies some parameters and leaves the rest at their defaults.
+- A value set once stays set for later steps until it is overwritten. Recipes
+  should not have to repeat settings.
+- Steps feed each other: one step's outputs (a file path, a stem) can be used by a
+  later step.
+- There is only one kind of recipe. A recipe can call any action from any part of
+  DAS and can call other recipes. A "pipeline of pipelines" is just a recipe that
+  calls recipes. A sweep is just a longer recipe.
+- Headless runs never prompt. A missing path or a leftover prompt fails the run.
+- Recipe values beat project_config.txt values. Recipe runs never write
+  project_config.txt.
+- There are shipped recipes (prefabs) and per-project recipes.
+- Each run writes provenance into the output folders it produces.
+
+Why this is needed: today DAS replays work through numeric command lists. Each
+legacy menu records [menu_position, answers...] rows and saves one "last run" per
+module (ifp7_lastrun.txt, ifv2_lastrun.txt, ifv2_repeat_context.txt, ...). Those
+rows break when menu order changes. They can't be named, combined across modules,
+passed values from another step, or written by an agent without driving the
+prompts.
+
+
+2. The recipe format, by example
+--------------------------------
+
+    {
+      "name": "zscore_boxplots_per_scene",
+      "description": "Per slide_scene: z-score, then boxplots colored by celltype.",
+      "vars": {"stem": "$required", "group_column": "slide_scene"},
+      "steps": [
+        {"do": "data.load_triplet", "set": {"stem": {"$var": "stem"}}},
+        {"configure": "ifv", "set": {"categories": ["Primary Celltype"]}},
+        {"do": "data.for_each_group",
+         "set": {"column": {"$var": "group_column"},
+                 "steps": {"$steps": [
+                     {"do": "ifp.zscore", "set": {"overwrite": true}},
+                     {"do": "ifv.boxplot", "set": {"violin": false}}
+                 ]}}},
+        {"do": "data.save_triplet", "set": {"stem": "zscored"}, "as": "saved"}
+      ]
+    }
+
+Step fields:
+
+  "do"         the id of a registered action (section 3.1). Calls that function.
+  "set"        keyword arguments for the call. They also STICK: see 3.3.
+  "as"         names this step's result so later steps can read it.
+  "configure"  a group name (in place of "do"). Stores sticky values for that
+               group without running anything. Use it for "set once at the top".
+  "recipe"     the name of another recipe (in place of "do"). Runs it, passing
+               "vars". Its result is available under "as".
+
+Values anywhere inside "set" or "vars" can be:
+
+  {"$var": "name"}          this recipe's input variable
+  {"$from": "a.b.c"}        a value from an earlier step's result in this recipe:
+                            step "a", key "b", then key "c"
+  {"$steps": [...]}         an inline list of steps, passed to the action as
+                            something it can run (used by for_each_group)
+  {"$recipe": "name", "vars": {...}}   same, but referencing a saved recipe
+  "$required"               only as a var default: the caller must supply it
+
+A sweep is just repeated rows:
+
+    {"recipe": "log2_and_save", "vars": {"stem": "s1", "base": 2},  "as": "b2"},
+    {"recipe": "log2_and_save", "vars": {"stem": "s1", "base": 10}, "as": "b10"},
+    {"do": "data.load_triplet", "set": {"stem": {"$from": "b10.saved.stem"}}}
+
+That is the entire format. There are no loops, conditionals or expressions.
+
+
+3. Core design
+--------------
+
+3.1 Action registry: stable ids for functions
+
+support/actions_v0.py holds one literal table:
+
+    ACTIONS = {
+      # id                  import target                             description
+      "data.load_triplet": ("support.triplet_actions_v0:load_triplet", "Load <stem>_{df,obs,dfxy}.csv into the session.",
+                            {"stem": {"label": "stem to load", "pick": "stem"}}),
+      "ifp.zscore":        ("analysis.IFprocessing7:zscore_action", "Z-score df columns.",
+                            {"overwrite": {"label": "overwrite columns? (else add _zscored)", "pick": "yes_no"}}),
+      "ifv.boxplot":       ("visualization.IFvisualization2:boxplot_action", "Boxplots binned by each category.",
+                            {"violin": {"label": "violin plot instead?", "pick": "yes_no"},
+                             "color_columns": {"label": "category to color by", "pick": "obs_columns"}}),
+      ...
+    }
+
+    id -> (import target, one-line description, prompt specs)
+
+- Ids are stable and don't encode file names or version numbers (IFprocessing7,
+  cmifAnalysis50). Renaming a module changes one row, not every recipe.
+- The part before the first dot is the action's GROUP ("ifp", "ifv", "data").
+  Groups scope sticky values (3.3).
+- An action is "ported" when it is in this table, and the table doubles as the
+  porting progress list.
+- Imports are lazy, so loading the table is free.
+- The function signature is the parameter declaration. The table does not repeat
+  parameter names. Prompt specs (section 5) list only the parameters a GUI user
+  should be asked about. Every other parameter is set by recipe or default only.
+- Rejected alternative: using the import path itself as the id. It bakes file and
+  version names into recipes and lets recipes call functions that were never made
+  safe to call this way.
+
+3.2 What a ported action looks like
+
+    def zscore_action(state, overwrite=True):
+        df = state.df.apply(pd.to_numeric, errors="coerce")
+        if overwrite:
+            state.df = zsc2(df)
+        else:
+            z = zsc2(df).add_suffix("_zscored")
+            state.df = pd.concat([df, z], axis=1)
+        return {}
+
+Rules:
+- The first parameter is `state` (the SessionState). Everything else is a named
+  keyword parameter with a default. Use None for "required", and fail if it is
+  still None. No *args or **kwargs, because the check reads the signature.
+- No input() calls and no prompts. Prompting belongs to the shared collector
+  (section 5).
+- Return a small JSON-serializable dict, such as {"stem": ..., "figures": [paths],
+  "output_dir": ...}. Big data lives on state. None counts as {}.
+- If the result contains "output_dir", the framework writes recipe_step.json into
+  that folder. This is the generic provenance (what ran and with which values), so
+  actions don't write their own.
+- Project config: read project_config.txt only for a parameter that arrived as
+  None. Never write it from an action. That gives "recipe beats config, never
+  overwrites it" by construction.
+- Visualization-group actions don't mutate state. They work on copies, as
+  IFvisualization2.main does today by returning the original frames.
+- Internally, a port may still bridge to the module's legacy globals (e.g. set
+  IFvisualization2.SPATH from an out_dir parameter before calling old plotting
+  code). That's the module's private business. Recipes only ever see parameters.
+
+3.3 Sticky values ("set once, overwrite freely")
+
+During a run the framework keeps one dict of sticky values per group:
+
+    sticky = {"ifv": {"categories": [...], "violin": False}, "ifp": {...}, ...}
+
+When a step runs action "ifv.boxplot":
+  1. resolve the step's "set" values ($var / $from / $steps)
+  2. sticky["ifv"].update(step set values)
+  3. call boxplot_action(state, **{k: v for k, v in sticky["ifv"].items()
+                                   if k is a parameter of boxplot_action})
+  Parameters not in sticky fall back to the function default.
+
+So with {"configure": "ifv", "set": {"categories": [...]}} at the top, every later
+ifv action that has a `categories` parameter gets it. A later step can overwrite it.
+
+Precedence: this step's set > earlier sticky values in the group > project config
+(only if the action reads it for a None parameter) > function default.
+
+Scope: sticky values last for the whole run, including inside called recipes and
+for_each_group children. A child recipe therefore inherits the parent's settings,
+which is the point of "set once". Values a child sets are still visible after it
+returns.
+
+Porting rule this depends on: within one group, the same parameter name must mean
+the same thing. E.g. every ifv action that takes `categories` means "the obs
+columns to bin/color by".
+
+3.4 Running steps (pseudocode)
+
+    def run_steps(state, steps, vars, run):
+        results = {}                                  # scoped to this recipe call
+        for step in steps:
+            if "configure" in step:
+                run.sticky[step.configure].update(resolve(step.set, vars, results))
+            elif "recipe" in step:
+                child = load_recipe(step.recipe)
+                out = run_steps(state, child.steps, child_vars(child, step, vars, results), run)
+            else:
+                fn = registry.import_target(step.do)
+                group = step.do.split(".")[0]
+                run.sticky[group].update(resolve(step.set, vars, results))
+                kwargs = only_params_of(fn, run.sticky[group])
+                out = fn(state, **kwargs) or {}
+                run.record(step, bound_arguments(fn, kwargs), out)    # incl. defaults used
+                if "output_dir" in out: write recipe_step.json there
+            if step.as: results[step.as] = out
+        return results     # a called recipe's result = its named step results
+
+$steps / $recipe values become a callable passed to the action:
+
+    child(state) -> results dict
+
+data.for_each_group (a DAS action, not part of the engine) uses it:
+
+    def for_each_group(state, column=None, values=None, steps=None, combine="concat"):
+        for each value v of obs[column] (filtered by `values` if given):
+            subset state to rows where obs[column] == v
+            point state.figure_folder at <figure_folder>/<v>
+            results[v] = steps(subset_state)
+        rebuild df/obs/dfxy by concatenating every group's subset, with groups that
+        were filtered out passed through unchanged (what IFprocessing7.main does)
+        restore figure_folder
+        return {"groups": results}
+
+This replaces both legacy per-group loops: IFprocessing7's "repeat analysis on each
+unique value in" and IFvisualization2's repeat_context. The engine knows nothing
+about triplets.
+
+3.5 Check before running
+
+`check` loads the whole recipe tree (called recipes and inline $steps) and stops
+before anything runs if any of these fail:
+  - JSON shape and field names
+  - every "do" is in the registry, and every "configure" group exists
+  - every "set" key is a parameter of that action's function. For "configure",
+    the key must belong to at least one action in the group. This imports the
+    target modules (not instant, but import-only).
+  - every $var is declared, and no "$required" var is left unsupplied
+  - every $from names an EARLIER "as" in the same recipe
+  - "as" names are unique within a recipe, and recipes don't call each other in
+    a cycle
+Runtime problems are not checkable ahead of time and fail at their step: a column
+missing from this data, a missing file.
+
+3.6 Storage and lookup
+
+- Prefabs: DAS_v2/prefab_recipes/*.json (shipped with the code).
+- Project recipes: <project>/recipes/*.json. A project recipe with the same name
+  as a prefab takes precedence.
+- A recipe can also be given as a direct file path, e.g. an agent's draft.
+- There is no index file. Listing reads name/description from each JSON, so
+  nothing can drift.
+- No schema version field and no backwards compatibility. If the format changes,
+  patch the recipes on disk.
+
+3.7 Run lifecycle and record
+
+    load tree -> check -> build state -> run steps -> write record
+
+- First failure stops the run, records the traceback, and exits nonzero.
+  Ctrl-C does the same. No rollback.
+- Record folder: <project>/recipe_runs/<UTC stamp>_<recipe name>/
+    recipe_resolved.json   the tree as run, vars substituted ($from left symbolic)
+    steps.jsonl            per step: position in tree, action id, full arguments
+                           actually passed (including defaults), result, status,
+                           seconds
+    run.log                everything printed during the run
+- Plus recipe_step.json inside each result's output_dir (3.2).
+
+3.8 Headless mode
+
+- support/io_adapter.py gets a "headless" mode. iprint goes to stdout and run.log.
+  iget raises HeadlessPromptError(prompt text). Any unported prompt therefore fails
+  loudly and names itself, which is how porting agents find leftovers.
+- controler.headless_state(project_folder) builds a SessionState with
+  project/data/figure folders resolved, no data loaded, and no prompts. It fails
+  if the folder is missing. Data arrives through a data.load_triplet step.
+
+3.9 Command line (the agent interface)
+
+    python run_recipe.py --project P --run NAME_OR_PATH [--var k=v ...]
+    python run_recipe.py --project P --check NAME_OR_PATH [--var k=v ...]
+    python run_recipe.py [--project P] --list         prefabs + project recipes
+    python run_recipe.py --actions [GROUP]            ids + descriptions (no imports)
+    python run_recipe.py --action ID                  parameters + defaults (imports)
+
+--var values parse as JSON and fall back to a plain string.
+
+
+4. Interactive path (GUI / terminal)
+------------------------------------
+
+DAS keeps prompts for GUI users. Prompts move out of the actions into one shared
+collector, support/collect_v0.py. The collector and the headless runner call the
+same action functions through the same run_steps, so interactive and recipe runs
+cannot drift apart.
+
+5. Shared input collector
+-------------------------
+
+    def collect(action_id, state, sticky):
+        fn, description, prompts = registry[action_id]
+        answers = {}
+        for name, spec in prompts.items():           # in declared order
+            current = answers.get(name, sticky.get(name, default_of(fn, name)))
+            answers[name] = PICKERS[spec["pick"]](state, spec, current, answers)
+        return answers
+
+- Pickers are a fixed, small set built on the existing io.iget / prompt_meta option
+  rendering, so the GUI shows them as choices:
+      text, int, float, yes_no, path (must exist), stem,
+      obs_column, obs_columns, df_columns,
+      obs_values (values of a column chosen in an earlier answer, via spec["of"])
+  The obs/df pickers replace the legacy obMenu / getCats / flexMenu prompts.
+- Every prompt shows the current value (sticky or default), and Enter keeps it.
+- Only parameters listed in the action's prompt specs are asked. Everything else
+  stays at sticky/default, so long-tail settings don't create prompt fatigue.
+- Interactive answers may be remembered in project_config.txt as next-time
+  defaults. Only the collector does this, never actions or headless runs.
+
+Recording (falls out of the above): a new "recipes" entry in the controller's main
+menu offers:
+    run recipe                 pick prefab/project recipe -> collect its $required vars -> run
+    build recipe               loop: pick action (grouped by id prefix) -> collect ->
+                               run as a one-step recipe -> append {"do", "set": answers}
+    save built recipe          name + description -> <project>/recipes/<name>.json
+The recorded rows are ordinary recipe steps, identical to what an agent would write.
+
+
+6. Files and size budgets
+-------------------------
+
+New:
+  support/recipe_v0.py        load/lookup, check, resolve, sticky, run loop, record
+                                                          ceiling ~300 lines
+  support/actions_v0.py       ACTIONS table + lazy import  machinery ~30 lines
+                                                          (+ rows)
+  support/collect_v0.py       collector + pickers         ceiling ~200 lines
+  support/triplet_actions_v0.py  data.load_triplet, data.save_triplet,
+                                 data.for_each_group       ~120 lines
+  run_recipe.py               command line                ceiling ~80 lines
+  prefab_recipes/             proof prefabs (section 7)
+  tests/test_recipe_v0.py     engine tests with test-only fixture actions
+  _usage_guides/recipe_authoring_guide_v0.txt   for agents writing recipes
+  _usage_guides/recipe_porting_guide_v0.txt     for agents porting actions
+
+Changed:
+  support/io_adapter.py       headless mode               ~20 lines
+  controler.py                headless_state() + "recipes" main-menu entry
+                                                          ~80 lines
+  analysis/IFprocessing7.py   proof-slice ports (section 7)
+  visualization/IFvisualization2.py   proof-slice ports (section 7)
+
+recipe_v0's job is the format in section 2 and its run lifecycle. It does not own:
+menus, prompting, triplets/subsetting, domain logic, loops/scheduling, caching or
+parallelism. Growing past ~300 lines needs a stated reason.
+
+
+7. Proof slice
+--------------
+
+Engine tests use fixture actions registered only in tests: sticky
+precedence/scope, $var/$from scoping, $steps children, cycles, check failures,
+stop on first failure, HeadlessPromptError, record contents.
+
+Real ports. Pick the smallest set that touches every seam:
+  data.load_triplet / data.save_triplet   wrap controler.load_triplet/save_triplet
+  data.for_each_group                     replaces both legacy per-group loops
+  ifp.log2, ifp.zscore                    state-mutating transforms (IFprocessing7)
+  ifv.boxplot, ifv.barplot                figure-producing, use sticky `categories`,
+                                          write under state.figure_folder
+                                          (IFvisualization2: the module-global
+                                          SPATH/BATCH/CATS bridge is the hard case)
+
+During the proof, the legacy menu functions stay. Each legacy action's replay
+branch calls the new function, so both paths share one computation. The
+legacy prompt branch stays until its module switches over (section 8).
+
+Proof recipes (prefab_recipes/):
+  proof_log2_save.json        load -> log2 -> save, "as": "saved"
+  proof_sweep.json            proof_log2_save twice (bases 2 and 10), then reload
+                              "$from": "b10.saved.stem"
+  proof_per_scene.json        the section-2 example (configure ifv, for_each_group
+                              zscore + boxplot, save)
+
+Pass criteria:
+  - all three run headless from run_recipe.py on a real project folder
+  - outputs (triplets, figure files) match the same work done through the legacy
+    IFprocessing7 / IFvisualization2 menus
+  - proof_per_scene can be rebuilt through the "build recipe" menu in the GUI,
+    saved, and the saved JSON re-runs headless to the same outputs
+  - a broken recipe (unknown parameter, unsupplied $required, bad $from) fails at
+    check. A runtime failure (missing column) stops at that step, and steps.jsonl
+    shows where.
+  - record the line count of each action port. That number is the per-action cost
+    estimate for the remaining ports. If it isn't small and mechanical, revisit the
+    contract before mass porting.
+
+
+8. What gets removed, and how we verify it
+------------------------------------------
+
+Per legacy module, once all its actions are ported ("switch-over"):
+  - the controller entry for the module (open_processing_menu,
+    open_visualization_menu, ...) shows the module's registered actions through
+    the collector instead of calling the legacy main()
+  - the legacy main(), menu(), mainMenu(), lastrun(), saveCommands(), s_to_l/l_to_s
+    (once no module uses them) and each action's `com` collect/replay branch are
+    deleted
+  - *_lastrun.txt, ifv2_repeat_context.txt and ifv2_color_categories.txt stop being
+    written
+  Done check for the module:  rg "lastrun|com=\[\]|repeat_context" <module>  is empty.
+Whole-port done check: the same grep over DAS_v2 is empty and every main-menu entry
+is registry-driven.
+
+Until a module switches over, the old and new paths coexist, sharing computation.
+That state is deliberate but unfinished. Track it with the ACTIONS table and that
+grep.
+
+Survives by design: ds.py interactive driving, and standalone dev launchers like
+CLASSIFIER/run_project.py's settings block (out of scope here).
+
+
+9. Deferred, with why it is safe and what brings it back
+--------------------------------------------------------
+
+- Full ports of IFprocessing7 / IFvisualization2 and their switch-over. Safe:
+  coexistence shares computation. Trigger: proof passes and port cost is measured.
+- CNN workflows (CLASSIFIER, segmentation). Safe: they have their own launchers.
+  Trigger: framework proven on legacy modules. Note for that port: its module
+  globals become function parameters; its project_config read/write follows 3.2.
+- Reconciling with spine_restructure_plan_v1.1 (not live). The "recipes" menu
+  entry and registry-driven menus are where it would land. Trigger: switch-over of
+  the first module.
+- Loops/repeat-until/polling. Trigger: a live-polling use case.
+- Concurrency: none. One run per process.
+
+
+10. Decisions to confirm
+------------------------
+
+D1 Sticky scope is per group (the id prefix), and lasts the whole run including
+   called recipes, with child-set values visible after the child returns.
+   Alternative: per action id (safer from name collisions, but you'd re-set shared
+   values like `categories` for every ifv action).
+D2 Only parameters with a prompt spec are asked interactively. Others are
+   recipe/default only.
+D3 for_each_group recombines by concatenation with filtered-out groups passed
+   through, so row order becomes group order. This matches IFprocessing7.main today.
+D4 Check imports target modules to read signatures. That's slower than a pure-JSON
+   check, but there's no second copy of parameter names to drift.
+
+
+11. Strongest objections
+------------------------
+
+- "Sticky values make a step's behavior depend on earlier steps." True, and
+  intended. Mitigation: steps.jsonl records the full arguments each step actually
+  received, so any run can be read without replaying the history in your head.
+- "One parameter name meaning two things inside a group would silently pass the
+  wrong value." This is the surviving risk. It's caught only by the porting rule
+  (3.3) and review. Revisit by switching to per-action scope (D1) if it bites.
+- "Registry prompt specs duplicate knowledge from the old prompts." They replace
+  the old prompts once a module switches over. During coexistence they are
+  duplicated, which is why switch-over is part of done.
