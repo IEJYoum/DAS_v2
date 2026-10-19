@@ -2,7 +2,10 @@
 
 This script does not run registration. It reads the auto shift from a
 register_ROIs_mIHC debug txt, adds a manual delta, then regenerates the final
-ROI TIFF from the original SVS pixels.
+ROI TIFF from the original SVS pixels. Optional manual_rotation_deg,
+manual_shear_x_deg and manual_shear_y_deg columns apply around the ROI center:
+rotation first (positive clockwise), then X/Y shear, then manual translation.
+The automatic and manual matrices are composed before a single resampling.
 
 By default it searches all registration debug txts in the hard-coded Reg_IY
 folder newest-to-oldest and uses the first saved matching row.
@@ -28,6 +31,9 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+
+import numpy as np
+from skimage.transform import AffineTransform, warp
 
 import register_ROIs_mIHC as roi_reg
 
@@ -320,6 +326,33 @@ def selected_rows_from_debugs(debug_tables, adjustments):
     return selected
 
 
+def manual_affine_matrix(row, adjustment, manual_dy, manual_dx, angles):
+    padded_shape = (int(row["padded_h"]), int(row["padded_w"]))
+    roi_shape = (int(row["roi_h"]), int(row["roi_w"]))
+    for key, expected in zip(("image_height", "image_width"), roi_shape):
+        if str(adjustment.get(key, "")).strip() and float(adjustment[key]) != expected:
+            raise ValueError("adjustment " + key + " does not match ROI: " + row_identity(row))
+    rotation, shear_x, shear_y = angles
+    if abs(shear_x) >= 89 or abs(shear_y) >= 89:
+        raise ValueError("manual shear angles must be between -89 and 89 degrees")
+    engine = roi_reg.realign_mihc_test
+    automatic = engine.centered_affine_matrix(
+        padded_shape, padded_shape, auto_float(row, "dy"), auto_float(row, "dx"),
+        auto_float(row, "rotation_deg", 0.0), auto_float(row, "shear_x_deg", 0.0),
+        auto_float(row, "shear_y_deg", 0.0), auto_float(row, "image_scale", 1.0),
+    )
+    crop = np.eye(3)
+    crop[0, 2] = int(row["padded_col"]) - int(row["roi_col"])
+    crop[1, 2] = int(row["padded_row"]) - int(row["roi_row"])
+    manual = engine.centered_affine_matrix(
+        roi_shape, roi_shape, manual_dy, manual_dx, rotation, shear_x, shear_y, 1.0,
+    )
+    if abs(np.linalg.det(manual[:2, :2])) < 1e-8:
+        raise ValueError("manual shear collapses the image")
+    # Original padded pixels -> automatic registration -> ROI -> manual correction.
+    return manual @ crop @ automatic
+
+
 def apply_one(row, adjustment, dry_run):
     manual_dy = adjustment_float(adjustment, ["manual_dy", "delta_dy", "dy"])
     manual_dx = adjustment_float(adjustment, ["manual_dx", "delta_dx", "dx"])
@@ -332,9 +365,30 @@ def apply_one(row, adjustment, dry_run):
     shear_x_deg = auto_float(row, "shear_x_deg", 0.0)
     shear_y_deg = auto_float(row, "shear_y_deg", 0.0)
     output_path = Path(row["output_path"])
+    angles = tuple(float(adjustment.get(key) or 0) for key in (
+        "manual_rotation_deg", "manual_shear_x_deg", "manual_shear_y_deg",
+    ))
+    if not np.all(np.isfinite([manual_dy, manual_dx, *angles])):
+        raise ValueError("manual adjustments must be finite numbers")
+    matrix = None
+    if any(angle != 0 for angle in angles):
+        matrix = manual_affine_matrix(row, adjustment, manual_dy, manual_dx, angles)
+    manual_details = {
+        "manual_rotation_deg": angles[0],
+        "manual_shear_x_deg": angles[1],
+        "manual_shear_y_deg": angles[2],
+        "source_to_roi_matrix": "" if matrix is None else json.dumps(matrix.tolist()),
+    }
+    if matrix is not None:
+        # Report the composed displacement at the padded image center.
+        center = np.array([(int(row["padded_w"]) - 1) / 2, (int(row["padded_h"]) - 1) / 2, 1])
+        mapped = matrix @ center
+        final_dx = mapped[0] + int(row["roi_col"]) - int(row["padded_col"]) - center[0]
+        final_dy = mapped[1] + int(row["roi_row"]) - int(row["padded_row"]) - center[1]
 
     if dry_run:
         return {
+            **manual_details,
             "status": "DRY_RUN",
             "row": row_identity(row),
             "output_path": str(output_path),
@@ -352,19 +406,25 @@ def apply_one(row, adjustment, dry_run):
     try:
         moving_rgb = roi_reg.read_padded_row_rgb(row)
         out_shape = (int(row["padded_h"]), int(row["padded_w"]))
-        transformed = roi_reg.transform_rgb(
-            moving_rgb,
-            final_dy,
-            final_dx,
-            rotation_deg,
-            shear_x_deg,
-            shear_y_deg,
-            image_scale,
-            out_shape,
-        )
-        cropped = roi_reg.crop_roi_from_padded(transformed, row)
+        if matrix is None:
+            transformed = roi_reg.transform_rgb(
+                moving_rgb, final_dy, final_dx, rotation_deg, shear_x_deg,
+                shear_y_deg, image_scale, out_shape,
+            )
+            cropped = roi_reg.crop_roi_from_padded(transformed, row)
+        else:
+            shape = (int(row["roi_h"]), int(row["roi_w"]))
+            cropped = np.empty((*shape, 3), dtype=moving_rgb.dtype)
+            inverse = AffineTransform(matrix=np.linalg.inv(matrix))
+            for channel in range(3):
+                cropped[:, :, channel] = warp(
+                    moving_rgb[:, :, channel], inverse_map=inverse,
+                    output_shape=shape, order=1, mode="constant", cval=255,
+                    preserve_range=True,
+                ).astype(moving_rgb.dtype)
         roi_reg.write_rgb_tiff(output_path, cropped)
         return {
+            **manual_details,
             "status": "WROTE",
             "row": row_identity(row),
             "output_path": str(output_path),
@@ -389,7 +449,8 @@ def result_lines(adjustments_path, results):
         "debug_root\t" + str(DEBUG_ROOT),
         "adjustments\t" + str(adjustments_path),
         "",
-        "status\trow\tauto_dy\tauto_dx\tmanual_dy\tmanual_dx\tfinal_dy\tfinal_dx\tsource_debug\toutput_path",
+        "final_dy/final_dx describe displacement at the padded image center; source_to_roi_matrix maps original padded pixels directly to output ROI pixels.",
+        "status\trow\tauto_dy\tauto_dx\tmanual_dy\tmanual_dx\tfinal_dy\tfinal_dx\tsource_debug\toutput_path\tmanual_rotation_deg\tmanual_shear_x_deg\tmanual_shear_y_deg\tsource_to_roi_matrix",
     ]
     for result in results:
         lines.append(
@@ -412,6 +473,10 @@ def result_lines(adjustments_path, results):
             + result["source_debug"]
             + "\t"
             + result["output_path"]
+            + "\t" + str(result["manual_rotation_deg"])
+            + "\t" + str(result["manual_shear_x_deg"])
+            + "\t" + str(result["manual_shear_y_deg"])
+            + "\t" + result["source_to_roi_matrix"]
         )
     return lines
 

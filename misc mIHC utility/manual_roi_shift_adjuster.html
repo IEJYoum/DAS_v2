@@ -103,6 +103,11 @@
       padding: 6px 8px;
     }
 
+    #rotationStep,
+    #shearStep {
+      width: 120px;
+    }
+
     select {
       min-height: 34px;
       border: 1px solid var(--line);
@@ -288,6 +293,24 @@
       </div>
 
       <div class="field">
+        <span>Rotation step (degrees)</span>
+        <input id="rotationStep" type="number" value="0.01" min="0" step="any" aria-label="Rotation step in degrees">
+        <button id="rotateLeft" type="button" title="Rotate counterclockwise" aria-label="Rotate counterclockwise">&#8630;</button>
+        <button id="rotateRight" type="button" title="Rotate clockwise" aria-label="Rotate clockwise">&#8631;</button>
+      </div>
+
+      <div class="field">
+        <span>Shear step (degrees)</span>
+        <input id="shearStep" type="number" value="0.01" min="0" step="any" aria-label="Shear step in degrees">
+        <div class="button-row">
+          <button id="shearXMinus" type="button" title="Decrease horizontal shear">X&#8722;</button>
+          <button id="shearXPlus" type="button" title="Increase horizontal shear">X+</button>
+          <button id="shearYMinus" type="button" title="Decrease vertical shear">Y&#8722;</button>
+          <button id="shearYPlus" type="button" title="Increase vertical shear">Y+</button>
+        </div>
+      </div>
+
+      <div class="field">
         <span>View</span>
         <label><input id="fitToggle" type="checkbox" checked> fit</label>
         <label>zoom <input id="zoomInput" type="number" value="1" min="0.05" step="0.05"></label>
@@ -359,6 +382,8 @@
       canvas: document.getElementById("canvas"),
       canvasWrap: document.getElementById("canvasWrap"),
       stepInput: document.getElementById("stepInput"),
+      rotationStep: document.getElementById("rotationStep"),
+      shearStep: document.getElementById("shearStep"),
       fitToggle: document.getElementById("fitToggle"),
       zoomInput: document.getElementById("zoomInput"),
       blendSelect: document.getElementById("blendSelect"),
@@ -734,6 +759,9 @@
           loadNotes: image.loadNotes || "",
           dx: 0,
           dy: 0,
+          rotation: 0,
+          shearX: 0,
+          shearY: 0,
           visible: true
         });
       }
@@ -783,6 +811,8 @@
         const meta = document.createElement("div");
         meta.className = "channel-meta";
         let metaText = "dy " + roundShift(ch.dy) + " / dx " + roundShift(ch.dx);
+        metaText += " / rot " + formatAngle(ch.rotation);
+        metaText += " / shear X " + formatAngle(ch.shearX) + " Y " + formatAngle(ch.shearY);
         if (ch.displayScale && ch.displayScale < 1) {
           metaText += " / " + Math.round(ch.displayScale * 100) + "% view";
         }
@@ -807,7 +837,7 @@
         return;
       }
       const selected = selectedChannel();
-      const moved = state.channels.filter(ch => ch.dx !== 0 || ch.dy !== 0).length;
+      const moved = state.channels.filter(hasAdjustment).length;
       let label = state.baseWidth + " x " + state.baseHeight + " px";
       label += " / " + state.channels.length + " channels";
       label += " / " + moved + " moved";
@@ -832,14 +862,22 @@
         if (!ch.visible) {
           return;
         }
-        if (els.showMovedOnly.checked && ch.dx === 0 && ch.dy === 0) {
+        if (els.showMovedOnly.checked && !hasAdjustment(ch)) {
           return;
         }
         ctx.globalAlpha = index === state.selectedIndex
           ? Number(els.selectedOpacity.value)
           : Number(els.otherOpacity.value);
-        const displayScale = ch.displayScale || 1;
-        ctx.drawImage(ch.image, ch.dx * displayScale, ch.dy * displayScale);
+        const m = manualLinear(ch);
+        const sx = ch.width / ch.originalWidth;
+        const sy = ch.height / ch.originalHeight;
+        const cx = ch.width / 2;
+        const cy = ch.height / 2;
+        ctx.save();
+        ctx.translate(cx + ch.dx * sx, cy + ch.dy * sy);
+        ctx.transform(m[0], m[2] * sy / sx, m[1] * sx / sy, m[3], 0, 0);
+        ctx.drawImage(ch.image, -cx, -cy);
+        ctx.restore();
       });
 
       ctx.restore();
@@ -879,6 +917,44 @@
       draw();
     }
 
+    function hasAdjustment(ch) {
+      return ch.dx !== 0 || ch.dy !== 0 || ch.rotation !== 0 || ch.shearX !== 0 || ch.shearY !== 0;
+    }
+
+    function formatAngle(value) {
+      return String(Number(value.toPrecision(12)));
+    }
+
+    // Rotate first, then shear along the screen axes. Python uses this same order.
+    function manualLinear(ch) {
+      const angle = ch.rotation * Math.PI / 180;
+      const x = Math.tan(ch.shearX * Math.PI / 180);
+      const y = Math.tan(ch.shearY * Math.PI / 180);
+      const c = Math.cos(angle);
+      const s = Math.sin(angle);
+      return [c + x * s, -s + x * c, y * c + s, -y * s + c];
+    }
+
+    function adjustAngle(key, direction, input) {
+      const ch = selectedChannel();
+      const step = Number(input.value);
+      if (!ch || !Number.isFinite(step) || step <= 0) {
+        setStatus("Enter a positive angle step.", true);
+        return;
+      }
+      const value = Number((ch[key] + direction * step).toPrecision(12));
+      const candidate = {...ch, [key]: value};
+      const m = manualLinear(candidate);
+      if (Math.abs(candidate.shearX) >= 89 || Math.abs(candidate.shearY) >= 89 ||
+          Math.abs(m[0] * m[3] - m[1] * m[2]) < 1e-8) {
+        setStatus("This shear would collapse or excessively stretch the image.", true);
+        return;
+      }
+      ch[key] = value;
+      renderChannels();
+      draw();
+    }
+
     function setShiftSelection(index) {
       if (state.selectedIndex === index) {
         state.channels[index].visible = false;
@@ -910,6 +986,9 @@
       }
       ch.dy = 0;
       ch.dx = 0;
+      ch.rotation = 0;
+      ch.shearX = 0;
+      ch.shearY = 0;
       renderChannels();
       draw();
     }
@@ -918,16 +997,21 @@
       state.channels.forEach(ch => {
         ch.dy = 0;
         ch.dx = 0;
+        ch.rotation = 0;
+        ch.shearX = 0;
+        ch.shearY = 0;
       });
       renderChannels();
       draw();
     }
 
     function tsvText() {
-      const rows = ["filename\tmanual_dy\tmanual_dx"];
+      const rows = ["filename\tmanual_dy\tmanual_dx\tmanual_rotation_deg\tmanual_shear_x_deg\tmanual_shear_y_deg\timage_width\timage_height"];
       state.channels.forEach(ch => {
-        if (ch.dy !== 0 || ch.dx !== 0) {
-          rows.push(ch.file.name + "\t" + roundShift(ch.dy) + "\t" + roundShift(ch.dx));
+        if (hasAdjustment(ch)) {
+          rows.push([ch.file.name, roundShift(ch.dy), roundShift(ch.dx),
+            formatAngle(ch.rotation), formatAngle(ch.shearX), formatAngle(ch.shearY),
+            ch.originalWidth, ch.originalHeight].join("\t"));
         }
       });
       return rows.join("\n") + "\n";
@@ -977,6 +1061,16 @@
     els.downButton.addEventListener("click", () => nudge(stepValue(), 0));
     els.leftButton.addEventListener("click", () => nudge(0, -stepValue()));
     els.rightButton.addEventListener("click", () => nudge(0, stepValue()));
+    [
+      ["rotateLeft", "rotation", -1, els.rotationStep],
+      ["rotateRight", "rotation", 1, els.rotationStep],
+      ["shearXMinus", "shearX", -1, els.shearStep],
+      ["shearXPlus", "shearX", 1, els.shearStep],
+      ["shearYMinus", "shearY", -1, els.shearStep],
+      ["shearYPlus", "shearY", 1, els.shearStep]
+    ].forEach(([id, key, direction, input]) => {
+      document.getElementById(id).addEventListener("click", () => adjustAngle(key, direction, input));
+    });
     els.zeroButton.addEventListener("click", resetSelected);
     els.resetSelectedButton.addEventListener("click", resetSelected);
     els.resetAllButton.addEventListener("click", resetAll);
