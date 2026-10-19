@@ -35,7 +35,7 @@ import realign_mihc_test  # noqa: F401 - fail fast on registration engine deps.
 
 RUN_ROOT = Path(r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\Run")
 OUTPUT_ROOT = RUN_ROOT / "Registration_Check" / "Reg_IY" / "Run"
-DEBUG_ROOT = RUN_ROOT / "Registration_Check" / "Reg_IY"
+DEBUG_ROOT = OUTPUT_ROOT
 DEBUG_TXT_NAME = "register_ROIs_mIHC_debug.txt"
 FIXED_MARKER = "CD3"
 BUFFER_PIXELS = 2000
@@ -1608,7 +1608,7 @@ def main(run_root=None, output_root=None, fixed_marker=None, roi_reference_marke
         print("output root trimmed to batch root:", trimmed_output_root)
         output_root = trimmed_output_root
 
-    debug_root = output_root.parent
+    debug_root = output_root
     debug_path = next_debug_path(debug_root)
     rows, failures = discover_manifest(run_root, output_root, fixed_marker)
     print_summary(rows, failures)

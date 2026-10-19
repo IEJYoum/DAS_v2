@@ -7,8 +7,8 @@ manual_shear_x_deg and manual_shear_y_deg columns apply around the ROI center:
 rotation first (positive clockwise), then X/Y shear, then manual translation.
 The automatic and manual matrices are composed before a single resampling.
 
-By default it searches all registration debug txts in the hard-coded Reg_IY
-folder newest-to-oldest and uses the first saved matching row.
+Searches ROI manifests or whole-slide output_canvas.txt/config.txt records
+inside DEBUG_ROOT. Older ROI manifests in its parent remain readable.
 
 Default manual TSV format:
 slide	roi	marker	manual_dy	manual_dx
@@ -36,9 +36,10 @@ import numpy as np
 from skimage.transform import AffineTransform, warp
 
 import register_ROIs_mIHC as roi_reg
+import export_registered_rgb_from_run as rgb_export
 
 
-DEBUG_ROOT = Path(r"Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\Run\Registration_Check\Reg_IY")
+DEBUG_ROOT = Path(r"Z:\Multiplex_IHC_studies\UCSD_AndyLowey_Lustgarten\OHSU_mIHC_UCSD_Lowey\Reg_IY")
 DEBUG_TXT_GLOB = "register_ROIs_mIHC_debug_*.txt"
 ADJUSTMENTS_PATH = DEBUG_ROOT / "manual_roi_adjustments.tsv"
 DOWNLOADS_DIR = Path.home() / "Downloads"
@@ -79,15 +80,58 @@ def read_text(path):
 
 
 def debug_paths_newest_first(debug_root):
-    entries = roi_reg._retry_io("iterdir", debug_root, lambda: list(Path(debug_root).iterdir()))
-    paths = [
-        path for path in entries
-        if path.name.startswith("register_ROIs_mIHC_debug_")
-        and path.suffix.lower() == ".txt"
-    ]
-    if len(paths) == 0:
-        raise FileNotFoundError("no registration debug txt found in " + str(debug_root))
-    return sorted(paths, key=debug_index, reverse=True)
+    debug_root = Path(debug_root)
+    paths = []
+    folders = [debug_root]
+    while folders:
+        folder = folders.pop()
+        entries = roi_reg._retry_io("iterdir", folder, lambda p=folder: list(p.iterdir()))
+        local = [p for p in entries if p.name.startswith("register_ROIs_mIHC_debug_") and p.suffix.lower() == ".txt"]
+        canvas = [p for p in entries if p.name == "output_canvas.txt"]
+        paths.extend(local or canvas)
+        # A registration run owns its descendants; don't inspect its image/QC folders.
+        if not local and not canvas:
+            folders.extend(p for p in entries if roi_reg._is_dir(p) and not p.is_symlink())
+    entries = roi_reg._retry_io("iterdir", debug_root.parent, lambda: list(debug_root.parent.iterdir()))
+    legacy = [p for p in entries if p.name.startswith("register_ROIs_mIHC_debug_") and p.suffix.lower() == ".txt"]
+    if legacy:
+        print("also checking older ROI debug location:", debug_root.parent)
+        paths.extend(legacy)
+    if not paths:
+        raise FileNotFoundError("no ROI manifests or whole-slide output_canvas.txt found in " + str(debug_root))
+    return sorted(paths, key=lambda p: (roi_reg._stat(p).st_mtime, debug_index(p)), reverse=True)
+
+
+def whole_slide_debug_rows(canvas_path):
+    """Map a whole-slide canvas to the same source/output geometry used for ROIs."""
+    folder = canvas_path.parent
+    config = rgb_export.read_config(folder / "config.txt")
+    shape, offset_y, offset_x, records = rgb_export.parse_canvas_txt(canvas_path)
+    reference_shape = records[0]["image_shape"]
+    source_dir = Path(config["input_dir"])
+    engine = roi_reg.realign_mihc_test
+    fixed_path = source_dir / config["fixed_file"]
+    rows = []
+    for record in records:
+        source_path = source_dir / record["file"]
+        base = dict(record, slide=source_dir.name, roi="whole_slide", marker=source_path.stem,
+                    status="REGISTERED", svs_path=str(source_path),
+                    roi_row=0, roi_col=0, roi_h=shape[0], roi_w=shape[1],
+                    padded_row=0, padded_col=0,
+                    padded_h=record["image_shape"][0], padded_w=record["image_shape"][1],
+                    reference_h=reference_shape[0], reference_w=reference_shape[1],
+                    canvas_offset_y=offset_y, canvas_offset_x=offset_x,
+                    pixel_size_um=config["pixel_size_um"],
+                    final_output_mode=config.get("final_output_mode", "raw_channel"),
+                    output_channel=config.get("output_channel", "gray"),
+                    pad_q=config.get("pad_q", "10"),
+                    mask_png_downsample=config.get("mask_png_downsample", "100"))
+        mono_path = engine.output_path_for(folder, source_path, fixed_path)
+        rgb_path = folder / rgb_export.OUTPUT_SUBDIR / rgb_export.output_name(record)
+        for output_path, kind in ((mono_path, "mono_ome"), (rgb_path, "rgb_ome")):
+            if _exists(output_path):
+                rows.append(dict(base, output_path=str(output_path), output_kind=kind))
+    return config, rows
 
 
 def parse_debug_txt(path):
@@ -286,14 +330,17 @@ def selected_rows(debug_rows, adjustments):
     return selected
 
 
-def load_debug_tables(debug_txt):
+def load_debug_tables(debug_txt, debug_root=None):
     if debug_txt is not None:
         paths = [Path(debug_txt)]
     else:
-        paths = debug_paths_newest_first(DEBUG_ROOT)
+        paths = debug_paths_newest_first(DEBUG_ROOT if debug_root is None else debug_root)
     tables = []
     for path in paths:
-        header, rows = parse_debug_txt(path)
+        if path.name == "output_canvas.txt":
+            header, rows = whole_slide_debug_rows(path)
+        else:
+            header, rows = parse_debug_txt(path)
         tables.append((path, header, rows))
     return tables
 
@@ -336,14 +383,22 @@ def manual_affine_matrix(row, adjustment, manual_dy, manual_dx, angles):
     if abs(shear_x) >= 89 or abs(shear_y) >= 89:
         raise ValueError("manual shear angles must be between -89 and 89 degrees")
     engine = roi_reg.realign_mihc_test
+    reference_shape = (int(row.get("reference_h", padded_shape[0])), int(row.get("reference_w", padded_shape[1])))
     automatic = engine.centered_affine_matrix(
-        padded_shape, padded_shape, auto_float(row, "dy"), auto_float(row, "dx"),
+        padded_shape, reference_shape, auto_float(row, "dy"), auto_float(row, "dx"),
         auto_float(row, "rotation_deg", 0.0), auto_float(row, "shear_x_deg", 0.0),
         auto_float(row, "shear_y_deg", 0.0), auto_float(row, "image_scale", 1.0),
     )
+    # The engine's integer-only path shifts from the top left without recentering,
+    # even when a whole-slide source has different dimensions from the reference.
+    if (auto_float(row, "image_scale", 1.0) == 1.0
+            and all(auto_float(row, key, 0.0) == 0 for key in ("rotation_deg", "shear_x_deg", "shear_y_deg"))
+            and all(engine.is_integer_shift(auto_float(row, key)) for key in ("dy", "dx"))):
+        automatic = np.array([[1, 0, auto_float(row, "dx")],
+                              [0, 1, auto_float(row, "dy")], [0, 0, 1]], dtype=np.float64)
     crop = np.eye(3)
-    crop[0, 2] = int(row["padded_col"]) - int(row["roi_col"])
-    crop[1, 2] = int(row["padded_row"]) - int(row["roi_row"])
+    crop[0, 2] = int(row["padded_col"]) - int(row["roi_col"]) + int(row.get("canvas_offset_x", 0))
+    crop[1, 2] = int(row["padded_row"]) - int(row["roi_row"]) + int(row.get("canvas_offset_y", 0))
     manual = engine.centered_affine_matrix(
         roi_shape, roi_shape, manual_dy, manual_dx, rotation, shear_x, shear_y, 1.0,
     )
@@ -351,6 +406,25 @@ def manual_affine_matrix(row, adjustment, manual_dy, manual_dx, angles):
         raise ValueError("manual shear collapses the image")
     # Original padded pixels -> automatic registration -> ROI -> manual correction.
     return manual @ crop @ automatic
+
+
+def read_whole_slide_output_source(row):
+    image = rgb_export.read_svs_rgb(Path(row["svs_path"]))
+    if row["output_kind"] == "rgb_ome":
+        return image, 255
+    engine = roi_reg.realign_mihc_test
+    mode = row["final_output_mode"]
+    if mode == "raw_channel":
+        channel = np.ascontiguousarray(engine.pick_channel(image, row["output_channel"]))
+        stride = max(1, int(row["mask_png_downsample"]))
+        fill = float(np.percentile(channel[::stride, ::stride], float(row["pad_q"])))
+    elif mode == "red_stain_only":
+        channel, fill = engine.rgb_to_red_stain_channel(image), 0
+    elif mode == "ss_deconv":
+        channel, fill = engine.rgb_to_ss_deconv_channel(image), 0
+    else:
+        raise ValueError("unknown saved final_output_mode: " + mode)
+    return channel, fill
 
 
 def apply_one(row, adjustment, dry_run):
@@ -365,6 +439,7 @@ def apply_one(row, adjustment, dry_run):
     shear_x_deg = auto_float(row, "shear_x_deg", 0.0)
     shear_y_deg = auto_float(row, "shear_y_deg", 0.0)
     output_path = Path(row["output_path"])
+    whole_slide = row.get("output_kind") in {"mono_ome", "rgb_ome"}
     angles = tuple(float(adjustment.get(key) or 0) for key in (
         "manual_rotation_deg", "manual_shear_x_deg", "manual_shear_y_deg",
     ))
@@ -404,9 +479,26 @@ def apply_one(row, adjustment, dry_run):
     transformed = None
     cropped = None
     try:
-        moving_rgb = roi_reg.read_padded_row_rgb(row)
+        if whole_slide:
+            moving_rgb, fill = read_whole_slide_output_source(row)
+        else:
+            moving_rgb, fill = roi_reg.read_padded_row_rgb(row), 255
         out_shape = (int(row["padded_h"]), int(row["padded_w"]))
-        if matrix is None:
+        if matrix is None and whole_slide:
+            shape = (int(row["roi_h"]), int(row["roi_w"]))
+            reference_shape = (int(row["reference_h"]), int(row["reference_w"]))
+            offset_y, offset_x = int(row["canvas_offset_y"]), int(row["canvas_offset_x"])
+            if row["output_kind"] == "rgb_ome":
+                record = dict(row, dy=final_dy, dx=final_dx)
+                cropped = rgb_export.apply_transform_to_rgb_canvas(
+                    moving_rgb, record, shape, reference_shape, offset_y, offset_x,
+                )
+            else:
+                cropped = roi_reg.realign_mihc_test.apply_final_transform_to_canvas(
+                    moving_rgb, final_dy, final_dx, rotation_deg, shear_x_deg, shear_y_deg,
+                    image_scale, fill, shape, reference_shape, offset_y, offset_x,
+                )
+        elif matrix is None:
             transformed = roi_reg.transform_rgb(
                 moving_rgb, final_dy, final_dx, rotation_deg, shear_x_deg,
                 shear_y_deg, image_scale, out_shape,
@@ -414,15 +506,26 @@ def apply_one(row, adjustment, dry_run):
             cropped = roi_reg.crop_roi_from_padded(transformed, row)
         else:
             shape = (int(row["roi_h"]), int(row["roi_w"]))
-            cropped = np.empty((*shape, 3), dtype=moving_rgb.dtype)
             inverse = AffineTransform(matrix=np.linalg.inv(matrix))
-            for channel in range(3):
-                cropped[:, :, channel] = warp(
-                    moving_rgb[:, :, channel], inverse_map=inverse,
-                    output_shape=shape, order=1, mode="constant", cval=255,
+            if moving_rgb.ndim == 2:
+                cropped = warp(
+                    moving_rgb, inverse_map=inverse,
+                    output_shape=shape, order=1, mode="constant", cval=fill,
                     preserve_range=True,
                 ).astype(moving_rgb.dtype)
-        roi_reg.write_rgb_tiff(output_path, cropped)
+            else:
+                cropped = np.empty((*shape, 3), dtype=moving_rgb.dtype)
+                for channel in range(3):
+                    cropped[:, :, channel] = warp(
+                        moving_rgb[:, :, channel], inverse_map=inverse,
+                        output_shape=shape, order=1, mode="constant", cval=fill,
+                        preserve_range=True,
+                    ).astype(moving_rgb.dtype)
+        if whole_slide:
+            writer = rgb_export.write_rgb_ome if row["output_kind"] == "rgb_ome" else roi_reg.realign_mihc_test.write_ome_tiff
+            writer(output_path, cropped, float(row["pixel_size_um"]))
+        else:
+            roi_reg.write_rgb_tiff(output_path, cropped)
         return {
             **manual_details,
             "status": "WROTE",
@@ -442,11 +545,11 @@ def apply_one(row, adjustment, dry_run):
         gc.collect()
 
 
-def result_lines(adjustments_path, results):
+def result_lines(adjustments_path, results, debug_root=None):
     lines = [
         "apply_manual_roi_shifts",
         "timestamp\t" + datetime.now().astimezone().isoformat(),
-        "debug_root\t" + str(DEBUG_ROOT),
+        "debug_root\t" + str(DEBUG_ROOT if debug_root is None else debug_root),
         "adjustments\t" + str(adjustments_path),
         "",
         "final_dy/final_dx describe displacement at the padded image center; source_to_roi_matrix maps original padded pixels directly to output ROI pixels.",
@@ -486,20 +589,23 @@ def write_lines(path, lines):
     roi_reg._retry_io("write_text", path, lambda: path.write_text("\n".join(lines) + "\n", encoding="utf-8"))
 
 
-def main(debug_txt=None, adjustments=None, dry_run=False, max_outputs=None):
+def main(debug_txt=None, adjustments=None, dry_run=False, max_outputs=None, debug_root=None):
+    if debug_root is None and debug_txt is not None:
+        debug_root = Path(debug_txt).parent
+    debug_root = Path(DEBUG_ROOT if debug_root is None else debug_root)
     if adjustments is None:
         adjustments = prompt_for_adjustments()
     else:
         adjustments = Path(adjustments)
 
-    debug_tables = load_debug_tables(debug_txt)
+    debug_tables = load_debug_tables(debug_txt, debug_root)
     adjustment_rows = read_adjustments(adjustments)
     pairs = selected_rows_from_debugs(debug_tables, adjustment_rows)
     if max_outputs is not None:
         pairs = pairs[:max_outputs]
 
     if debug_txt is None:
-        print("debug root:", DEBUG_ROOT)
+        print("debug root:", debug_root)
         print("debug files searched:", len(debug_tables))
     else:
         print("registration debug:", debug_txt)
@@ -513,8 +619,8 @@ def main(debug_txt=None, adjustments=None, dry_run=False, max_outputs=None):
         result["source_debug"] = str(source_debug)
         results.append(result)
 
-    apply_debug_path = next_debug_path(DEBUG_ROOT)
-    write_lines(apply_debug_path, result_lines(adjustments, results))
+    apply_debug_path = next_debug_path(debug_root)
+    write_lines(apply_debug_path, result_lines(adjustments, results, debug_root))
     print("manual apply debug written:", apply_debug_path)
     print("Done!")
     return results
@@ -522,7 +628,8 @@ def main(debug_txt=None, adjustments=None, dry_run=False, max_outputs=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Apply manual ROI shift deltas from register_ROIs_mIHC debug rows.")
-    parser.add_argument("--debug-txt", type=Path, default=None, help="register_ROIs_mIHC_debug_N.txt. Default latest.")
+    parser.add_argument("--debug-root", type=Path, default=None, help="Folder containing ROI manifests or whole-slide runs. Default DEBUG_ROOT.")
+    parser.add_argument("--debug-txt", type=Path, default=None, help="One ROI manifest or whole-slide output_canvas.txt; otherwise search DEBUG_ROOT.")
     parser.add_argument("--adjustments", type=Path, default=None, help="Manual TSV/CSV/JSON. Default prompts for newest Downloads TSV.")
     parser.add_argument("--dry-run", action="store_true", help="Parse and report without writing TIFFs.")
     parser.add_argument("--max-outputs", type=int, default=None, help="Only apply this many listed corrections.")
@@ -532,4 +639,5 @@ if __name__ == "__main__":
         adjustments=args.adjustments,
         dry_run=args.dry_run,
         max_outputs=args.max_outputs,
+        debug_root=args.debug_root,
     )
