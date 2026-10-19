@@ -1,0 +1,538 @@
+Classifier operability: recipe audit and required control surface v0
+==================================================================
+2026-10-19
+
+Implementation update, after the audit:
+  home.classifier is now registered for GUI/recipe replay with explicit sources,
+  training/inference controls, parallel CSV/triplet adapters, unlabelled forward
+  prediction, original-mask identity checks and a durable result.json handoff.
+  See ../_usage_guides/classifier_recipes_v0.md for the supported contract.
+  Model architectures/ENDO extension, automatic result chaining and prediction
+  attachment remain deferred. The audit below is the PRE-IMPLEMENTATION snapshot
+  and design rationale; statements about missing implemented surfaces refer to
+  that snapshot, not the latest code.
+
+Scope: read the implemented recipe framework and current classifier, verify
+their boundaries, and propose the controls needed for operational/ML experiments.
+This document does not implement recipe actions, change model behavior, or launch
+production training. It supersedes assumptions in the 2026-10-14 DAS3 reply where
+the implemented recipe framework now provides the previously proposed behavior.
+
+Confirmed user preference during this audit:
+  Separate models/checkpoints by available inputs are acceptable. An endothelial-
+  capable model may require an endothelial signal. Supporting missing input
+  modalities within one checkpoint is optional future experimentation, not an
+  initial requirement. Existing three-signal models must remain usable.
+
+Findings are marked CURRENT, VERIFIED or PROPOSED. Proposed action names/settings
+are not runnable recipe contracts yet. Current --actions/--action output remains
+authoritative for implemented actions.
+
+
+1. Recipe framework: readiness and limits
+------------------------------------------
+CURRENT -- reusable and suitable for the classifier port:
+
+  support/recipe_actions_v0.py
+    One Action/MENUS registry with stable IDs, lazy module:function targets,
+    answer descriptions/kinds, conditional answers and replayable flags.
+    Reuse it; no separate classifier recipe registry is required.
+
+  support/recipe_v0.py
+    check() walks declarations without importing/calling action targets.
+    ask() binds named answers and records actual values on the owning step.
+    collection() separates real interactive collection from execution.
+    Unread/undeclared answers fail; explicit 0, False, '', [] remain values.
+    Per-step status, answers, outputs/incomplete_outputs and group/category
+    scope are retained. Caught failures propagate to parent/run status.
+
+  run_recipe.py
+    Cheap --actions, --action, --list and --check; real --run enters the normal
+    controller with headless I/O. Inspection/checking needs only stdlib.
+    Interactive missing choices are reported as future prompts; GUI/DS workflow
+    collection completes choices once before repeated group execution.
+
+  controler.py
+    perform_action/replay_recipe invoke ordinary controller wrappers, maintain
+    recording, and write recipe/run evidence. Loading can select an explicit
+    folder/stem. Recipe storage uses the explicit active data folder; ancestor
+    project-config inheritance does not imply inherited recipe lookup.
+
+VERIFIED -- 68 recipe tests pass using:
+  python -m unittest discover -s tests -p 'test_recipe*.py'
+Coverage includes structural checks, recording/replay, real processing/figures,
+scripted GUI and DS missing-answer collection, failure handling and old/new
+processing/plotting parity. Optional Leiden uses a boundary double; this is not
+a real Scanpy numerical proof or a manual browser usability assessment.
+
+Test-runner note: invoking the processing/clustering/threshold test modules by
+tests.<module> initially failed their bare helper imports. Discovery with -s tests
+is the working invocation; the resulting complete suite passed. This was a test
+import-path issue, not evidence of three failed scientific implementations.
+
+Important limits for the classifier port:
+
+  A. No registered classifier action exists. home.prepare is unported and is
+     rejected for replay; clicking its classifier submenu is still interactive.
+     Register a supported classifier action directly, rather than recording menu
+     numbers or claiming the entire Prepare Data workflow has been ported.
+
+  B. --check is structural. Answer kinds/help are descriptive, not a deep type
+     system. A probe with epochs='not-a-number' and inputs=[] against declared
+     number/mapping answers passed check(). This matches the documented boundary.
+     Add a pure classifier settings validator for nested keys, numeric ranges,
+     modes, input/class order and compatibility. Do not stage/train during check.
+
+  C. Step.outputs records artifact references; there is no general producer-
+     consumer reference language. It can record result.json/checkpoint paths now.
+     Later tune -> predict -> import needs explicit selection of the actual
+     returned product, not a directory scan for the newest file.
+
+  D. Headless controller construction currently requires a machine pixel-size
+     preference before any action runs. Classifier sources have their own MPP.
+     Keep the classifier's scale explicit and independent; consider lazy pixel-
+     size requirements for image-only recipes when exposing that entry point.
+
+  E. Run/step context is process-global and sequential. Keep the first recipe
+     port sequential. Child processes must receive explicit resolved settings;
+     they cannot access the parent's implicit recipe step. Parallel experiments
+     need separate processes or an explicitly isolated context implementation.
+
+  F. run.log and completed-step events are finalized at their context boundary.
+     An hours-long CNN operation needs its existing live run_log/debug_summary
+     and durable result/status paths linked from the recipe record. Incremental
+     recipe logging/heartbeat can improve interruption recovery later. The
+     framework does not roll back checkpoints/files if a run fails.
+
+The old v2.1 concern about executing actions during structural preflight has
+been addressed: implemented check() does not replay collecting actions. The
+classifier collector must still avoid filesystem/state effects when invoked
+for real interactive answer collection.
+
+
+2. Current classifier capabilities and hard limits
+---------------------------------------------------
+CURRENT architecture:
+  marker TIFFs -> normalized marker maxima in ordered semantic groups ->
+  PixelUNet encoder+decoder -> linear 1x1 convolution -> native-grid logits ->
+  overlapping-tile probability stitching -> mean probability per mask cell.
+
+Only the image enters model.forward(). Masks define supervision and aggregate
+outputs. forward_features() includes both U-Net down and up paths. There is no
+separately pretrained encoder, configurable MLP head, or CoE implementation in
+the current classifier. The existing MLP gradient check manually replaces the
+head; it does not make MLP checkpoints reconstructible from saved configuration.
+No experts_v*/CoE source was located by the filename search in this workspace.
+
+CURRENT reusable seams:
+  model.build_model(config), forward_features(), model.head;
+  scene/manifest input contracts, lazy tile datasets, train loop;
+  cell predictions/metrics, ROI stitching and reports;
+  new-output-folder policy, checkpoint reload/export verification;
+  DAS-global paths/config/prompt/image helpers from the previous migration.
+
+CURRENT blockers to recipe-only experiments:
+  - run_project.main offers mode/dataset/settings/paths but scientific knobs
+    EPOCHS, TUNE_LR, REPLAY_FRACTION, SPLIT_SEED, DEVICE, PREDICT_SPLIT and
+    TRAIN_SETTINGS are still module globals. Dataset names select hardcoded
+    presets, not a generic list of independently described datasets.
+  - Adapters accept ah08, bcc or a standardized manifest. AH08 reads an obs-like
+    CSV with slide_scene/ObjectNumber; it is not a generic aligned-triplet API.
+    BCC discovery has its own filename pattern, SVS lookup, label mapping and
+    an inspected-ROI special case. A different path alone does not generalize it.
+  - BCC/AH08 mixing exists only as a special replay branch keyed on dataset=bcc.
+    It is not arbitrary multi-dataset composition or per-source sampling.
+  - Three ordered input groups and four ordered output classes are explicitly
+    enforced in run.py/run_project.py. Report colors/legends/composites assume
+    those same classes/channels. A fifth-class report probe raised IndexError.
+  - initialize_model requires identical model/class/group schema and scale;
+    it performs strict whole-model loading. Channel/class extension and selective
+    feature initialization require a new explicit transfer path.
+  - run_project returns a parent folder; the controller discards it. Products
+    have mode-specific paths, including results/best.pt after train/tune.
+  - Source adaptation currently expects label tables even for prediction. Empty
+    supervision needs an explicit supported contract before deploying on entirely
+    unannotated ROIs; a header-only labels fixture raises TypeError in the
+    object-dtype np.isfinite ID check in data.read_scene.
+
+Keep current modes distinct: prepare stages/validates inputs; predict is forward
+only; train_test starts fresh; tune_test uses parent weights with fresh optimizer.
+The existing checkpoint is not an optimizer-resume snapshot.
+
+
+3. Parallel label inputs; one downstream image pipeline
+--------------------------------------------------------
+PROPOSED -- each dataset entry independently specifies labels and image assets.
+Support these label adapters in parallel:
+
+  das_triplet
+    explicit saved folder/stem OR explicitly selected active session triplet;
+    label column/table, scene column, object-ID column or declared index parser;
+    source category -> canonical class mapping, blank/ignore policy.
+
+  classified_csv
+    explicit file or folder/glob, column selectors, scene association either in
+    the table or explicit per-ROI manifest, object-ID selector, label mapping.
+
+  manifest
+    existing standardized scene contract, retaining its provenance and splits.
+
+Prediction additionally needs an explicit no-truth path: images/masks with no
+label source are valid deployment inputs, while supervised train/validation
+require the declared labels. Normalize empty cell-ID columns to the intended
+integer dtype; distinguish 'no scored truth' from measured zero performance.
+
+Every entry also describes image/mask roots/specifications, channel selection,
+scene association, physical scale/provenance and source identity. A DAS triplet
+contains cell measurements, observations and coordinates; it does not guarantee
+raw marker TIFFs, segmentation IDs or masks. Tabular intensities cannot supply
+the spatial CNN's missing image/mask inputs. Resolve those associations explicitly
+using existing DAS path/image conventions and generic source expansion.
+
+Use the existing aligned-triplet loading behavior. controler.load_triplet uses
+shared indices and string-normalizes observations; a classifier adapter must
+account for source blanks represented as strings and report alignment losses.
+Do not silently parse a numeric cell ID from an arbitrary index suffix.
+
+Mixing means a recipe can list multiple dataset entries with different label
+adapters, mappings, markers and roots; all produce the same standardized scene
+records. The trainer remains independent of which file structure supplied labels.
+
+Required per-entry information:
+  dataset ID and cohort/batch/panel metadata; stable source ROI identity;
+  label source/column/object/scene selectors and versioned mapping;
+  source label scope/quality/exhaustiveness; images/mask association/version;
+  raw marker -> ordered semantic signal mapping and availability;
+  scale and grid provenance; selected scenes; primary/replay role or sampling
+  weight if that sampling policy is enabled.
+
+Default conflicting labels from overlapping sources should fail with an audit
+report. A later explicit precedence/consensus policy can resolve them. Do not
+concatenate duplicate labels as independent cells or silently prefer a file.
+
+
+4. Mixed-source split identity is a prerequisite
+------------------------------------------------
+VERIFIED boundary: data.read_manifest checks duplicate scene IDs, scene JSON
+paths, parent IDs across splits and resolved staged mask paths. A fixture using
+two distinct staged folders, different scene IDs and the same original mask in
+both ingest reports was accepted for train/test. It does not inspect original-
+source identity in ingest reports. This is a mixing risk, not a claim that the
+existing BCC experiment is contaminated.
+
+PROPOSED -- build one combined source inventory and allocate/validate globally
+BEFORE staging independent datasets. Carry original ROI/acquisition identity
+and mask identity/version into standardized metadata. Detect duplicate physical
+sources presented through triplet and CSV adapters, including aliases/copies.
+Dataset namespaces prevent name collisions but do not prove independence.
+
+Keep all tiles from one original ROI/slide_scene in one split. Offer the current
+ROI allocation as the default plus explicit grouping by slide/patient/cohort for
+generalization experiments. Freeze and reuse an allocation table for comparison;
+a seed alone is insufficient if files matching a glob change between runs.
+Reserved sources stay inventoried outside active training/evaluation manifests.
+
+Per-dataset roles/weights need a defined sampling unit: cells, ROIs or tiles.
+Current epochs visit each primary tile and add replay tiles; that policy can be
+retained initially, made explicit, and generalized later. Do not let a large
+weak-label source silently overwhelm a smaller conservative source by accident.
+
+
+5. Required recipe controls
+----------------------------
+PROPOSED -- register one discoverable home.classifier action initially, usable
+from both startup/loaded-data menus and the existing Prepare Data path. Its
+named answers may include these structured groups. Extend the existing registry;
+do not add a second recipe format, arbitrary code hooks, or a separate trainer.
+
+  mode           inspect_inputs / prepare / predict / train_test / tune_test.
+                 inspect_inputs would be new: real inventory/compatibility/
+                 coverage checks without staging full image caches or training.
+                 Structural --check remains cheaper and side-effect-free.
+
+  sources        Ordered dataset entries described in section 3. Editing the
+                 label/image paths here changes the selected training material.
+                 Named presets may supply editable defaults, then resolve to
+                 full source specs in the execution record.
+
+  inputs         Ordered semantic input groups, raw marker composition per
+                 source, normalization and target MPP. Existing recipe specifies
+                 'max of normalized markers'; future combiners must be named.
+                 Required groups fail on missing data. Extra unused stains are
+                 allowed. No silent zero plane for an absent required signal.
+
+  taxonomy       Ordered stable class IDs, display names/colors, per-source
+                 label mapping, ignored labels and annotation scope/version.
+                 Mapping unknown categories fails unless an explicit rule exists.
+
+  split          Frozen assignment file or documented allocation/grouping/seed;
+                 selection filters, test/reserve policy and source deduplication.
+
+  model          Feature-extractor architecture/options and predictor-head type/
+                 options. Later input_adapter/fusion choices can be explicit.
+                 Every supported choice must reconstruct from its checkpoint.
+
+  initialization
+                 fresh / exact-compatible warm start / feature transfer;
+                 source checkpoint, named components/rows/channels to load,
+                 trainable parts and mode behavior for frozen features.
+                 Record loaded/new/rejected weights and the parent digest.
+
+  training       Epochs or explicit update budget, optimizer/LR/batch/device,
+                 seed, class weights/cap, augmentation, replay/source sampling,
+                 validation cadence and selection metric. Record derived steps.
+
+  evaluation     Prediction split, supported-class/cohort scoring, report scope,
+                 full-ROI inference controls and export options. Keep per-class
+                 support visible; do not compare differently scoped macro-F1
+                 as though both measured the same class/label task.
+
+  output         Parent root, run label, report/cache budget and new-run policy.
+                 Return a durable result.json listing actual checkpoint,
+                 predictions, metrics, split/config/provenance and status paths.
+
+Conditional answers are mode-dependent; classifier validation must explain
+those requirements even though generic check only understands optional fields.
+Publish complete templates and nested field help/examples so an agent need not
+inspect Python to learn the allowed model/training/source keys. Recipe inspection
+and cheap schema validation should stay free of Torch/scientific imports.
+
+Default precedence: explicit recipe answers > project defaults > launcher defaults.
+Record resolved values, their origins and the explicit path base once. Existing
+relative meanings must not change with GUI CWD or recipe JSON placement. A named
+preset is a convenience; a completed run must retain its full effective settings.
+Use one immutable resolved settings object, also consumed by standalone launchers.
+Use keyword arguments/explicit fields, not temporary module-global patching.
+
+
+6. Example shape -- proposal only, not runnable today
+------------------------------------------------------
+The following shows why separate sources are useful. It uses current four-class
+semantics; source mappings and filenames are illustrative, not validated inputs.
+
+{
+  "name": "mixed_sources_baseline",
+  "steps": [{
+    "do": "home.classifier",
+    "with": {
+      "mode": "train_test",
+      "sources": [
+        {
+          "id": "curated_triplet",
+          "labels": {
+            "adapter": "das_triplet", "folder": "D:/data/curated",
+            "stem": "curated_v1", "scene_column": "slide_scene",
+            "object_id_column": "ObjectNumber", "column": "Celltype: CLASSIFIER",
+            "map": {"IMMUNE": "IMMUNE", "EPI": "EPI",
+                    "UNCLASSIFIED": "UNCLASSIFIED", "ARTIFACT": "ARTIFACT"}
+          },
+          "assets_manifest": "D:/data/curated/roi_assets.csv"
+        },
+        {
+          "id": "external_csvs",
+          "labels": {
+            "adapter": "classified_csv", "spec": "D:/data/new_batch/**/*.csv",
+            "scene_column": "slide_scene", "object_id_column": "ObjectNumber",
+            "column": "class", "map": {"Tumor": "EPI", "Immune": "IMMUNE",
+                                         "Other Cells": "UNCLASSIFIED"}
+          },
+          "assets_manifest": "D:/data/new_batch/roi_assets.csv"
+        }
+      ],
+      "inputs": {"groups": ["NUC", "IMMUNE", "EPI"], "target_um_per_px": 0.5},
+      "taxonomy": {"classes": ["IMMUNE", "EPI", "UNCLASSIFIED", "ARTIFACT"]},
+      "split": {"assignments": "D:/data/comparisons/frozen_splits.csv"},
+      "model": {"architecture": "pixel_unet", "head": {"type": "linear"}},
+      "initialization": {"mode": "fresh"},
+      "training": {"epochs": 10, "lr": 0.001, "seed": 7},
+      "output": {"root": "D:/CLASSIFIER_OUTPUT", "label": "mixed_baseline"}
+    }
+  }]
+}
+
+roi_assets.csv is a proposed explicit association surface, not a currently
+implemented reader. It must include marker/signal composition, image/mask/source
+identity, scale and provenance sufficient to avoid filename guessing. Generic
+path/glob/convention discovery can produce the same association record. Do not
+make a bespoke manifest mandatory for ordinary supported file layouts.
+
+
+7. Endothelial extension: three independent changes
+----------------------------------------------------
+PROPOSED -- distinguish these controls:
+
+  New input signal
+    Add an endothelial semantic group built from the selected stain(s). First
+    implementation can append its plane and expand the first convolution.
+    A separate input branch/fusion head is an alternative architecture, not a
+    prerequisite for adding one more channel. Keep NUC/IMMUNE/EPI model usable.
+
+  New output class
+    Add ENDO to the ordered taxonomy and output layer; generalize label mapping,
+    colors/legends/composites, reports and checkpoint compatibility checks.
+    More inputs do not automatically add a class, and extra classes need not
+    always correspond one-to-one to stain groups (ARTIFACT already does not).
+
+  Weight transfer
+    Keep old checkpoint immutable. Start a new checkpoint with compatible
+    feature weights and explicitly initialized expanded inputs/output rows.
+    Copy channels/classes by semantic name where appropriate, not index alone.
+    Record all changes. Warm start with exact schema stays available separately.
+    strict=False is not a transfer policy; mismatched tensor sizes still need
+    explicit filtering/initialization.
+
+Existing model features can seed this experiment; improvement is empirical.
+Freezing 'encoder' means the down path only; freezing 'features' means down+up.
+Freezing parameters alone is insufficient for future BatchNorm/dropout features;
+training mode must preserve the intended frozen behavior after model.train().
+
+Important label issue:
+  Historical UNCLASSIFIED/Other labels can include endothelial cells. The
+  2026-10-13 source inspection in NEXT_STEPS.md explicitly records endothelial
+  gating/matrix categories mapped to UNCLASSIFIED in the old AH08 column. This
+  is historical evidence about that inspected copy, not a fresh server audit.
+  New five-class training cannot treat all those old Other labels as definite
+  non-endothelial negatives while claiming unchanged label meaning.
+
+Minimal policy: recover/relabel the original fine annotations where available,
+or ignore ambiguous old Other rows while retaining compatible immune/epi/artifact
+labels. Optional later work: allowed-class-set/partial-label loss for coarse
+annotations. This is absent today. Never invent ENDO truth from a broad Other
+label. Version taxonomy/mappings and preserve source annotation scope.
+
+Confirmed user preference means the initial ENDO model can require its signal.
+A three-signal checkpoint remains the choice for panels lacking it. Zero-filled
+missing inputs or a morphology-only fallback must not be silently substituted.
+
+
+8. MLP versus CoE and other engine comparisons
+----------------------------------------------
+PROPOSED initial registry:
+  architecture=pixel_unet; head=linear or pixel_mlp.
+  Pixel MLP means pointwise 1x1 layers on spatial U-Net features. An MLP on
+  pooled cell embeddings is a separate model family and different supervision/
+  aggregation behavior, not the same comparison with a renamed head.
+
+Add CoE after specifying whether it is:
+  (a) several feature-to-class experts plus router at the head seam, or
+  (b) a complete spatial expert/workspace backbone with its own dynamics.
+Both can be experiment options, but they need different factories/options. Count,
+routing granularity, fusion, auxiliary losses and any recurrent state/reset
+contract are architecture decisions. The present code implements neither.
+
+Image models should produce the same native-grid class logits for the existing
+stitching/cell aggregation path. Generalize input-size requirements instead of
+requiring every architecture to expose a fictional U-Net depth. Checkpoint
+config must rebuild every selected head/model before loading its state dict.
+
+Explicit feature pretraining is a separate operation with its own objective,
+training-only data inventory and checkpoint; it is not enabled by choosing a
+new head. Optional frozen-feature caches also need augmentation/recipe identity.
+
+For comparisons, freeze data allocation/labels and record budgets, actual
+updates/epochs, seeds, model/initialization, class support and validation metric.
+Write a small comparison table with result paths. Copied recipes are sufficient
+initially; a Cartesian sweep scheduler or learning-curve engine is later work.
+Use validation for repeated selection; preserve a final test set rather than
+repeatedly choosing architecture on test scores. Retain independent review where
+proxy training labels are suspected to be worse than predictions.
+
+
+9. Result handoff and DAS triplet output
+----------------------------------------
+PROPOSED -- return actual products with status and role through a durable result
+record; attach its path to recipe.current_step().outputs. Prefer existing shared
+artifact publication helpers. Preserve separate scientific run folders and the
+recipe orchestration record, linked by run/step identity.
+
+First recipes can use explicit checkpoint paths. Later same-recipe chaining can
+select an explicit prior named result from session state; define failure/scope
+semantics before adding it. Do not use 'latest' across independent runs or add
+unbounded interpolation/eval machinery merely to forward one checkpoint path.
+
+Prediction import should be its own explicit action:
+  read validated predictions; join by source scene + object/mask identity;
+  preserve aligned triplet row order; append namespaced predicted label,
+  probability/confidence and provenance columns; leave source truth columns
+  intact; report duplicate/missing/unmatched IDs. Save a new triplet stem when
+  persistence is requested. A returned CSV alone does not update observations.
+
+This permits load/derive labels -> train/predict -> attach -> existing analysis/
+plot recipes while keeping per-ROI CSV operation independent of an active triplet.
+Source truth and model predictions must remain distinguishable on later training
+exports; using a model's own predictions as new truth requires explicit policy.
+
+
+10. Recommended order and acceptance gates
+--------------------------------------------
+Pass 1 -- operability with current model
+  Pure resolved settings schema; explicit knobs; one registered classifier action;
+  current four-class/three-signal baseline; inspect_inputs operation; complete
+  template and --action nested help; actual result product record. Standalone
+  launchers feed the same core. A recipe path edit should suffice for a different
+  source following the same declared layout/label scheme.
+
+Pass 2 -- generic label adapters and composition
+  Triplet/CSV/manifest sources, image/mask associations, mapping scope, combined
+  inventory, duplicate/conflict detection, frozen allocation, per-source metrics
+  and explicit sampling. Retire hardcoded BCC replay orchestration in favor of
+  source descriptions; retain disposable format adapters for messy datasets.
+
+Pass 3 -- reconstructible simple model experiments
+  Dynamic inputs/classes/reports; linear/MLP factory; explicit compatible feature
+  transfer/freezing; Endothelial experiment with correctly mapped labels and
+  required input signature. Preserve old model load/prediction behavior.
+
+Pass 4 -- CoE/representation experiments and workflow conveniences
+  Define/implement CoE family, pretraining objectives, optional result chaining,
+  comparisons/learning curves, feature caches as evidence warrants. Prediction
+  attachment can be brought forward if it is needed for the first DAS workflow.
+
+Acceptance tests with small fixtures:
+  - Recipe inspection/check has no heavy imports, engine calls or filesystem
+    writes. Pure configuration errors fail before staging or loading weights.
+  - GUI/DS collection and headless replay reach the same resolved classifier
+    settings and one engine. Changing recipes between sequential runs does not
+    leak globals; explicit zero/empty/false values survive.
+  - The same labelled source supplied as triplet or per-ROI CSV yields equivalent
+    cell/scene records. Mixing sources preserves provenance and ordering.
+  - Duplicate original ROIs across adapters cannot cross splits under aliases,
+    copied staging masks, or conflicting source labels.
+  - Fresh/warm-start/feature-transfer modes are explicit; parent digests remain
+    unchanged; shape/input/class migration reports show every loaded/new tensor.
+  - Linear/MLP/CoE choices that are implemented rebuild from checkpoint and
+    pass gradient, output-shape and saved-export round-trip checks.
+  - ENDO labels/inputs/color reports work; missing required stain fails; ambiguous
+    historical Other labels obey the chosen ignore/relabel policy.
+  - Truth is never needed for forward predictions; unknown truth is ignored,
+    not silently assigned Other; per-source label scope accompanies metrics.
+  - Failure/interrupt leaves evidence and partial products distinct; zero exit
+    without a required child product cannot publish a successful result.
+  - Attaching predictions preserves truth columns and triplet row alignment.
+
+
+Evidence and audit validation
+------------------------------
+Inspected implemented code, not only the old plan:
+  support/{recipe_v0,recipe_actions_v0,io_adapter,project_config}.py;
+  run_recipe.py; controler.py recipe lifecycle, classifier and triplet boundaries;
+  _usage_guides/recipe_{authoring,porting}_guide_v0.txt;
+  CLASSIFIER/{run_project,run,adapters,prepare_classified,prepare_real,data,
+              model,config,train,infer,streaming,report,outputs}.py;
+  CLASSIFIER/{ENGINE_EXPERIMENTS,future_experiments_plan_v0,NEXT_STEPS}.md;
+  classifier_plan_v1.txt; _planning/recipe_framework_plan_v3.txt section 13;
+  prior recipe_framework_reply_DAS3_v0.txt and shared I/O guides.
+
+Checks performed:
+  68 recipe tests passed via unittest discovery (see section 1).
+  Targeted temporary-file probes confirmed structural-only nested value checks,
+  absent classifier action, duplicate-original-source limitation, fifth-class
+  report failure and header-only label ingestion failure. These probes did not
+  alter source datasets or model checkpoints.
+  18 existing classifier tests passed: test_classified, test_streaming,
+  test_entrypoints and test_tile_rescue. Their tiny fixtures include a real
+  model training/checkpoint/export round trip; no production run was launched.
+
+Audit scope: operational recipe integration, data/model controls and relevant
+scientific invariants. No claim of a comprehensive numerical audit of every
+plotting action, optional dependency, acquisition platform or external CoE engine.
