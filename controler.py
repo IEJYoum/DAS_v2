@@ -11,6 +11,7 @@ IFanalysisPackage5 into a clean, state-aware controller:
 from __future__ import annotations
 
 import builtins
+from copy import deepcopy
 import importlib
 import importlib.util
 import math
@@ -20,7 +21,7 @@ import traceback
 import webbrowser
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Tuple
 
@@ -41,8 +42,10 @@ for _bootstrap_dir in _BOOTSTRAP_DIRS:
 
 import frontend
 import io_adapter as io
+import recipe_v0 as recipe
+import recipe_actions_v0 as recipe_actions
 import spine
-from path_compat import is_foreign_path_text, native_path_text
+from path_compat import is_foreign_path_text, native_path_text, resolve_native_path
 from shared_utils import (
     append_artifact_manifest_row,
     checkChange,
@@ -126,6 +129,7 @@ class SessionState:
     home_logdf: Optional[pd.DataFrame] = None
     home_stem: Optional[str] = None
     triplet_dirty: bool = False
+    recipe_recording: list[dict] = field(default_factory=list)
 
     def state_code(self) -> str:
         return get_state_code(self.logdf)
@@ -707,6 +711,8 @@ def _load_master_config() -> dict[str, str]:
 
 def _save_master_config(data_folder: str | Path, figure_folder: str | Path) -> None:
     global _MASTER_CONFIG_CACHE
+    if io.is_headless():
+        return
     data_path = _resolve_usable_folder(data_folder, "master data_folder")
     if data_path is None:
         io.dprint(f"Skipping master config write; unusable data_folder: {data_folder}")
@@ -757,6 +763,8 @@ def _save_project_config(
     segmentation_root: str | Path | None = None,
     confirm_data_folder: bool = False,
 ) -> None:
+    if io.is_headless():
+        return
     resolved = _resolve_usable_folder(data_folder, "project data_folder")
     if resolved is None:
         io.dprint(f"Skipping project config write; unusable data_folder: {data_folder}")
@@ -877,6 +885,8 @@ def _load_preferred_project_stem(data_folder: str | Path) -> str:
 
 
 def _remember_current_stem(state: SessionState, stem: str | None = None, *, last_action: str = "set_current_stem") -> None:
+    if io.is_headless():
+        return
     text = str(state.stem if stem is None else stem).strip()
     if text == "":
         return
@@ -1076,6 +1086,8 @@ def _adopt_project_context(
         )
         return
     except (PermissionError, OSError, FileNotFoundError) as exc:
+        if io.is_headless():
+            raise
         fallback = _use_fallback_project_folder("Project folder", data_folder)
         io.dprint(f"Recovering from project context load failure: {exc}")
         _adopt_project_context_once(
@@ -1093,6 +1105,8 @@ def _record_project_use(
     *,
     last_action: str,
 ) -> None:
+    if io.is_headless():
+        return
     if _resolve_usable_folder(state.data_folder, "project history data_folder") is None:
         io.dprint(f"Skipping projects.csv write; unusable data_folder: {state.data_folder}")
         return
@@ -1218,36 +1232,119 @@ def _resolve_initial_context(
     }
 
 
+def headless_state(project_folder) -> SessionState:
+    """Construct an explicit project session without startup discovery or writes."""
+    root = resolve_native_path(project_folder, must_exist=True, kind="directory")
+    pixel_size = _configured_pixel_size_um()
+    if pixel_size is None:
+        raise recipe.RecipeError("Set pixel size once in DAS before running a headless recipe")
+    return SessionState(project_root=root, data_folder=root, build_folder=root,
+                        figure_folder=_default_figure_folder(root), stem="",
+                        pixel_size_um=pixel_size, suppress_plot_windows=True)
+
+
+def perform_action(state, action_id, row=None, *, index=None):
+    """The root menus and recipe replay use the same controller action call."""
+    action = recipe_actions.get_action(action_id)
+    if not action.replayable:
+        action.resolve()(state)
+        if action_id != "home.recipes":
+            io.iprint("Recipe recording: this controller entry is not ported yet.")
+        return None
+    position = len(state.recipe_recording) if index is None else index
+    with recipe.step(action_id, row, index=position, recording=True,
+                     scope={"stem_before": state.stem}) as frame:
+        result = action.resolve()(state, **frame.row.get("with", {}))
+        frame.scope.update(stem_after=state.stem, shape=list(state.shape()),
+                           data_folder=str(state.data_folder))
+        if result is False and io.is_headless():
+            raise recipe.RecipeError(f"Action {action_id} did not complete")
+    if result is not False and frame.status == "ok":
+        state.recipe_recording.append(frame.row)
+    return frame
+
+
+def _recipe_input_identity(state):
+    members = []
+    for suffix in TRIPLET_FILES.values():
+        path = state.data_folder / (state.stem + suffix)
+        if path.is_file():
+            stat = path.stat()
+            members.append({"path": str(path), "bytes": stat.st_size,
+                            "modified_ns": stat.st_mtime_ns})
+    return {"stem": state.stem, "members": members}
+
+
+def replay_recipe(state, payload, *, source=None):
+    """Check first, then replay ordinary root actions and retain their evidence."""
+    recipe.check(payload, project=state.data_folder, interactive=not io.is_headless())
+    effective = deepcopy(payload)
+    with recipe.run_record(payload, state.data_folder, source=source,
+                           pixel_size_um=state.pixel_size_um,
+                           devmode=False if io.is_headless() else None,
+                           stem=state.stem, inputs=[]) as run:
+        for index, row in enumerate(payload["steps"]):
+            before = len(state.recipe_recording)
+            frame = perform_action(state, row["do"], row, index=index)
+            effective["steps"][index] = deepcopy(frame.row)
+            run.write_recipe(effective)
+            if row["do"] in {"home.load_prepared_data", "home.load_latest"}:
+                run.metadata["inputs"].append(_recipe_input_identity(state))
+            run.metadata["stem"] = state.stem
+            if not io.is_headless() and _LEGACY_IFA5 is not None:
+                run.metadata["devmode"] = {"processing": _LEGACY_IFA5.ifp.DEVMODE,
+                                           "visualization": _LEGACY_IFA5.ifv.DEVMODE}
+            if len(state.recipe_recording) > before:
+                state.recipe_recording[-1]["source"] = {"name": payload["name"],
+                                                        "date": datetime.now(timezone.utc).isoformat()}
+            if frame.status in {"failed", "interrupted"}:
+                break
+            if state.triplet_dirty:
+                spine.capture_home_baseline(state)
+    io.iprint(f"Recipe {payload['name']}: {run.metadata['status']} | {run.folder}")
+    return run
+
+
+def recipe_menu(state):
+    while True:
+        choice = menu_index("Recipes", ["run saved recipe", "save recording", "clear recording"])
+        if choice is None:
+            return
+        try:
+            if choice == 0:
+                files = sorted(recipe.recipe_files(state.data_folder).items())
+                project_recipes = (state.data_folder / "recipes").resolve()
+                labels = [f"[{'project' if path.parent.resolve() == project_recipes else 'example'}] {name}"
+                          for name, path in files]
+                selected = menu_index("Saved recipes", labels)
+                if selected is not None:
+                    path = files[selected][1]
+                    io.iprint(f"Recipe file: {path}")
+                    replay_recipe(state, recipe.load_recipe(path), source=str(path))
+            elif choice == 1:
+                name = io.iget("recipe name (blank cancel): ").strip()
+                if name:
+                    description = io.iget("description (blank none): ")
+                    path = recipe.save_recipe({"name": name, "description": description,
+                                               "steps": state.recipe_recording}, state.data_folder)
+                    io.iprint(f"Saved recipe: {path}")
+            else:
+                state.recipe_recording.clear()
+                io.iprint("Recipe recording cleared.")
+        except (OSError, ValueError) as exc:
+            io.iprint(f"Recipe operation failed: {exc}")
+
+
 def main_menu(state: SessionState) -> bool:
-    """
-    Post-load workspace menu.
-    """
     io.flush_session_log()
-    options = [
-        "data editing",
-        "analysis",
-        "visualization",
-        "Support Vector Machine",
-        "old analysis tool",
-        "HTML visualization",
-        "check ROI mailbox",
-        "import study threshold updates",
-    ]
-    functions = [
-        legacy_data_editing_menu,
-        open_processing_menu,
-        open_visualization_menu,
-        open_svm_menu,
-        open_old_tool_menu,
-        open_html_menu,
-        check_roi_mailbox,
-        import_study_threshold_updates,
-    ]
-    idx = menu_index("Main Menu", options)
+    ids = ["home.data_editing", "home.analysis", "home.visualization", "home.svm",
+           "home.old_tool", "home.html", "home.roi_mailbox", "home.threshold_updates",
+           "home.recipes"]
+    idx = menu_index("Main Menu", [recipe_actions.get_action(key).label for key in ids])
     io.flush_session_log()
     if idx is None:
         return not _confirm_quit()
-    functions[idx](state)
+    perform_action(state, ids[idx])
     return True
 
 
@@ -1328,41 +1425,21 @@ def _confirm_quit() -> bool:
 
 
 def startup_menu(state: SessionState) -> bool:
-    """
-    Legacy-style first menu shown before any data is loaded.
-    """
-    functions = [
-        startup_set_base_folder,
-        startup_prepare_data,
-        startup_load_prepared_data,
-        startup_load_last,
-    ]
+    ids = ["home.set_project", "home.prepare", "home.load_prepared_data",
+           "home.load_latest", "home.recipes"]
     while True:
         io.flush_session_log()
         latest = find_latest_stem(state.data_folder)
-        latest_label = latest if latest is not None else "[none]"
-        options = [
-            "set project folder",
-            "prepare data",
-            "load prepared data",
-            "load most recent save [" + latest_label + "]",
-        ]
-        idx = menu_index(
-            "Startup",
-            options,
-            option_descriptions=[
-                "Choose a new default project folder for data and output.",
-                "Includes things like registration, image correction, spectral flow integration, and related preparation workflows.",
-                "Load an existing prepared triplet from the current project folder.",
-                "Load the most recent saved triplet in the current project folder.",
-            ],
-        )
+        options = [recipe_actions.get_action(key).label for key in ids]
+        options[3] += " [" + (latest or "[none]") + "]"
+        idx = menu_index("Startup", options,
+                         option_descriptions=[recipe_actions.get_action(key).description for key in ids])
         io.flush_session_log()
         if idx is None:
             if _confirm_quit():
                 return False
             continue
-        functions[idx](state)
+        perform_action(state, ids[idx])
         if state.has_data():
             return True
 
@@ -1914,18 +1991,33 @@ def startup_spectral_flow_import(state: SessionState) -> None:
     spine.mark_triplet_dirty(state)
 
 
-def startup_load_prepared_data(state: SessionState) -> None:
-    selected = _pick_prepared_triplet_member(state)
-    if selected is None:
-        return
-    _load_triplet_into_state(
-        state,
-        selected.parent,
-        _stem_from_triplet_member(selected),
-        action_function="startup_load_prepared_data",
-        action_label="load_prepared_triplet",
-        summary_label="Loaded prepared triplet",
-    )
+def startup_load_prepared_data(state: SessionState, stem=None, folder=None):
+    def pick_stem():
+        nonlocal folder
+        selected = _pick_prepared_triplet_member(state)
+        if selected is None:
+            return ""
+        if selected.parent != state.data_folder:
+            folder = str(selected.parent)
+        return _stem_from_triplet_member(selected)
+
+    stem = recipe.ask("stem", stem, pick_stem)
+    if not stem:
+        return False
+    if folder is not None:
+        folder = recipe.ask("folder", folder)
+    target = resolve_native_path(folder, base_dir=state.data_folder,
+                                 must_exist=True, kind="directory") if folder is not None else state.data_folder
+    io.iprint(f"Loading prepared data: folder={target} | stem={stem}")
+    loaded = _load_triplet_into_state(
+        state, target, stem, action_function="startup_load_prepared_data",
+        action_label="load_prepared_triplet", summary_label="Loaded prepared triplet",
+        remember_as_current=not io.is_headless())
+    if not loaded and (io.is_headless() or recipe.current_step() is not None):
+        raise recipe.RecipeError(
+            f"Could not load prepared triplet '{stem}' from {target}. "
+            f"Expected {stem}_df.csv, {stem}_obs.csv and {stem}_dfxy.csv.")
+    return loaded
 
 
 def startup_preload_stem(state: SessionState) -> None:
@@ -1947,10 +2039,12 @@ def startup_import_rna_data(state: SessionState) -> None:
 def startup_load_last(state: SessionState) -> None:
     latest = find_latest_stem(state.data_folder)
     if latest is None:
+        if io.is_headless():
+            raise recipe.RecipeError("No saved triplet found in this project")
         io.iprint("No saved triplet found in folder.")
-        return
+        return False
     io.iprint(f"Loading most recent save: {latest}")
-    _load_triplet_into_state(
+    return _load_triplet_into_state(
         state,
         state.data_folder,
         latest,
@@ -1964,12 +2058,19 @@ def legacy_data_editing_menu(state: SessionState) -> None:
     _run_legacy_data_editing(state)
 
 
-def open_processing_menu(state: SessionState) -> None:
-    _run_legacy_processing(state)
+def open_processing_menu(state: SessionState, repeat_column=None, key_strings=None):
+    if not state.has_data():
+        raise recipe.RecipeError("Load data before analysis")
+    return _run_legacy_processing(state, repeat_column=repeat_column, key_strings=key_strings)
 
 
-def open_visualization_menu(state: SessionState) -> None:
-    _run_legacy_visualization(state)
+def open_visualization_menu(state: SessionState, save_folder=None, repeat_column=None,
+                            key_strings=None, categories=None, autoclean=None):
+    if not state.has_data():
+        raise recipe.RecipeError("Load data before visualization")
+    return _run_legacy_visualization(
+        state, save_folder=save_folder, repeat_column=repeat_column,
+        key_strings=key_strings, categories=categories, autoclean=autoclean)
 
 
 def open_svm_menu(state: SessionState) -> None:
@@ -2090,6 +2191,7 @@ def load_legacy_ifa5():
 
     path = (_IFA_ROOT / "IFA.py").resolve()
     old_chdir = os.chdir
+    old_cwd = os.getcwd()
 
     def _safe_chdir(target):
         try:
@@ -2108,6 +2210,7 @@ def load_legacy_ifa5():
         ) from exc
     finally:
         os.chdir = old_chdir
+        old_chdir(old_cwd)
     return _LEGACY_IFA5
 
 
@@ -2163,6 +2266,12 @@ def legacy_ifa5_context(
     old_ifv_meta = getattr(getattr(module, "ifv", None), "_new_das_meta", None)
     old_ifp_spath = getattr(getattr(module, "ifp", None), "SPATH", None)
     old_ifp_pxsize = getattr(getattr(module, "ifp", None), "PXSIZE", None)
+    devmode_values = [(part, getattr(part, "DEVMODE", False))
+                      for part in (getattr(module, "ifp", None), getattr(module, "ifv", None))
+                      if part is not None]
+    if io.is_headless():
+        for part, _old_value in devmode_values:
+            part.DEVMODE = False
     old_cm_pxsize = getattr(getattr(module, "cm", None), "PXSIZE", None)
     had_ifp_meta = hasattr(getattr(module, "ifp", None), "_new_das_meta") if getattr(module, "ifp", None) is not None else False
     old_ifp_meta = getattr(getattr(module, "ifp", None), "_new_das_meta", None)
@@ -2309,6 +2418,8 @@ def legacy_ifa5_context(
         yield module
     finally:
         state.stem = str(module.TSTEM)
+        for part, old_value in devmode_values:
+            part.DEVMODE = old_value
         module.logInput = old_log_input
         module.DATAFOLDER = old_datafolder
         module.SAVEFOLDER = old_savefolder
@@ -2632,25 +2743,18 @@ def _run_legacy_data_editing(state: SessionState) -> None:
     )
 
 
-def _run_legacy_processing(state: SessionState) -> None:
-    _run_legacy_call(
-        state,
-        action_label="ifp.main",
-        folder=state.data_folder,
+def _run_legacy_processing(state: SessionState, **answers):
+    return _run_legacy_call(
+        state, action_label="ifp.main", folder=state.data_folder,
         event_kind="df_mutating",
-        invoker=lambda module: module.ifp.main(state.df, state.obs, state.dfxy),
-    )
+        invoker=lambda module: module.ifp.main(state.df, state.obs, state.dfxy, **answers))
 
 
-def _run_legacy_visualization(state: SessionState) -> None:
-    _run_legacy_call(
-        state,
-        action_label="ifv.main",
-        folder=state.data_folder,
-        event_kind="param_only",
-        advance_state=False,
-        invoker=lambda module: module.ifv.main(state.df, state.obs, state.dfxy),
-    )
+def _run_legacy_visualization(state: SessionState, **answers):
+    return _run_legacy_call(
+        state, action_label="ifv.main", folder=state.data_folder,
+        event_kind="param_only", advance_state=False,
+        invoker=lambda module: module.ifv.main(state.df, state.obs, state.dfxy, **answers))
 
 
 def _run_legacy_svm(state: SessionState) -> None:
@@ -2713,10 +2817,15 @@ def _run_legacy_call(
                         _resolve_figure_folder_input(runtime_folder, state.data_folder)
                     )
         df, obs, dfxy = _extract_triplet_result(result)
-    except io.UserAbortError:
+    except (io.UserAbortError, recipe.MissingAnswer):
         raise
     except Exception as exc:
         _report_legacy_error(action_label, exc)
+        if io.is_headless():
+            raise
+        owner = recipe.current_step()
+        if owner is not None:
+            owner.status, owner.error = "failed", f"{type(exc).__name__}: {exc}"
         return
 
     df, obs, dfxy = align_triplet(df, obs, dfxy)
@@ -2853,7 +2962,7 @@ def _run_legacy_call(
         event_kind=event_kind,
         advance_state=advance_state,
     )
-    if action_label == "ifv.main":
+    if action_label in {"ifv.main", "ifp.main"}:
         replay_ref = legacy_meta.get("ifv_replay_path")
         state_code_ref = state.state_code()
         for item in list(legacy_meta.get("ifv_saved_rows") or []):
@@ -2861,6 +2970,8 @@ def _run_legacy_call(
             if artifact_path_text == "":
                 continue
             artifact_path = Path(artifact_path_text).resolve()
+            if not artifact_path.is_file():
+                continue
             summary_path = None
             try:
                 summary_path = write_figure_summary_companion(
@@ -2872,6 +2983,11 @@ def _run_legacy_call(
                 )
             except Exception as exc:
                 io.dprint(f"Figure summary companion write failed: {exc}")
+            owner = recipe.current_step()
+            if owner is not None:
+                owner.outputs.append(str(artifact_path))
+                if summary_path is not None:
+                    owner.outputs.append(str(summary_path))
             _write_artifact_stub(
                 artifact_path.parent,
                 artifact_kind="figure",

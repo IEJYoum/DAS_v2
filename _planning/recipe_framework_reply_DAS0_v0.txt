@@ -1,0 +1,169 @@
+Recipe Framework Reply -- DAS0
+================================
+
+Verdict
+-------
+
+The intended direction is good: a recipe should be a durable, readable record of
+choices made through DAS, replayed through the same controller and action paths.
+It should not become a general pipeline language, an alternate UI, or a new
+configuration authority.
+
+The main implementation risk is not JSON parsing.  It is preserving DAS's
+existing lifecycle boundaries while making a recorded choice portable:
+
+    project/session setup -> root workflow context -> collected commands
+    -> execution over groups/categories -> controller post-processing -> outputs
+
+The plan should make those boundaries explicit.  Doing so keeps the framework
+small and gives agents a reliable mental model for drafting recipes.
+
+
+1. The recipe is an intent; the run record is the evidence
+----------------------------------------------------------
+
+A saved recipe answers: "what should DAS try to do?"  It should contain only
+the stable command tree and the answers needed to express that intent.
+
+A run record answers: "what actually happened here?"  It must capture the
+resolved project root, loaded stem/input identity, effective answers, created
+outputs, state changes, start/end times, and each step's final status.  It is
+the place for current code revision, machine-local values that affected results
+(for example pixel size), and any values resolved from project configuration.
+
+This distinction matters because a recipe can intentionally be reused after the
+project data, defaults, or available columns change.  The recipe must not claim
+that it froze those changing facts; the run record must make them inspectable.
+
+
+2. Make the command-tree ownership rule explicit
+------------------------------------------------
+
+The proposed {do, with, steps} shape is enough, but each field needs one plain
+meaning:
+
+- `do` selects one stable action at its current menu level.
+- `with` contains answers owned by that action itself.
+- `steps` contains only child menu actions opened by that action.
+
+In particular, workflow context belongs to the workflow action which owns the
+loop.  A processing repeat column, category filter, or visualization category
+set is not an implicit global answer inherited by arbitrary descendants.  The
+owning action resolves it once, then executes its children under that context as
+DAS does today.
+
+This keeps nested menus ordinary and prevents recipes from acquiring hidden
+cross-step variables.  Earlier actions communicate through the live session
+triplet and deliberate controller state, not a new recipe dataflow language.
+
+
+3. One action boundary, including headless execution
+-----------------------------------------------------
+
+Recipe execution must cross the same controller boundary as an ordinary menu
+choice.  That boundary is responsible for state alignment, project/folder
+adoption, progress/session logging, artifact summaries, output registration,
+and post-action state bookkeeping.  A headless runner that invokes a legacy
+module directly may produce a figure or dataframe but still bypass the behavior
+that makes it a DAS result.
+
+Prompt routing has the same rule.  Recipe values are supplied to the action;
+an omitted interactive value is collected via the existing routed input helper;
+a missing headless value fails with its action id and answer name.  There should
+be no recipe-only input transport.
+
+
+4. Treat failure semantics as part of the recipe contract
+----------------------------------------------------------
+
+DAS actions do not all fail alike.  Some workflows intentionally report an
+individual plot failure and continue with later plots; other failures should
+terminate a processing operation.  The framework should preserve that behavior,
+but make it visible:
+
+- a run record has `ok`, `failed`, or `interrupted` status per requested step;
+- a completed parent with failed children is not silently reported as a clean
+  success;
+- interrupted or failed filesystem products are recorded as such, never promoted
+  as successful outputs;
+- in-memory baseline restoration is useful recovery, not filesystem rollback.
+
+This is especially important for headless agent runs: process exit status and
+the final run summary must reveal partial failure without requiring a person to
+parse a long console log.
+
+
+5. Keep validation honest and layered
+-------------------------------------
+
+The first validation layer should be structural and side-effect free: recipe
+shape, stable action ids, menu placement, allowed answer names, required fields,
+and an explicitly supplied project root.  It should not simulate arbitrary
+legacy actions merely to call itself a dry run.
+
+After loading data, an individual action may run a small readiness check for
+things it owns, such as required columns or output writability.  Full scientific
+validation, expensive loading, and plotting belong to execution.  This gives
+agents useful early errors without pretending that an analysis has been proven
+safe or correct before it runs.
+
+
+6. The first proof should establish the whole lifecycle, not broad coverage
+-------------------------------------------------------------------------
+
+The first recipe slice should be intentionally narrow:
+
+    load a prepared triplet -> one processing command -> one visualization command
+
+It succeeds only if the same recipe can be:
+
+1. built interactively through routed DAS prompts;
+2. saved and inspected as JSON;
+3. checked structurally without mutation;
+4. replayed headlessly through the controller path; and
+5. shown to produce equivalent triplet changes plus the expected figure
+   companions/artifact records.
+
+Compare dataframes with an appropriate numeric tolerance and compare figures by
+their declared outputs and companion metadata, not image bytes.  Also prove that
+an unknown action, wrong nesting, missing answer, and unread answer name fail
+before any requested workflow starts.
+
+Only after that proof should the port expand to harder action families.  The
+porting unit should be a coherent behavior with a parity fixture, not an
+arbitrary number of prompt replacements.
+
+
+7. Keep authoring practical for agents
+--------------------------------------
+
+An agent needs a supported inspection surface, not source archaeology.  The
+recipe launcher should describe every exposed action with its stable id, parent
+menu, human description, accepted named answers, and at least one example row.
+That description is an action contract and should be explicit near the action
+registration; prompt-source scanning can assist maintenance but should not be
+the authority.
+
+Recipes may be edited directly.  There is no need yet for variables, recipe
+calls, loops, conditionals, sweep syntax, sticky values, or a generic settings
+editor.  Copying a small recipe and changing an answer remains the clearest
+agent-friendly sweep mechanism until a real repeated-workflow need establishes
+otherwise.
+
+
+Implementation guardrails
+-------------------------
+
+- Resolve the native recipe project root once at invocation and record it.  Do
+  not infer recipe location from a transient working directory or a config
+  inheritance accident.
+- Preserve deliberate falsey answers: omitted, empty string, false, zero, and
+  empty list are different values.
+- Record symbolic column names and convert them only at the consuming action,
+  with a clear missing/ambiguous-column error.
+- Keep standalone module defaults and interactive development paths working;
+  recipes select operations rather than taking ownership of every module global.
+- Do not remove legacy replay files or positional command handling until the
+  corresponding replacement path has a parity proof and all live callers are
+  known.
+

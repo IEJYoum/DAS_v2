@@ -53,11 +53,14 @@ _NEW_DAS_DIR = Path(__file__).resolve().parents[1] / "support"
 if str(_NEW_DAS_DIR) not in sys.path:
     sys.path.append(str(_NEW_DAS_DIR))
 from shared_utils import (
+    flexMenu as shared_flex_menu,
     checkChange as shared_check_change,
     load_project_config_values,
     save_project_config_updates,
 )
 from das_config import load_pixel_size_um
+import recipe_v0 as recipe
+import recipe_actions_v0 as recipe_actions
 from embedding_utils import load_scanpy_stack
 _IF_ANALYSIS_DIR = Path(__file__).resolve().parents[1]
 if str(_IF_ANALYSIS_DIR) not in sys.path:
@@ -133,124 +136,105 @@ def logInput(prompt, default=None, prompt_meta=None):
     LOG.append([prompt,inp])
     return(inp)
 
-def main(df,obs,dfxy):
-    global CATN
-    global MANUALtHRESHOLDS
-    global PROGRESS_ENABLED
-    obs["all data"] = 'all data'
-    dfs = [df,obs,dfxy]
-    dfa = []
-    try:
-        ch,uch = obMenu(obs,'repeat analysis on each unique value in:')
-    except:
-        ch = list(obs.columns).index('all data')
-        uch = ['all data']
-    print(uch,'uch')
-    kss = []
-    while True:
-        ks = input('key string, if any, for categories to consider (skips others- if blank, processes all) (end with ! for exact match)')
-        if ks == '':
-            break
-        kss.append(ks)
-
-    CATN = obs.columns[ch]
-    print(CATN,uch)
-    #obcol = obs.columns[ch]
-    if input("repeat last run? (y)") == 'y':
-        nn,commands = lastrun(dfs)
-    else:
-        nn,commands = mainMenu(dfs)
-        if input("save commands? (y)")=='y':
-            saveCommands(9,commands,9)
-    selected_uch = 0
-    for uc in uch:
-        kswitch = 0
-        if len(kss) == 0:
-            kswitch = 1
-        for ks in kss:
-            if ks[-1] == '!':
-                nks = ks.split('!')[0]
-                if uc == nks:
-                    kswitch = 1
-                    break
-            elif ks in uc:
-                kswitch = 1
-                break
-        if kswitch == 1:
-            selected_uch += 1
-    total_ticks = selected_uch * len(commands)
+def main(df, obs, dfxy, repeat_column=None, key_strings=None, commands=None):
+    global CATN, PROGRESS_ENABLED
+    if recipe.current_step() is None:
+        with recipe.step("home.analysis"):
+            return main(df, obs, dfxy, repeat_column, key_strings, commands)
+    obs = obs.copy()
+    obs["all data"] = "all data"
+    dfs = [df, obs, dfxy]
+    repeat_column = recipe.ask("repeat_column", repeat_column,
+                              lambda: ifv._prompt_repeat_column(obs))
+    key_strings = recipe.ask("key_strings", key_strings,
+                            lambda: shared_flex_menu(
+                                "key string for repeat categories (end ! for exact match)",
+                                input_fn=logInput))
+    recipe.resolve_columns(obs, [repeat_column])
+    CATN = repeat_column
+    owner = recipe.current_step()
+    commands = recipe.child_rows(commands)
+    saving = False
+    if commands is None and not recipe.collecting():
+        if input("repeat last run? (y)") == "y":
+            commands = recipe.load_last("home.analysis")["steps"]
+        else:
+            saving = True
+    with recipe.collection():
+        _, commands = mainMenu(dfs, commands)
+    owner.row["steps"] = commands
+    if recipe.collecting():
+        return df, obs, dfxy
+    if saving and input("save commands? (y)") == "y":
+        saveCommands(com=commands)
+    sink = globals().get("_new_das_meta")
+    if isinstance(sink, dict) and recipe.run_reference():
+        sink.update(ifp_replay_path=recipe.run_reference(), ifp_replay_mode="recipe")
+    groups = sorted(obs[repeat_column].unique())
+    selected = [group for group in groups if ifv._repeat_value_matches(group, key_strings)]
+    total_ticks = len(selected) * len(commands)
     PROGRESS_ENABLED = total_ticks > 0
     if PROGRESS_ENABLED:
         ifprog.reset_progress(total_ticks, "Processing")
+    parts = []
     try:
-        for uc in uch:
-            key = obs.iloc[:,ch] == uc
-            sdfs = []
-            for d in dfs:
-                sdfs.append(d.loc[key,:])
-
-            kswitch = 0
-            if len(kss) == 0:
-                kswitch = 1
-            for ks in kss:
-                if ks[-1] == '!':
-                    nks = ks.split('!')[0]
-                    if uc == nks:
-                        kswitch = 1
-                        break
-                elif ks in uc:
-                    kswitch = 1
-                    break
-            if kswitch == 0:
-                dfa.append(sdfs)
-                continue
-            sdfs,nn=mainMenu(sdfs,commands,uc)
-            dfa.append(sdfs)
-        odfs = []
-        for i in range(3):
-            bi = []
-            for d in dfa:
-                bi.append(d[i])
-            odfs.append(pd.concat(bi,axis=0))
-        return(odfs[0],odfs[1],odfs[2])
+        for group in groups:
+            key = obs[repeat_column] == group
+            subset = [frame.loc[key, :] for frame in dfs]
+            if group in selected:
+                subset, _ = mainMenu(subset, commands, group)
+            parts.append(subset)
+        if not parts:
+            return df, obs, dfxy
+        return tuple(pd.concat([part[i] for part in parts], axis=0) for i in range(3))
     finally:
         if PROGRESS_ENABLED:
             ifprog.clear_progress()
         PROGRESS_ENABLED = False
 
-'''
-main functions
-'''
 
-
-def menu(dfs,options,functions,com=[],cat=''):
-    print(com,'com into menu')
-    if len(com) == 0:
-        coms = []
+def menu(dfs, menu_id, com=None, cat=""):
+    entries = recipe_actions.MENUS[menu_id]
+    if recipe.collecting():
+        rows = []
+        if com is not None:
+            recipe.check_level(com, menu_id, interactive=True)
+            for index, row in enumerate(com):
+                result, built = recipe.invoke(row["do"], dfs, row, index=index,
+                                         recording=True, cat=cat)
+                if result is not False:
+                    rows.append(built.row)
+            return [], rows
         while True:
             print("\n")
-            for i,op in enumerate(options):
-                print(i,":",op)
+            for index, action in enumerate(entries):
+                print(index, ":", action.label)
+            print("send non-int when done (return to previous menu)")
+            raw = input("number: ").strip()
             try:
-                print("send non-int when done (return to previous menu)")
-                ch = int(input("number: "))
-            except KeyboardInterrupt:
-                raise
-            except:
-                print(coms,"coms out of menu")
-                return([],coms)
-            nn,com=functions[ch](dfs,com=[])
-            coms.append([ch]+com)
-
-    else:
-        for subcom in com:
-            if type(subcom) == list:
-                ch = subcom[0]
-                print('running subcommand:',subcom,options[ch], 'on category',cat)
-                dfs,nn = functions[ch](dfs,subcom,cat)
-                if PROGRESS_ENABLED:
-                    ifprog.tick_progress(f"Processing | {options[ch]} | {cat}")
-        return(dfs,[])
+                choice = int(raw)
+            except ValueError:
+                return [], rows
+            if choice < 0 or choice >= len(entries):
+                print("Invalid option.")
+                continue
+            result, built = recipe.invoke(entries[choice].id, dfs, index=len(rows),
+                                     recording=True, cat=cat)
+            if result is not False:
+                rows.append(built.row)
+    if com is None:
+        raise recipe.MissingAnswer(menu_id, "steps")
+    recipe.check_level(com, menu_id)
+    for index, row in enumerate(com):
+        action = recipe_actions.get_action(row["do"])
+        print("running subcommand:", row, action.label, "on category", cat)
+        result, _ = recipe.invoke(action.id, dfs, row, index=index,
+                                  scope={"processing_group": str(cat)},
+                                  recording=False, cat=cat)
+        dfs = result[0]
+        if PROGRESS_ENABLED:
+            ifprog.tick_progress(f"Processing | {action.label} | {cat}")
+    return dfs, []
 
 
 
@@ -268,117 +252,33 @@ def obMenu(obs,title="choose category:"):
 '''
 menus
 '''
-def mainMenu(dfs,com=[],cat=''):
-    print('main menu')
-    op = ['general data handling','scaling','clustering','batch-correction',
-          'celltyping','neighborhood analysis','apply celltype labels to other labes (e.g. celltype Leiden clusters)',
-          'visualize']
-    fn = [selection,scaling,clustering,batchCorrection,
-          celltyping,neighborhoodAnalysis,clauto,
-          visu]
-    dfs1,coms=menu(dfs,op,fn,com,cat)
-    if len(dfs1) > 0:
-        dfs = dfs1
-    #print(coms,'coms out from mainMenu')
-    return(dfs,coms)
+def mainMenu(dfs, com=None, cat=""):
+    print("main menu")
+    result, rows = menu(dfs, "ifp.main", recipe.child_rows(com), cat)
+    return (result if len(result) else dfs), rows
 
-def lastrun(dfs,com=[],cat=''):
-    replay_path = os.path.abspath('ifp7_lastrun.txt')
-    with open(replay_path,'r') as f:
-        coms = f.readlines()[0]
+def lastrun(dfs, com=None, cat=""):
+    path = recipe.find_recipe("_last_home.analysis", Path.cwd())
     sink = globals().get("_new_das_meta")
     if isinstance(sink, dict):
-        sink["ifp_replay_path"] = replay_path
-        sink["ifp_replay_mode"] = "loaded"
-    print("com read in:",coms,type(coms))
-    com = ifv.s_to_l(coms)[0]
-    print(com,type(com))
-    return(dfs,com)
+        sink.update(ifp_replay_path=str(path), ifp_replay_mode="loaded")
+    return dfs, recipe.load_recipe(path)["steps"][0]["steps"]
 
 
-def saveCommands(dfs=9,com=[],cat=''):
-    print(com)
-    coms = ifv.l_to_s(com)
-    coms = coms.replace("][","],[")
-    print(coms,"COMS OUT")
-    replay_path = os.path.abspath("ifp7_lastrun.txt")
-    with open(replay_path,'w') as f:
-        f.write(coms)
+def saveCommands(dfs=9, com=None, cat=""):
+    row = dict(recipe.current_step().row)
+    if com is not None:
+        row["steps"] = com
+    path = recipe.save_last("home.analysis", row)
     sink = globals().get("_new_das_meta")
     if isinstance(sink, dict):
-        sink["ifp_replay_path"] = replay_path
-        sink["ifp_replay_mode"] = "saved"
-    return(dfs,com)
-
-def s_to_l(coms):
-    print(coms,"use ifv version instead")
-    input('...')
-
-
-    ocom = []
-    print(ocom,"ocom")
-    i = 0
-    while i < len(coms):
-        ch = coms[i]
-        if ch == "[":
-            inbrkt = ""
-            nbrkt = 0
-            j = i+1
-            while True:
-                ch2 = coms[j]
-
-                if nbrkt == 0 and ch2 == "]":
-                    break
-                if ch2 == "[":
-                    nbrkt += 1
-                elif ch2 == "]":
-                    nbrkt -= 1
-                inbrkt += ch2
-                j += 1
-            ocom.append(s_to_l(inbrkt))
-            i = j
-
-        elif ch == "]":
-            i += 1
-        else:
-            cs = ""
-            j = i
-            while True:
-                ch2 = coms[j]
-                j += 1
-                if ch2 == ",":
-                    if len(cs) > 0 and "." in cs:
-                        ocom.append(float(cs))
-                    elif len(cs)>0:
-                        if cs == "False":
-                            ocom.append(False)
-                        else:
-                            try:
-                                ocom.append(int(cs))
-                            except:
-                                ocom.append(str(cs))
-                    break
-                else:
-                    cs+=ch2
-            i  = j
-    return(ocom)
+        sink.update(ifp_replay_path=str(path), ifp_replay_mode="saved")
+    return dfs, row["steps"]
 
 
 
 
-def l_to_s(com,outs = ""):
-    print('use ifv version instead')
-    input('...')
-    outs += "["
-    for item in com:
-        #print(outs)
-        #print(item,'\n')
-        if type(item) == list:
-            outs += l_to_s(item)
-        else:
-            outs += str(item)+','
-    outs += "]"
-    return(outs)
+
 
 
 def checkChange(s,cat=''):
@@ -497,66 +397,32 @@ def _activate_subset_project_context(col, mode, cats):
     return(project_folder, figure_folder)
 
 
-def selection(dfs,com=[],cat=''):
-    print('selection (general data handling)')
-    op = ['save to csv','remove nan values and zero columns','import values from different section based on rank of correlated marker','pick subset of data']
-    fn  = [save,ifv.autoClean,mapByRank,pick]
-    dfs,com=menu(dfs,op,fn,com,cat)
-    #print(com,'com in selection')
-    return(dfs,com)
+def selection(dfs, cat=""):
+    return menu(dfs, "ifp.selection", recipe.child_rows(), cat)
 
 
 
-def scaling(dfs,com,cat=''):
-    print("scaling")
-    op = ['log2',
-          'zscore across samples (cells)',
-          "normalize expression by category mean (HM's idea)",
-          'stretch from 0-1',
-          'multiply two biomarkers',
-          'make biomarker ratio',
-          'trim outliers or subtract channel thresholds',
-          'adjust for negative values',
-          'equalize biomarker level',
-          'combat / JE-TMA combat']
-    fn=[log2, zscore, scaleByMean, stretch, multCols, biomRatio, outliers, remNegatives, equalizeBiomLevel, combat]
-    dfs,com=menu(dfs,op,fn,com,cat)
-    return(dfs,com)
+def scaling(dfs, cat=""):
+    return menu(dfs, "ifp.scaling", recipe.child_rows(), cat)
 
-def clustering(dfs,com,cat=''):
-    """Run clustering on all markers or one temporary keystring-selected subset."""
-    op = ["K-Means","Leiden","n-cluster leiden","GMM","Torch centroid clustering"]
-    fn = [kmeans,leiden,autoleiden,gmm,torchCluster]
-    print('add method to automatically minimize ncl * variance-in-cluster/variance between, or d/dx varin/varbtween relative to other ncl (elbow method)')
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        selected = _prompt_cluster_feature_subset(df)
-        if selected is None:
-            return([df,obs,dfxy],[])
-        cdf,prefix,subset_com = selected
-        cluster_com = []
-    else:
-        subset_com = _cluster_subset_command(com)
-        selected = _apply_cluster_feature_subset(df,subset_com)
-        if selected is None:
-            return([df,obs,dfxy],[])
-        cdf,prefix = selected
-        cluster_com = [
-            item for item in com
-            if isinstance(item,list) and not _is_cluster_subset_command(item)
-        ]
-
+def clustering(dfs, cat="", subset=None):
+    """Select a temporary feature subset, then collect/replay clustering children."""
     global CLUSTER_PREFIX
+    df, obs, dfxy = dfs
+    subset = recipe.ask("subset", subset, lambda: _prompt_cluster_feature_subset(df))
+    if subset is None:
+        return False
+    selected = _apply_cluster_feature_subset(df, subset)
+    if selected is None:
+        raise ValueError("Clustering selection matched no marker columns")
+    cdf, prefix = selected
     old_prefix = CLUSTER_PREFIX
     CLUSTER_PREFIX = prefix
     try:
-        out_dfs,out_com = menu([cdf,obs,dfxy],op,fn,cluster_com,cat)
+        out, rows = menu([cdf, obs, dfxy], "ifp.clustering", recipe.child_rows(), cat)
     finally:
         CLUSTER_PREFIX = old_prefix
-    if len(com) == 0:
-        out_com = [subset_com] + out_com
-    out_obs = out_dfs[1] if len(out_dfs) > 1 else obs
-    return([df,out_obs,dfxy],out_com)
+    return [df, out[1] if len(out) else obs, dfxy], rows
 
 
 def _cluster_key_matches(column,key):
@@ -567,37 +433,23 @@ def _cluster_key_matches(column,key):
     return(key in column)
 
 
-def _is_cluster_subset_command(item):
-    return(
-        isinstance(item,list) and len(item) >= 2 and
-        str(item[0]) == 'cluster_feature_subset'
-    )
 
 
-def _cluster_subset_command(com):
-    for item in com:
-        if _is_cluster_subset_command(item):
-            return(item)
-    # Saved commands from before feature subsets have no selector entry.
-    return(['cluster_feature_subset','all',''])
 
 
-def _apply_cluster_feature_subset(df,subset_com):
-    mode = str(subset_com[1]) if len(subset_com) > 1 else 'all'
-    prefix = str(subset_com[2]) if len(subset_com) > 2 else ''
-    keys = [str(key) for key in subset_com[3:]]
-    if mode == 'all':
-        return(df,prefix)
-    matched = [
-        col for col in df.columns
-        if any(_cluster_key_matches(col,key) for key in keys)
-    ]
-    selected = matched if mode == 'include' else [col for col in df.columns if col not in matched]
-    if len(selected) == 0:
-        print('clustering cancelled: selected marker subset is empty')
-        return(None)
-    print('clustering on',len(selected),'of',df.shape[1],'marker columns')
-    return(df.loc[:,selected].copy(),prefix)
+def _apply_cluster_feature_subset(df, subset):
+    mode, prefix, keys = subset["mode"], subset["prefix"], subset["keys"]
+    if mode == "all":
+        return df, prefix
+    if mode not in {"include", "drop"}:
+        raise ValueError("Cluster subset mode must be all, include or drop")
+    matched = [col for col in df.columns
+               if any(_cluster_key_matches(col, key) for key in keys)]
+    selected = matched if mode == "include" else [col for col in df.columns if col not in matched]
+    if not selected:
+        return None
+    print("clustering on", len(selected), "of", df.shape[1], "marker columns")
+    return df.loc[:, selected].copy(), prefix
 
 
 def _prompt_cluster_feature_subset(df):
@@ -613,7 +465,7 @@ def _prompt_cluster_feature_subset(df):
         prompt_meta=prompt_meta,
     )
     if str(raw).strip().lower() not in ('y','yes','use','true','1'):
-        return(df,'',['cluster_feature_subset','all',''])
+        return {"mode": "all", "prefix": "", "keys": []}
 
     mode_meta = {
         'options': [
@@ -650,25 +502,14 @@ def _prompt_cluster_feature_subset(df):
     prefix = _safe_token(raw_prefix)
     if prefix != raw_prefix:
         print('cluster prefix saved as:',prefix)
-    subset_com = ['cluster_feature_subset',mode,prefix] + keys
-    selected = _apply_cluster_feature_subset(df,subset_com)
-    if selected is None:
-        return(None)
-    cdf,_ = selected
-    return(cdf,prefix,subset_com)
+    return {"mode": mode, "prefix": prefix, "keys": keys}
 
 def batchCorrection(dfs,com=[],cat=''):
     print("batch-correction functions now live in scaling")
     return(dfs,[])
 
-def celltyping(dfs,com=[],cat=''):
-    print('celltyping')
-
-    op = ['SD-type','add labels to existing biomarker phenotype','Maxey type','vector/loss-weight celltyping','manual threshold phenotype','SAM type']
-    fn = [autotype,labelPhenotype,maxeyType,vectorType,manThresh,samType]
-    dfs,com=menu(dfs,op,fn,com,cat)
-    #print(com,'com out from mainMenu')
-    return(dfs,com)
+def celltyping(dfs, cat=""):
+    return menu(dfs, "ifp.celltyping", recipe.child_rows(), cat)
 
 
 def _scoped_output_stem(base_name, cat):
@@ -732,51 +573,78 @@ def mlEvaluation(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def neighborhoodAnalysis(dfs,com=[],cat=''):
-    print('neighborhood analysis')
-    op = ['calculate protein expression in radius',
-          'count celltypes in radius',
-          'calculate entropy in radius',
-          'distance to nearest specified cell type']
-    fn = [regionAverage, neighborhoodCount, neighborhoodEntropy, nearestOfType]
-    dfs,com=menu(dfs,op,fn,com,cat)
-    return(dfs,com)
+def neighborhoodAnalysis(dfs, cat=""):
+    return menu(dfs, "ifp.neighborhood", recipe.child_rows(), cat)
 
-def visu(dfs,com=[],cat=''):
-    global SAVE
-    global SPATH
-    if len(com) == 0:
-        spath = checkChange(ifv.SPATH)#input('save location:')
-
-        catlist = ifv.getCats(dfs[1],required=False,title='Columns to color figures by (or sort x axis for boxplot). Send none to load last set.')
-        nn,commands = ifv.mainMenu(dfs,batch = cat)
-
-        return([],[catlist,commands,spath])
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    catlist,commands,spath = com[1],com[2],com[3]
-    spath = spath+'/'+cat
-    print('save path!!!',spath)
-    nn,commands = ifv.main(df,obs,dfxy,spath=spath,catlist=catlist,commands=commands,batch = cat,returns=2,track_progress=False)
-    return([df,obs,dfxy],com)
+def visu(dfs, cat="", save_folder=None, repeat_column=None, key_strings=None,
+         categories=None, autoclean=None):
+    return ifv.main(*dfs, batch=cat, returns=2, track_progress=False,
+                    save_folder=save_folder, repeat_column="all data" if repeat_column is None else repeat_column,
+                    key_strings=[] if key_strings is None else key_strings, categories=categories, autoclean=autoclean,
+                    nested_folder=str(cat))
 
 
+def _prompt_recipe_column(frame, prompt):
+    for i, column in enumerate(frame.columns):
+        print(i, ":", column)
+    return frame.columns[int(input(prompt))]
 
 
+def _prompt_neighborhood_radii():
+    radii = []
+    while True:
+        raw = input("radius (um; blank when done, default 25): ").strip()
+        if not raw:
+            return radii or [25.0]
+        try:
+            radius = float(raw)
+            _radius_in_pixels(radius)
+        except ValueError as exc:
+            print(str(exc))
+            continue
+        radii.append(radius)
 
-'''
-neighborhood analysis
-'''
-def regionAverage(dfs,com=[],cat=''): #make only check same slidescene
-    if len(com) == 0:
+
+def _radius_in_pixels(radius_um):
+    if not np.isfinite(PXSIZE) or PXSIZE <= 0:
+        raise ValueError("pixel size (um) must be finite and positive")
+    radius_um = float(radius_um)
+    if not np.isfinite(radius_um) or radius_um < 0:
+        raise ValueError("radius (um) must be finite and nonnegative")
+    return radius_um / PXSIZE
+
+
+def _prompt_nearest_targets(obs):
+    targets = []
+    while True:
+        try:
+            column = _prompt_recipe_column(obs, "category for nearest celltype (blank when done): ")
+        except (ValueError, IndexError):
+            return targets
+        choices = sorted(obs[column].astype(str).unique())
+        types = []
         while True:
+            for i, value in enumerate(choices):
+                print(i, ":", value)
+            raw = input("celltype number (blank when done): ").strip()
+            if not raw:
+                break
             try:
-                radius = float(input("radius (um) to consider in average: "))/PXSIZE
-                return([],[radius])
-            except:
-                print("invalid radius, send number")
-    dfs,n = ifv.autoClean(dfs,['n'])
+                types.append(choices[int(raw)])
+            except (ValueError, IndexError):
+                print("Choose a celltype number from the list.")
+        if types:
+            targets.append({"column": column, "values": types})
+
+
+def regionAverage(dfs, cat="", radius_um=None):
+    radius_um = recipe.ask("radius_um", radius_um,
+                           lambda: float(input("radius (um) to consider in average: ")))
+    if recipe.collecting():
+        return [], []
+    radius = _radius_in_pixels(radius_um)
+    dfs,n = ifv.autoClean(dfs)
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    radius = com[1]
     n_cols = df.shape[1]
     col_names = df.columns
     all_indices = []
@@ -802,55 +670,38 @@ def regionAverage(dfs,com=[],cat=''): #make only check same slidescene
     for biom in ndf.columns:
         print(biom,"biom")
         ndf.loc[:,biom]=ndf.loc[:,biom].fillna(0)
-    ndf = ndf.set_axis(pd.Series(ndf.columns)+" in radius "+str(radius*PXSIZE),axis=1)
+    ndf = ndf.set_axis(pd.Series(ndf.columns)+" in radius "+str(float(radius_um)),axis=1)
     df= pd.concat([df,ndf],axis=1)
     return([df,obs,dfxy],[])
 
 
 
 
-def neighborhoodCount(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        tot = input("count totals instead of fractions? (y)")
-        radii = []
-        while True:
-            try:
-                radii.append(float(input("radius (in um) to consider neighbors: (send blank when done)"))/PXSIZE)
-            except:
-                if len(radii) < 1:
-                    print("invalid radius, using 25 as default")
-                    radii = [25/PXSIZE]
-                break
-        ch,uch = obMenu(obs,title="category to add neighborhood fractions to dataframe")
-        print(uch)
-        goodsts = []
-        while True:
-            inp = input("string to include in celltypes to consider as centers (blank to include all, blank when done. Leaves NAN values if not all): ")
-            if inp == "":
-                break
-            goodsts.append(inp)
-        min_neighbors = 0
-        if tot != 'y':
-            try:
-                mn = input("minimum neighbors to compute fractions (blank for 0): ").strip()
-                if mn != '':
-                    min_neighbors = int(mn)
-            except:
-                pass
-        return([], [tot, radii, ch, goodsts, min_neighbors])
+def neighborhoodCount(dfs, cat="", totals=None, radii_um=None, column=None,
+                      center_keys=None, min_neighbors=None):
+    df, obs, dfxy = dfs
+    totals = recipe.ask("totals", totals, "count totals instead of fractions? (y)")
+    radii_um = recipe.ask("radii_um", radii_um, _prompt_neighborhood_radii)
+    column = recipe.ask("column", column,
+                        lambda: _prompt_recipe_column(obs, "category for neighborhood counts: "))
+    center_keys = recipe.ask("center_keys", center_keys,
+                             lambda: shared_flex_menu("Center celltype contains (blank includes all)", input_fn=input))
+    if totals != "y" or min_neighbors is not None:
+        min_neighbors = recipe.ask("min_neighbors", min_neighbors,
+                                  lambda: int(input("minimum neighbors to compute fractions (blank for 0): ") or 0))
+    min_neighbors = int(min_neighbors) if min_neighbors is not None else 0
+    if min_neighbors < 0:
+        raise ValueError("minimum neighbors must be nonnegative")
+    if recipe.collecting():
+        return [], []
+    radii = [_radius_in_pixels(radius) for radius in radii_um]
+    recipe.resolve_columns(obs, [column])
     obs = obs.astype(str)
-    tot = com[1]
-    radii = list(com[2])
-    ch = int(com[3])
-    goodsts = list(com[4])
-    min_neighbors = int(com[5]) if len(com) > 5 else 0
-    uch = list(obs.iloc[:,ch].unique())
-    obcol = obs.columns[ch]
-    if len(goodsts) == 0:
-        goodsts = uch
-    for radius in radii:
-        col_names = [uc+"_"+obcol+"_neighbors_"+str(radius*PXSIZE) for uc in uch]
+    tot, obcol = totals, column
+    uch = list(obs[obcol].unique())
+    goodsts = list(center_keys) or uch
+    for radius_um, radius in zip(radii_um, radii):
+        col_names = [uc+"_"+obcol+"_neighbors_"+str(float(radius_um)) for uc in uch]
         for cn in col_names:
             df[cn] = 0
         for us in tqdm(list(obs["slide_scene"].unique()), desc="neighborhoodCount"):
@@ -886,37 +737,23 @@ def neighborhoodCount(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def neighborhoodEntropy(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        radii = []
-        while True:
-            try:
-                radii.append(float(input("radius (in um) to consider neighbors: (send blank when done)"))/PXSIZE)
-            except:
-                if len(radii) < 1:
-                    print("invalid radius, using 25 as default")
-                    radii = [25/PXSIZE]
-                break
-        ch,uch = obMenu(obs,title="category to add neighborhood fractions to dataframe")
-        print(uch)
-        goodsts = []
-        while True:
-            inp = input("string to include in celltypes to consider as centers (blank to include all, blank when done. Leaves NAN values if not all): ")
-            if inp == "":
-                break
-            goodsts.append(inp)
-        return([], [radii, ch, goodsts])
+def neighborhoodEntropy(dfs, cat="", radii_um=None, column=None, center_keys=None):
+    df, obs, dfxy = dfs
+    radii_um = recipe.ask("radii_um", radii_um, _prompt_neighborhood_radii)
+    column = recipe.ask("column", column,
+                        lambda: _prompt_recipe_column(obs, "category for neighborhood entropy: "))
+    center_keys = recipe.ask("center_keys", center_keys,
+                             lambda: shared_flex_menu("Center celltype contains (blank includes all)", input_fn=input))
+    if recipe.collecting():
+        return [], []
+    radii = [_radius_in_pixels(radius) for radius in radii_um]
+    recipe.resolve_columns(obs, [column])
     obs = obs.astype(str)
-    radii = list(com[1])
-    ch = int(com[2])
-    goodsts = list(com[3])
-    uch = list(obs.iloc[:,ch].unique())
-    obcol = obs.columns[ch]
-    if len(goodsts) == 0:
-        goodsts = uch
-    for radius in radii:
-        ecol = obcol+"_entropy_"+str(radius*PXSIZE)
+    obcol = column
+    uch = list(obs[obcol].unique())
+    goodsts = list(center_keys) or uch
+    for radius_um, radius in zip(radii_um, radii):
+        ecol = obcol+"_entropy_"+str(float(radius_um))
         df[ecol] = 0
         for us in tqdm(sorted(list(obs["slide_scene"].unique())), desc="entropy"):
             key0 = obs["slide_scene"] == us
@@ -948,48 +785,24 @@ def neighborhoodEntropy(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def nearestOfType(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        chs = []
-        tys = []
-        while True:
-            try:
-                ch,uch = obMenu(obs,title="category containing celltype to measure distance from (send non int to escape)")
-            except:
-                break
-            types = []
-            for i,uc in enumerate(uch):
-                print(i,":",uc)
-            while True:
-                try:
-                    print("send non-int to escape")
-                    ich = int(input("number of celltype to measure distance from:"))
-                    ty = uch[ich]
-                    types.append(str(ty))
-                except:
-                    if len(types) == 0:
-                        print('send integer corresponding to celltype in above list')
-                    else:
-                        break
-            if len(types) > 0:
-                chs.append(ch)
-                tys.append(types)
-        return([], [chs, tys])
+def nearestOfType(dfs, cat="", targets=None):
+    df, obs, dfxy = dfs
+    targets = recipe.ask("targets", targets, lambda: _prompt_nearest_targets(obs))
+    if recipe.collecting():
+        return [], []
+    for target in targets:
+        recipe.resolve_columns(obs, [target["column"]])
     obs = obs.astype(str)
-    chs = list(com[1])
-    tys = list(com[2])
-    for ii in range(len(chs)):
-        ch = int(chs[ii])
-        types = list(tys[ii])
+    for target in targets:
+        column, types = target["column"], list(target["values"])
         for ty in types:
-            tytle = 'nearest '+obs.columns[ch]+': '+ty
+            tytle = 'nearest '+column+': '+ty
             df[tytle] = 9999
             for us in tqdm(sorted(list(obs["slide_scene"].unique())), desc="nearest "+ty):
                 key0 = obs["slide_scene"] == us
                 tdfxy = dfxy.loc[key0,:]
                 tobs = obs.loc[key0,:]
-                key1 = tobs.iloc[:,ch] == ty
+                key1 = tobs[column] == ty
                 tbxy = tdfxy.loc[key1,:]
                 if tbxy.shape[0] == 0:
                     continue
@@ -1004,8 +817,8 @@ def nearestOfType(dfs,com=[],cat=''):
 scaling
 '''
 
-def stretch(dfs,com=[],cat=''):
-    if len(com) == 0:
+def stretch(dfs, cat=""):
+    if recipe.collecting():
         return([],[])
     df = dfs[0]
     for col in df.columns:
@@ -1015,53 +828,58 @@ def stretch(dfs,com=[],cat=''):
     return([df,dfs[1],dfs[2]],[])
 
 
-def multCols(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        for i,col in enumerate(df.columns):
-            print(i,":",col)
-        c1 = int(logInput("number: "))
-        c2 = int(logInput("number: "))
-        return([], [c1, c2])
-    c1 = int(com[1])
-    c2 = int(com[2])
-    cn1 = df.columns[c1]
-    cn2 = df.columns[c2]
+def multCols(dfs, cat="", left=None, right=None):
+    df, obs, dfxy = dfs
+    left = recipe.ask("left", left, lambda: _prompt_recipe_column(df, "left marker: "))
+    right = recipe.ask("right", right, lambda: _prompt_recipe_column(df, "right marker: "))
+    if recipe.collecting():
+        return [], []
+    recipe.resolve_columns(df, [left, right])
     print('warning: if z-scored, will also show mutual non-expression')
-    df[cn1+' x '+cn2] = df.iloc[:,c1] * df.iloc[:,c2]
-    return([df,obs,dfxy],[])
+    df[left + ' x ' + right] = df[left] * df[right]
+    return [df, obs, dfxy], []
 
 
-def biomRatio(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        for i,col in enumerate(df.columns):
-            print(i,":",col)
-        c1 = int(logInput("number: "))
-        c2 = int(logInput("number: "))
-        return([], [c1, c2])
-    c1 = int(com[1])
-    c2 = int(com[2])
-    cn1 = df.columns[c1]
-    cn2 = df.columns[c2]
-    df[cn1+"/"+cn2] = 0
-    df[cn1+"/"+cn2] = df[cn1]/df[cn2]
-    return([df,obs,dfxy],[])
+def biomRatio(dfs, cat="", numerator=None, denominator=None):
+    df, obs, dfxy = dfs
+    numerator = recipe.ask("numerator", numerator,
+                           lambda: _prompt_recipe_column(df, "numerator marker: "))
+    denominator = recipe.ask("denominator", denominator,
+                             lambda: _prompt_recipe_column(df, "denominator marker: "))
+    if recipe.collecting():
+        return [], []
+    recipe.resolve_columns(df, [numerator, denominator])
+    df[numerator + "/" + denominator] = 0
+    df[numerator + "/" + denominator] = df[numerator] / df[denominator]
+    return [df, obs, dfxy], []
 
 
-def log2(dfs,com=[],cat=''):
-    if len(com) == 0:
-        base = input('log base? (2 default)')
-        return([], [base])
-    df = dfs[0].apply(pd.to_numeric, errors='coerce')
-
-    base = 2
+def _prompt_log_base():
     try:
-        if str(com[1]).strip() != '':
-            base = int(com[1])
-    except:
-        base = 2
-        print('using base 2')
+        return int(input("log base? (2 default)") or 2)
+    except ValueError:
+        print("using base 2")
+        return 2
+
+
+def _prompt_recipe_value(series, prompt):
+    choices = sorted(series.unique())
+    for i, value in enumerate(choices):
+        print(i, ":", value)
+    raw = ""
+    while not raw.isdigit():
+        raw = input(prompt)
+    return choices[int(raw)]
+
+
+def log2(dfs, cat="", base=None):
+    base = recipe.ask("base", base, _prompt_log_base)
+    if int(base) != float(base) or int(base) <= 1:
+        raise ValueError("log base must be an integer greater than one")
+    if recipe.collecting():
+        return [], []
+    df = dfs[0].apply(pd.to_numeric, errors='coerce')
+    base = int(base)
     for c in df.columns: 
         while 0 < df[c].max() < base*2: df[c] *= 100
     npones = np.ones(df.values.shape)
@@ -1072,15 +890,20 @@ def log2(dfs,com=[],cat=''):
     return([df, dfs[1], dfs[2]], [])
 
 
-def outliers(dfs,com=[],cat=''):
-    if len(com) == 0:
-        subth = input('subtract channel thresholds instead? (y)')
-        return([], [subth])
+def outliers(dfs, cat="", subtract_thresholds=None, thresholds=None):
+    subtract_thresholds = recipe.ask("subtract_thresholds", subtract_thresholds,
+                                     "subtract channel thresholds instead? (y)")
+    if subtract_thresholds == "y" or thresholds is not None:
+        thresholds = recipe.ask("thresholds", thresholds, lambda: dict(MANUALtHRESHOLDS))
+    if recipe.collecting():
+        return [], []
     df = dfs[0].apply(pd.to_numeric, errors='coerce').copy()
-    if com[1] == 'y':
+    if subtract_thresholds == 'y':
         for biom in df.columns:
             bn = biom.split('_')[0]
-            thresh = MANUALtHRESHOLDS.get(bn, 0)
+            thresh = float(thresholds.get(bn, 0))
+            if not np.isfinite(thresh):
+                raise ValueError(f"Channel threshold for {bn} must be finite")
             df.loc[:,biom] = df.loc[:,biom] - thresh
             key = df.loc[:,biom] < 0
             df.loc[key,biom] = 0
@@ -1089,44 +912,31 @@ def outliers(dfs,com=[],cat=''):
     return([df, dfs[1], dfs[2]], [])
 
 
-def remNegatives(dfs,com=[],cat=''):
-    if len(com) == 0:
+def remNegatives(dfs, cat=""):
+    if recipe.collecting():
         return([], [])
     df = dfs[0].apply(pd.to_numeric, errors='coerce').copy()
     for col in df.columns:
         try:
             mn = float(df[col].min())
-        except:
+        except Exception:
             continue
         if mn < 0:
             df[col] -= mn
     return([df, dfs[1], dfs[2]], [])
 
 
-def equalizeBiomLevel(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        print("only makes sense for vertically z-scored data!")
-        marks = list(pd.Series(df.columns).sort_values())
-        for i,b in enumerate(marks):
-            print(i,":",b)
-        housekeep = marks[int(logInput('number: '))]
-        ch,uch = obMenu(obs,title="equalize each (slide/batch/etc.)")
-        batch_col = obs.columns[ch]
-        sub_col = ''
-        sub_vals = []
-        if logInput("only consider specific cell type when calculating means? (y)") == 'y':
-            ch1,uch1 = obMenu(obs,title="column to subset by")
-            sub_col = obs.columns[ch1]
-            while True:
-                for i,uc in enumerate(uch1):
-                    print(i,":",uc)
-                try:
-                    sub_vals.append(str(uch1[int(logInput('number: '))]))
-                except:
-                    break
-        return([], [housekeep, batch_col, sub_col, sub_vals])
-    housekeep,batch_col,sub_col,sub_vals = com[1],com[2],com[3],list(com[4])
+def equalizeBiomLevel(dfs, cat="", marker=None, batch_column=None, subset_column=None, subset_values=None):
+    marker = recipe.ask("marker", marker, lambda: _prompt_recipe_column(dfs[0], "housekeeping marker: "))
+    batch_column = recipe.ask("batch_column", batch_column, lambda: _prompt_recipe_column(dfs[1], "equalize each batch in: "))
+    subset_column = recipe.ask("subset_column", subset_column, lambda: _prompt_optional_subset_column(dfs[1]))
+    subset_values = recipe.ask("subset_values", subset_values, lambda: _prompt_recipe_values(dfs[1][subset_column], "reference category number: ") if subset_column else [])
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(df, [marker])
+    recipe.resolve_columns(obs, [batch_column] + ([subset_column] if subset_column else []))
+    housekeep, batch_col, sub_col, sub_vals = marker, batch_column, subset_column, list(subset_values)
     ndf,nobs = df.copy(),obs.copy()
     if sub_col != '' and len(sub_vals) > 0:
         key = nobs.loc[:,sub_col].isin(sub_vals)
@@ -1144,24 +954,19 @@ def equalizeBiomLevel(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def combat(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        print('0 : combat by annotation')
-        print('1 : JE-TMA combat')
-        mode = logInput('number: ')
-        if mode == '0':
-            ch,uch = obMenu(obs,'which category to use for combat?')
-            return([], [mode, obs.columns[ch]])
-        if mode == '1':
-            return([], [mode])
-        return([], [])
-    if len(com) < 2:
-        return([df,obs,dfxy],[])
-    mode = com[1]
+def combat(dfs, cat="", mode=None, batch_column=None):
+    mode = recipe.ask("mode", mode, lambda: _prompt_combat_mode())
+    batch_column = recipe.ask("batch_column", batch_column, lambda: _prompt_recipe_column(dfs[1], "category for combat: ") if mode == "annotation" else "")
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    if mode not in {"annotation", "je_tma"}:
+        raise ValueError("combat mode must be annotation or je_tma")
+    if mode == "annotation":
+        recipe.resolve_columns(obs, [batch_column])
+    mode, batch_col = ("0" if mode == "annotation" else "1"), batch_column
     try:
         if mode == '0':
-            batch_col = com[2]
             bayesdata = combat1.combat(df.transpose(), obs.loc[:,batch_col])
             df = bayesdata.transpose()
             return([df,obs,dfxy],[])
@@ -1179,54 +984,38 @@ def combat(dfs,com=[],cat=''):
 
 
 
-def scaleByMean(dfs,com=[],cat=''):
-    if len(com) == 0:
-        ch0,uch = obMenu(dfs[1],'column with annotation to scale by')
-        col1 = dfs[1].columns[ch0]
-
-        for i,uc in enumerate(uch):
-             print(i,":",uc)
-        ch = ''
-        while not ch.isdigit():
-            ch = input('annotation whose mean to scale by')
-        ch = int(ch)
-        anno = uch[int(ch)]
-
-        #print(col1,anno,'col anno')
-        return([],[col1,anno])
-
-    dfs,n = ifv.autoClean(dfs,['n'])
-    col,anno = com[1],com[2]
-
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-
-    key = obs.loc[:,col] == anno
-    #print(key.sum())
-    sdf = df.loc[key,:]
+def scaleByMean(dfs, cat="", column=None, reference_value=None):
+    column = recipe.ask("column", column,
+                        lambda: _prompt_recipe_column(dfs[1], "column with annotation to scale by: "))
+    reference_value = recipe.ask("reference_value", reference_value,
+                                 lambda: _prompt_recipe_value(dfs[1][column],
+                                                               "annotation whose mean to scale by: "))
+    if recipe.collecting():
+        return [], []
+    dfs, n = ifv.autoClean(dfs)
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(obs, [column])
+    key = obs.loc[:, column] == reference_value
+    sdf = df.loc[key, :]
     means = sdf.mean(axis=0)
-    #print(means)
     df = df.div(means)
-    return([df,obs,dfxy],[])
+    return [df, obs, dfxy], []
 
 
 
 
-def zscore(dfs, com=[], cat=''):
-    if len(com) == 0:
-        ow = input('overwrite? (y)')
-        return ([], [ow])
-
-    ow = com[1]
-    dfs[0] = dfs[0].apply(pd.to_numeric, errors='coerce')
-
-    if ow == 'y':
+def zscore(dfs, cat="", overwrite=None):
+    overwrite = recipe.ask("overwrite", overwrite, "overwrite? (y)")
+    if recipe.collecting():
+        return [], []
+    dfs[0] = dfs[0].apply(pd.to_numeric, errors="coerce")
+    if overwrite == "y":
         dfs[0] = zsc2(dfs[0])
     else:
         z = zsc2(dfs[0])
-        z = z.rename(columns={c: c + '_zscored' for c in z.columns})
+        z = z.rename(columns={c: c + "_zscored" for c in z.columns})
         dfs[0] = pd.concat([dfs[0], z], axis=1)
-
-    return (dfs, [])
+    return dfs, []
 
 def zsc2(num):
     mu = num.mean(axis=0, skipna=True)
@@ -1247,29 +1036,17 @@ def zsc2(num):
 selection and annotation
 '''
 
-def mapByRank(dfs,com=[],cat=''):
-    print('if you want to map specific biopsies, repeat IFP run for each Bx so it maps Bx1 first then Bx2. For Biopsy+Cluster, combine the columns in data editing')
-
-    if len(com) == 0:
-        ch,uch = obMenu(dfs[1],'column containing sample ID to copy from and to: ')
-        tcol = dfs[1].columns[ch]
-        for i,uc in enumerate(uch):
-            print(i,":",uc)
-        ftis = uch[int(input('tissue with annotation to copy from: '))]
-        ttis = uch[int(input('tissue with(out/ bad) annotation to copy to: '))]
-        marks = ifv.getCats(dfs[0],'markers to move from '+ftis+' to '+ttis+': ')
-        markD = {}
-        for i,col in enumerate(dfs[0].columns):
-            print(i,":",col)
-        for mark in marks:
-            print(mark)
-            other = int(input('column to use as reference for this marker: '))
-            markD[mark] = dfs[0].columns[other]
-        return([],[tcol,ftis,ttis,markD])
-
-    df,obs,dfxy = dfs[0].copy(),dfs[1].copy(),dfs[2].copy()
-    tcol,ftis,ttis,markD = com[1],com[2],com[3],com[4]
-
+def mapByRank(dfs, cat="", column=None, source=None, target=None, markers=None):
+    column = recipe.ask("column", column, lambda: _prompt_recipe_column(dfs[1], "sample ID column: "))
+    source = recipe.ask("source", source, lambda: _prompt_recipe_value(dfs[1][column], "tissue to copy from: "))
+    target = recipe.ask("target", target, lambda: _prompt_recipe_value(dfs[1][column], "tissue to copy to: "))
+    markers = recipe.ask("markers", markers, lambda: _prompt_rank_markers(dfs[0]))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = [frame.copy() for frame in dfs]
+    recipe.resolve_columns(obs, [column])
+    recipe.resolve_columns(df, list(markers) + list(markers.values()))
+    tcol, ftis, ttis, markD = column, source, target, markers
     key0 = obs.loc[:,tcol] == ttis #goes from 1 to 0
     key1 = obs.loc[:,tcol] == ftis
     #print(key0.sum())
@@ -1313,7 +1090,7 @@ def mapByRankH(da,db,movM,refM, method = 'rank'): #movM is col to move from db t
                 print(refM,'refM assigned!')
             else:
                 print(da.columns,db.columns)
-                input()
+                print('reference marker is not present in the target sample')
 
     if method == 'rank':
         da = da.sort_values(refM) #to reduce bias, run algo once with ascending once with descending then average the values of the two runs- should have perfectly inverted bias pattern
@@ -1351,13 +1128,60 @@ def mapByRankH(da,db,movM,refM, method = 'rank'): #movM is col to move from db t
 
 
 
-def save(dfs,com=[],cat=''):
-    print('saving')
-    if len(com) == 0:
-        filename = input("filename?")
-        return([],[filename])
+def _prompt_recipe_values(series, prompt):
+    choices = sorted(series.astype(str).unique())
+    values = []
+    while True:
+        for i, value in enumerate(choices):
+            print(i, ":", value)
+        raw = input(prompt).strip()
+        if raw.lower() in {"", "x", "done"}:
+            return values
+        try:
+            values.append(choices[int(raw)])
+        except (ValueError, IndexError):
+            print("Choose a category number from the list.")
+
+
+def _prompt_subset_mode():
+    return ifv._prompt_choice("subset mode", ["include", "exclude"])
+
+
+def _prompt_combat_mode():
+    return ifv._prompt_choice("combat mode", ["annotation", "je_tma"])
+
+
+def _prompt_optional_subset_column(obs):
+    return _prompt_recipe_column(obs, "column to subset by: ") if input(
+        "only consider specific cell type when calculating means? (y)") == "y" else ""
+
+
+def _prompt_rank_markers(df):
+    markers = ifv.getCats(df, title="markers to move")
+    return {marker: _prompt_recipe_column(df, "reference for " + marker + ": ") for marker in markers}
+
+
+def _prompt_autotype_resolution():
+    try:
+        return float(input("standard deviations above mean (non-number for per-celltype cutoffs): "))
+    except ValueError:
+        types = ["1: endothelial", "2: immune", "3: epithelial",
+                 "4: active fibroblast", "secondary markers (e.g. ki67)"]
+        return [float(input("standard deviations for " + name + ": ")) for name in types]
+
+
+def _prompt_sam_path(index):
+    paths = _find_resources_gating_files()
+    label = "gating config csv path" if index == 0 else "manual thresholds csv path"
+    return checkChange(paths[index], label) if paths[index] is not None else logInput(label + ": ")
+
+
+def save(dfs, cat="", filename=None):
+    filename = recipe.ask("filename", filename, "filename?")
+    if recipe.collecting():
+        return [], []
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    filename = com[1]+'_'+cat
+    filename = filename+'_'+cat
     print(filename)
     df.to_csv(filename+"_df.csv")
     obs.to_csv(filename+"_obs.csv")
@@ -1373,31 +1197,17 @@ def save(dfs,com=[],cat=''):
         sink["ifp_save_count"] = len(prefixes)
     return(dfs,[])
 
-def pick(dfs,com=[],cat=''): #TODO
-    print('picking subset')
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    obs = obs.astype(str)
-    if len(com) == 0:
-        mode = input("0:include\n1:exclude\nnumber: ").strip()
-        if mode not in {'0','1'}:
-            return([],[])
-        ch,uch = obMenu(obs,"filter slides by which?")
-        chosen = []
-        print("Enter one number at a time for entries to include/exclude")
-        label = "include #:" if mode == '0' else "exclude #:"
-        while True:
-            for i,uc in enumerate(uch):
-                print(i,":",uc)
-            try:
-                idx = int(input(label))
-            except:
-                break
-            if idx < 0 or idx >= len(uch):
-                print('invalid category')
-                continue
-            chosen.append(str(uch[idx]))
-        return([],[mode,obs.columns[ch],chosen])
-    mode,col,cats = com[1],com[2],list(com[3])
+def pick(dfs, cat="", mode=None, column=None, values=None):
+    mode = recipe.ask("mode", mode, lambda: _prompt_subset_mode())
+    column = recipe.ask("column", column, lambda: _prompt_recipe_column(dfs[1], "filter slides by which? "))
+    values = recipe.ask("values", values, lambda: _prompt_recipe_values(dfs[1][column], "category number to include/exclude: "))
+    if recipe.collecting():
+        return [], []
+    if mode not in {"include", "exclude"}:
+        raise ValueError("subset mode must be include or exclude")
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(obs, [column])
+    mode, col, cats = ("0" if mode == "include" else "1"), column, list(values)
     cats = spu.normalize_subset_values(cats)
     if len(cats) == 0:
         print('no categories selected')
@@ -1420,13 +1230,14 @@ def pick(dfs,com=[],cat=''): #TODO
 
 
 
-def clauto(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        ch,uch=obMenu(obs,"obs category to auto-annotate cell types")
-        res = float(input('resolution:'))
-        return([],[ch,res])
-    ch,res = com[1],com[2]
+def clauto(dfs, cat="", column=None, resolution=None):
+    column = recipe.ask("column", column, lambda: _prompt_recipe_column(dfs[1], "obs category to auto-annotate cell types: "))
+    resolution = recipe.ask("resolution", resolution, lambda: float(input("resolution:")))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    ch = list(obs.columns).index(recipe.resolve_columns(obs, [column])[0])
+    res = resolution
     obs = obs.astype(str)
     print(obs.shape)
     oobs = obs.copy()
@@ -1434,7 +1245,10 @@ def clauto(dfs,com=[],cat=''):
     for i,ch in enumerate(chs):
         uch = uchs[i]
         adf,aobs,axy = clag(df,obs,dfxy,ch,uch)
-        dfs,xx = autotype([adf,aobs,axy],['nn',res,False],cat=cat,name=obs.columns[ch]+"cluster autotype",chanT=False)
+        result, _ = recipe.invoke("ifp.autotype", [adf, aobs, axy],
+                                  {"do": "ifp.autotype", "with": {"resolution": res, "compare_thresholds": "n"}},
+                                  cat=cat, name=obs.columns[ch]+"cluster autotype")
+        dfs = result[0]
         aobs = dfs[1]
         #x,aobs,xx = autotype(adf,aobs,axy,chanT=False,name=obs.columns[ch]+"cluster autotype",res=res)
         print(obs.shape)
@@ -1450,7 +1264,7 @@ def clauto(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 def clag(df,obs,dfxy,ch=None,uch=None,z=True):
-    if not ch:
+    if ch is None:
         ch,uch=obMenu(obs,"obs category to auto-annotate cell types")
 
     if z:
@@ -1478,7 +1292,18 @@ def clag(df,obs,dfxy,ch=None,uch=None,z=True):
         #print(dfs[i])
     return(dfs[0],dfs[1],dfs[2])
 
-def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
+def maxeyType(dfs, cat="", compare_thresholds=None, log_transform=None,
+              thresholds=None, default_threshold=None, clean=True):
+    compare_thresholds = recipe.ask("compare_thresholds", compare_thresholds,
+                                    "compare to channel threshold? (y)")
+    log_transform = recipe.ask("log_transform", log_transform,
+                               "log2 transform data (before scoring; does not impact thresholds)? (y)")
+    if compare_thresholds == "y" or thresholds is not None:
+        thresholds = recipe.ask("thresholds", thresholds, lambda: _prompt_channel_thresholds(dfs[0]))
+    if default_threshold is not None:
+        default_threshold = recipe.ask("default_threshold", default_threshold)
+    if recipe.collecting():
+        return [], []
     global MAXEY_MATRIX_DIR
     project_matrix_dir = Path.cwd() / "resources" / "maxey matrices"
     if project_matrix_dir.is_dir() and any(project_matrix_dir.glob("*.csv")):
@@ -1486,11 +1311,6 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
         print("using project maxey matrices from:",MAXEY_MATRIX_DIR)
     else:
         MAXEY_MATRIX_DIR = _IF_ANALYSIS_DIR / "maxey matrices"
-    #send chan thresh to 0 after zscore (and rank? do tied cells all get the lowest score or if all but 1 are tied they all get 2..) and before calculating type scores
-    if len(com) == 0:
-        chanT = input('compare to chanel threshold? (y)')
-        log = input('log2 transform data (before scoring step- does not impact thresholds) (y)')
-        return([],[chanT,log])
     # Matrix typing may rename/clean its working dataframe.  Keep that work
     # isolated so auxiliary neighborhood/radius features remain available to
     # downstream analysis after the new obs labels are added.
@@ -1502,13 +1322,13 @@ def maxeyType(dfs,com=[],cat='', clean = True): #jessica maxey
     dfs = [scoring_df,original_obs.copy(),original_dfxy.copy()]
     if clean:
         print(dfs[0].shape,dfs[0].columns,'... cleaning')
-        dfs,n = ifv.autoClean(dfs,['n'])
+        dfs,n = ifv.autoClean(dfs)
         print(dfs[0].shape,dfs[0].columns)
     for col in [col for col in dfs[0].columns if '_' not in str(col)]:
         dfs[0].rename(columns={col: str(col)+'_'}, inplace=True)
-    chanT,log = com[1],com[2]
+    chanT, log = compare_thresholds, log_transform
     if chanT == 'y':
-        btkey = chanThresh(dfs[0].copy())
+        btkey = chanThresh(dfs[0].copy(), thresholds, default_threshold)
     else:
         btkey = pd.DataFrame(np.full_like(dfs[0],False),columns=dfs[0].columns,index=dfs[0].index,dtype=bool)
 
@@ -1911,34 +1731,20 @@ def _applyArtifactGate(obs,gate):
     return(obs)
 
 
-def samType(dfs,com=[],cat=''):
-    if len(com) == 0:
-        gate_path,thresh_path = _find_resources_gating_files()
-        if gate_path is not None:
-            print("found gating config in resources folder:",gate_path)
-            gate_path = checkChange(gate_path,'gating config csv path')
-        else:
-            gate_path = logInput('gating config csv path: ')
-            _create_resources_shortcut(gate_path,("gating","config"),"gating_config")
-        if thresh_path is not None:
-            print("found manual thresholds in resources folder:",thresh_path)
-            thresh_path = checkChange(thresh_path,'manual thresholds csv path')
-        else:
-            thresh_path = logInput('manual thresholds csv path: ')
-            _create_resources_shortcut(thresh_path,("threshold",),"manual_thresholds")
-        try:
-            artifact_gate = float(logInput('artifact gate: fraction of positive markers required (default .8): '))
-        except KeyboardInterrupt:
-            raise
-        except:
-            artifact_gate = .8
-        return([], [gate_path,thresh_path,artifact_gate])
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    gate_path,thresh_path = com[1],com[2]
-    try:
-        artifact_gate = float(com[3])
-    except:
-        artifact_gate = .8
+def samType(dfs, cat="", gating_path=None, thresholds_path=None, artifact_gate=None):
+    gating_path = recipe.ask("gating_path", gating_path, lambda: _prompt_sam_path(0))
+    thresholds_path = recipe.ask("thresholds_path", thresholds_path, lambda: _prompt_sam_path(1))
+    artifact_gate = recipe.ask("artifact_gate", artifact_gate, lambda: float(logInput("artifact gate: fraction of positive markers required (default .8): ") or .8))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    gate_path, thresh_path = gating_path, thresholds_path
+    artifact_gate = float(artifact_gate)
+    existing_gate, existing_thresholds = _find_resources_gating_files()
+    if gate_path != existing_gate:
+        _create_resources_shortcut(gate_path, ("gating", "config"), "gating_config")
+    if thresh_path != existing_thresholds:
+        _create_resources_shortcut(thresh_path, ("threshold",), "manual_thresholds")
     result = cm.applyManualThresholdsCSV(df,obs,thresh_path,subtract=False)
     if result is None:
         print('samType failed: could not apply manual thresholds from',thresh_path)
@@ -1949,11 +1755,8 @@ def samType(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def chanThresh(df):
-    global MANUALtHRESHOLDS
+def _channel_threshold_defaults():
     override = MANUALtHRESHOLDS
-    print('\n\n',override,'MANUAL THRESHOLDS USED!!!')
-
     roundThresh = [1500,1250,1000,750]
 
     biomRounds = [['CAV1', 'CK17', 'CK5', 'CK7', 'CK8', 'H3K27', 'MUC1', 'PCNA', 'R0c2', 'R6Qc2', 'Vim', 'aSMA', 'pHH3'],
@@ -1971,44 +1774,44 @@ def chanThresh(df):
 
     biomRounds = [[o] for o in override.keys()] + biomRounds
     roundThresh = list(override.values()) + roundThresh
-    #print(biomRounds,roundThresh)
-    key = []
-    for i,col in enumerate(df.columns):
-        coln = col.split('_')[0]
-        thresh = -1
-        switch = 0
-        for j,roun in enumerate(biomRounds):
-            if switch == 1:
-                break
-            for biom in roun:
-                #print(coln,biom,coln==biom)
-                if coln == biom:
-                    thresh = roundThresh[j]
-                    print('threshold found',biom,thresh)
-                    switch = 1
-                    break
-        if thresh < 0:
-            print('\n',coln,' not found.\nmean:',df.loc[:,col].mean())
+    thresholds = {}
+    for markers, threshold in zip(biomRounds, roundThresh):
+        for marker in markers:
+            thresholds.setdefault(marker, threshold)
+    return thresholds
+
+
+def _prompt_channel_thresholds(df):
+    known = _channel_threshold_defaults()
+    thresholds = {}
+    for column in df.columns:
+        if "neighbors" in str(column).lower() or "radius" in str(column).lower():
+            continue
+        marker = column.split("_")[0]
+        if marker in thresholds:
+            continue
+        threshold = known.get(marker, -1)
+        if threshold < 0:
             try:
-                if DEVMODE:
-                    1/0
-                thr = input('threshold for marker: ')
-                thresh = float(thr)
-            except Exception as e:
-                print('\nusing 1000 for threshold') #no need to print e
-                thresh = 1000
-                MANUALtHRESHOLDS[coln] = thresh
-                print(MANUALtHRESHOLDS)
-
-        lk = df.loc[:,col] < thresh
-        key.append(lk)
-    key = pd.concat(key,axis=1)
-    #key.to_csv('test key.csv')
-
-    print(key,'threshold key: cells < threshold = True')
+                threshold = float(input(f"threshold for marker {marker} (blank 1000): "))
+            except ValueError:
+                threshold = 1000
+        thresholds[marker] = threshold
+    return thresholds
 
 
-    return(key)
+def chanThresh(df, thresholds, default_threshold=None):
+    key = []
+    for column in df.columns:
+        marker = column.split("_")[0]
+        threshold = thresholds.get(marker, default_threshold)
+        if threshold is None:
+            raise ValueError(f"No channel threshold for marker: {marker}")
+        threshold = float(threshold)
+        if not np.isfinite(threshold):
+            raise ValueError(f"Channel threshold for {marker} must be finite")
+        key.append(df[column] < threshold)
+    return pd.concat(key, axis=1)
 
 
 
@@ -2062,12 +1865,12 @@ def maxeyTypeNotes(dfs,com=[],cat=''):
     print('make binary matrix of which markers are used as primary markers for which celltype')
     print('multiply score matrix by binary matrix to get score for each celltype. tiebreak with hierarchy.')
 
-def labelPhenotype(dfs,com=[],cat=''):
-    if len(com) == 0:
-        ch,uch = obMenu(dfs[1],"column with phenotype labels")
-        return([],[dfs[1].columns[ch]])
+def labelPhenotype(dfs, cat="", column=None):
+    column = recipe.ask("column", column, lambda: _prompt_recipe_column(dfs[1], "column with phenotype labels: "))
+    if recipe.collecting():
+        return [], []
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    ncn = com[1]
+    ncn = recipe.resolve_columns(obs, [column])[0]
     obs = parseTypes(df,obs,dfxy,column = ncn)
     obs = parseSecondary(df,obs,dfxy,column = ncn)
     return([df,obs,dfxy],[])
@@ -2137,20 +1940,17 @@ def orthoType(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def vectorType(dfs,com=[],cat=''):
-    if len(com) == 0:
-        path = logInput("loss weight matrix csv path: ")
-        print("0 : markers are rows, celltypes are columns")
-        print("1 : celltypes are rows, markers are columns")
-        orientation = logInput("number (blank for 0): ")
-        confidence = logInput("confidence threshold (blank for 0.6): ")
-        output_col = logInput("output name (blank for vector celltype_1): ")
-        return([], [path, orientation, confidence, output_col])
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    path = str(com[1])
-    orientation = "celltypes-rows" if str(com[2]).strip() == "1" else "markers-rows"
-    confidence = 0.6 if str(com[3]).strip() == "" else float(com[3])
-    output_col = str(com[4]).strip()
+def vectorType(dfs, cat="", weights_path=None, orientation=None, confidence=None, output_column=None):
+    weights_path = recipe.ask("weights_path", weights_path, "loss weight matrix csv path: ")
+    orientation = recipe.ask("orientation", orientation, lambda: "celltypes-rows" if logInput("0 : markers are rows\n1 : celltypes are rows\nnumber (blank for 0): ") == "1" else "markers-rows")
+    confidence = recipe.ask("confidence", confidence, lambda: float(logInput("confidence threshold (blank for 0.6): ") or 0.6))
+    output_column = recipe.ask("output_column", output_column, "output name (blank for vector celltype_1): ")
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    path = str(weights_path)
+    confidence = float(confidence)
+    output_col = str(output_column).strip()
     if output_col == "":
         output_col = ml_vc.DEFAULT_OUTPUT_COL
     confidence_col = output_col + " confidence"
@@ -2172,34 +1972,18 @@ def vectorType(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def autotype(dfs,com,cat='',chanT=True,name="autoCellType res: ",res=None,clean = True): #the old version that keeps more information is in cmifAnalysis36
-    if len(com) == 0:
-        inp = input("compare to channel threshold? (y)")
-        if inp == "y":
-            chanT = True
-        else:
-            chanT = False
-        if not res:
-            try:
-                res= float(input("number of standard deviations above mean required to count as +,(send non-int to enter custom res for each celltype): "))
-            except:
-                typs = ["1: endothelial","2: immune","3: epithelial","4: active fibroblast","secondary markers (e.g. ki67)"]
-                ress = []
-                for t in typs:
-                    print(t)
-                    res= float(input("number of standard deviations above mean required to count as + for "+t+" :"))
-                    ress.append(res)
-                return([],[ress,chanT])
-        return([],[res,chanT])
+def autotype(dfs, cat="", compare_thresholds=None, resolution=None,
+             name="autoCellType res: ", clean=True):
+    compare_thresholds = recipe.ask("compare_thresholds", compare_thresholds, "compare to channel threshold? (y)")
+    resolution = recipe.ask("resolution", resolution, _prompt_autotype_resolution)
+    if recipe.collecting():
+        return [], []
     if clean:
         print(dfs[0].shape,dfs[0].columns,'... cleaning')
-        dfs,n = ifv.autoClean(dfs,['n'])
+        dfs,n = ifv.autoClean(dfs)
         print(dfs[0].shape,dfs[0].columns)
-    print(com)
-    res = com[1]
-    chanT = bool(com[2])
-    if chanT == "False":
-        chanT = False
+    res = resolution
+    chanT = compare_thresholds == "y"
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     roundThresh = [1500,1250,1000,750]
     biomRounds = [['CAV1', 'CK17', 'CK5', 'CK7', 'CK8', 'H3K27', 'MUC1', 'PCNA', 'R0c2', 'R6Qc2', 'Vim', 'aSMA', 'pHH3'],
@@ -2502,7 +2286,7 @@ def zscore1(df,obs,dfxy,ax=None):
             col = vals[:,i].tolist()
             try:
                 zCol = zScoreL(col)
-            except:
+            except Exception:
                 zCol = list(np.zeros(len(col)))
             newA[:,i] = zCol
     if ax == 1:
@@ -2574,20 +2358,20 @@ def _zscore_for_clustering(df,raw_normalize_flag):
     return(df.apply(ZSC))
 
 
-def torchCluster(dfs,com=[],cat=''):
-    if len(com) == 0:
-        ncl = int(input("n clusters:"))
-        nit = int(input("number of iterations:"))
-        lra = float(input("convergence tolerance (blank not allowed, 1e-4 is a reasonable start):"))
-        output_col = input("output name (blank for TorchCluster_<n>): ")
-        normalize = _prompt_normalize_before_clustering()
-        return([],[ncl,nit,lra,output_col,normalize])
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    ncl = int(com[1])
-    nit = int(com[2])
-    lra = float(com[3])
-    output_col = str(com[4]).strip() if len(com) > 4 else ""
-    cdf = _zscore_for_clustering(df,com[5] if len(com) > 5 else 'n')
+def torchCluster(dfs, cat="", n_clusters=None, max_iter=None, tolerance=None,
+                 output_column=None, normalize=None):
+    n_clusters = recipe.ask("n_clusters", n_clusters, lambda: int(input("n clusters:")))
+    max_iter = recipe.ask("max_iter", max_iter, lambda: int(input("number of iterations:")))
+    tolerance = recipe.ask("tolerance", tolerance,
+                           lambda: float(input("convergence tolerance (blank not allowed, 1e-4 is a reasonable start):")))
+    output_column = recipe.ask("output_column", output_column, "output name (blank for TorchCluster_<n>): ")
+    normalize = recipe.ask("normalize", normalize, _prompt_normalize_before_clustering)
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    ncl, nit, lra = int(n_clusters), int(max_iter), float(tolerance)
+    output_col = str(output_column).strip()
+    cdf = _zscore_for_clustering(df, normalize)
     labels,centroids,meta = ml_tc.cluster_dataframe(
         cdf,
         n_clusters=ncl,
@@ -2604,6 +2388,9 @@ def torchCluster(dfs,com=[],cat=''):
     summary_path = Path(os.getcwd()) / (_safe_token(cn) + ".summary.txt")
     meta["summary_path"] = str(summary_path)
     ml_tc.write_summary_file(summary_path, ml_tc.summary_lines(meta))
+    step = recipe.current_step()
+    if step is not None:
+        step.outputs.append(str(summary_path))
     print("Torch centroid clustering added obs column:", cn)
     print("cluster counts:", meta.get("cluster_counts"))
     print("Torch clustering summary saved:", str(summary_path))
@@ -2624,21 +2411,17 @@ def _collect_multi_int(prompt):
     return(vals)
 
 
-def _as_int_list(com_val):
-    #old saved lastrun commands recorded a single int here; new ones record a list
-    if isinstance(com_val,(list,tuple)):
-        return(list(com_val))
-    return([com_val])
 
 
-def kmeans(dfs,com=[],cat=''):
-    if len(com) == 0:
-        ncls = _collect_multi_int("n clusters (blank when done): ")
-        normalize = _prompt_normalize_before_clustering()
-        return([],[ncls,normalize])
-    df,obs = dfs[0],dfs[1]
-    ncls = _as_int_list(com[1])
-    cdf = _zscore_for_clustering(df,com[2] if len(com) > 2 else 'n')
+def kmeans(dfs, cat="", n_clusters=None, normalize=None):
+    n_clusters = recipe.ask("n_clusters", n_clusters,
+                            lambda: _collect_multi_int("n clusters (blank when done): "))
+    normalize = recipe.ask("normalize", normalize, _prompt_normalize_before_clustering)
+    if recipe.collecting():
+        return [], []
+    df, obs = dfs[0], dfs[1]
+    ncls = list(n_clusters)
+    cdf = _zscore_for_clustering(df, normalize)
     for ncl in ncls:
         km = KMeans(n_clusters=ncl)
         km.fit(cdf)
@@ -2647,22 +2430,23 @@ def kmeans(dfs,com=[],cat=''):
     return([dfs[0],obs,dfs[2]],[])
 
 
-def leiden(dfs,com=[],cat=''):
-    if len(com) == 0:
-        res = float(input("recluster with resolution:"))
-        primo = input('only use primary markers? (y)')
-        normalize = _prompt_normalize_before_clustering()
-        return([],[res,primo,normalize])
+def leiden(dfs, cat="", resolution=None, primary_only=None, normalize=None):
+    resolution = recipe.ask("resolution", resolution,
+                            lambda: float(input("recluster with resolution:")))
+    primary_only = recipe.ask("primary_only", primary_only, "only use primary markers? (y)")
+    normalize = recipe.ask("normalize", normalize, _prompt_normalize_before_clustering)
+    if recipe.collecting():
+        return [], []
     sc, anndata = _load_scanpy_stack("Leiden clustering")
     if sc is None:
         return([dfs[0],dfs[1],dfs[2]],[])
-    res,primo = com[1],com[2]
+    res, primo = float(resolution), primary_only
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     odf = df.copy()
     if primo == 'y':
         df,obs,dfxy = cm.onlyPrimaries(df,obs,dfxy)
     print(all(obs.index==df.index),"all index the same")
-    cdf = _zscore_for_clustering(df,com[3] if len(com) > 3 else 'n')
+    cdf = _zscore_for_clustering(df,normalize)
     adata = anndata.AnnData(cdf,obs = obs)
     sc.pp.neighbors(adata,use_rep='X')
     sc.tl.leiden(adata, key_added='Cluster', resolution=res)
@@ -2673,23 +2457,25 @@ def leiden(dfs,com=[],cat=''):
 
 
 
-def autoleiden(dfs,com=[],cat=''):
-    if len(com) == 0:
-        target = int(input("get n clusters:"))
-        res = float(input("starting Leiden resolution:"))
-        primo = input('only use primary markers? (y)')
-        normalize = _prompt_normalize_before_clustering()
-
-        return([],[res,target,primo,normalize])
+def autoleiden(dfs, cat="", target_clusters=None, start_resolution=None,
+               primary_only=None, normalize=None):
+    target_clusters = recipe.ask("target_clusters", target_clusters,
+                                 lambda: int(input("get n clusters:")))
+    start_resolution = recipe.ask("start_resolution", start_resolution,
+                                  lambda: float(input("starting Leiden resolution:")))
+    primary_only = recipe.ask("primary_only", primary_only, "only use primary markers? (y)")
+    normalize = recipe.ask("normalize", normalize, _prompt_normalize_before_clustering)
+    if recipe.collecting():
+        return [], []
     sc, anndata = _load_scanpy_stack("Auto-Leiden clustering")
     if sc is None:
         return([dfs[0],dfs[1],dfs[2]],[])
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    res,target,primo = com[1],com[2],com[3]
+    res, target, primo = float(start_resolution), int(target_clusters), primary_only
     odf = df.copy()
     if primo == 'y':
         df,obs,dfxy = cm.onlyPrimaries(df,obs,dfxy)
-    cdf = _zscore_for_clustering(df,com[4] if len(com) > 4 else 'n')
+    cdf = _zscore_for_clustering(df,normalize)
     incr = res/4
     ncl = 99
     tes = []
@@ -2732,14 +2518,15 @@ def autoleiden(dfs,com=[],cat=''):
 
 
 
-def gmm(dfs,com=[],cat=''):
-    if len(com) == 0:
-        ncls = _collect_multi_int("n clusters (blank when done): ")
-        normalize = _prompt_normalize_before_clustering()
-        return([],[ncls,normalize])
-    ncls = _as_int_list(com[1])
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    cdf = _zscore_for_clustering(df,com[2] if len(com) > 2 else 'n')
+def gmm(dfs, cat="", n_clusters=None, normalize=None):
+    n_clusters = recipe.ask("n_clusters", n_clusters,
+                            lambda: _collect_multi_int("n clusters (blank when done): "))
+    normalize = recipe.ask("normalize", normalize, _prompt_normalize_before_clustering)
+    if recipe.collecting():
+        return [], []
+    ncls = list(n_clusters)
+    df, obs, dfxy = dfs
+    cdf = _zscore_for_clustering(df, normalize)
     #ctypes = ['full','tied','diag','spherical']
     for ncl in ncls:
         gmmModel = GMM(n_components=ncl).fit(cdf)

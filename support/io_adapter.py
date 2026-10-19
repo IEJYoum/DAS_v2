@@ -64,6 +64,17 @@ class UserAbortError(Exception):
     
 
 
+def init_headless() -> None:
+    """Keep the existing output/log transport and reject every unresolved input."""
+    global _MODE
+    init_terminal()
+    _MODE = "headless"
+
+
+def is_headless() -> bool:
+    return _MODE == "headless"
+
+
 def init_terminal() -> None:
     """
     PSEUDOCODE:
@@ -217,6 +228,13 @@ def iget(
       - return value as string
     """
     global _LOG
+    if is_headless():
+        try:
+            from .recipe_v0 import MissingAnswer, current_step
+        except ImportError:
+            from recipe_v0 import MissingAnswer, current_step
+        owner = current_step()
+        raise MissingAnswer(owner.action.id if owner else "<unported>", "<prompt>", prompt)
     context_lines = _build_prompt_context_lines()
     prompt_kind = _infer_prompt_kind(prompt, context_lines)
     context_text = "\n".join(context_lines)
@@ -416,7 +434,7 @@ def legacy_print(
             pass
 
     # Keep technical lines in terminal; user-facing lines are browser-first.
-    if _MODE == "terminal" or technical:
+    if _MODE in {"terminal", "headless"} or technical:
         stream.write(text + end)
         if flush and hasattr(stream, "flush"):
             stream.flush()

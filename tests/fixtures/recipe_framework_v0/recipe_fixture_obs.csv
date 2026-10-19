@@ -1,0 +1,9 @@
+cell,slide_scene,Primary Celltype
+c01,scene_A,epithelial
+c02,scene_A,immune
+c03,scene_A,epithelial
+c04,scene_A,immune
+c05,scene_B,epithelial
+c06,scene_B,immune
+c07,scene_B,epithelial
+c08,scene_B,immune

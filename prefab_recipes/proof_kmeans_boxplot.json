@@ -1,0 +1,27 @@
+{
+  "name": "proof_kmeans_boxplot",
+  "description": "Synthetic named KMeans per scene, followed by a boxplot colored by the new labels.",
+  "steps": [
+    {"do": "home.load_prepared_data", "with": {"stem": "recipe_fixture"}},
+    {
+      "do": "home.analysis",
+      "with": {"repeat_column": "slide_scene", "key_strings": []},
+      "steps": [{
+        "do": "ifp.clustering",
+        "with": {"subset": {"mode": "include", "keys": ["marker_A!"], "prefix": "one_marker"}},
+        "steps": [{"do": "ifp.kmeans", "with": {"n_clusters": [2], "normalize": "y"}}]
+      }]
+    },
+    {
+      "do": "home.visualization",
+      "with": {
+        "save_folder": "outputs/clustering_proof", "repeat_column": "all data",
+        "key_strings": [], "categories": ["Primary Celltype"], "autoclean": "n"
+      },
+      "steps": [{"do": "ifv.boxplot", "with": {
+        "violin": "n", "outliers": "n", "relevant_only": "n",
+        "color_columns": ["one_marker_Kmeans_2__slide_scene"], "per_row": 2
+      }}]
+    }
+  ]
+}

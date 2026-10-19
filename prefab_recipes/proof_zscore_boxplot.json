@@ -1,0 +1,30 @@
+{
+  "name": "proof_zscore_boxplot",
+  "description": "Load the synthetic proof triplet, zscore independently per slide_scene, then boxplot by celltype and scene.",
+  "steps": [
+    {"do": "home.load_prepared_data", "with": {"stem": "recipe_fixture"}},
+    {
+      "do": "home.analysis",
+      "with": {"repeat_column": "slide_scene", "key_strings": []},
+      "steps": [
+        {"do": "ifp.scaling", "steps": [{"do": "ifp.zscore", "with": {"overwrite": "y"}}]}
+      ]
+    },
+    {
+      "do": "home.visualization",
+      "with": {
+        "save_folder": "outputs/recipe_proof",
+        "repeat_column": "all data",
+        "key_strings": [],
+        "categories": ["Primary Celltype"],
+        "autoclean": "n"
+      },
+      "steps": [
+        {
+          "do": "ifv.boxplot",
+          "with": {"violin": "n", "outliers": "n", "relevant_only": "n", "color_columns": ["slide_scene"], "per_row": 2}
+        }
+      ]
+    }
+  ]
+}

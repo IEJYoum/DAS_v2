@@ -1,0 +1,690 @@
+Recipe Framework Plan v3
+========================
+
+Status: draft for review. Supersedes v2.1. It incorporates replies DAS0, DAS1, DAS2
+and DAS3 (_planning/recipe_framework_reply_DAS*_v0.txt). Section 14 lists how each
+review point was handled.
+
+Scope: recipes as an input mechanism for the controller root menus,
+IFprocessing7 and IFvisualization2. CNN workflows stay deferred; section 13 has
+notes for that later port.
+
+Prime directive (unchanged): change the existing GUI/terminal/DS runtime as
+little as possible. Every menu keeps its loop, prompts, error handling, progress
+and plotting behaviour. The addition is that prompts can be answered from a
+recipe, and answers are recorded in a durable format.
+
+
+1. Recipe vs run record
+-----------------------
+
+A recipe is the INTENT: a saved, readable tree of menu choices and prompt
+answers. "Do this." It is what the legacy "repeat last run" already is, made
+durable: stable ids instead of menu positions, named answers instead of positional
+com lists, JSON instead of the s_to_l string format, named files instead of one
+slot, and recording from the root so one recipe spans modules.
+
+A run record is the EVIDENCE: what actually happened when a recipe ran on this
+machine, this project and this data. It records the resolved project folder, the
+loaded stem, the effective answers, machine-local values that affected results
+(pixel size, DEVMODE), the git commit, outputs, and each step's status.
+
+A recipe may be reused after data, defaults or columns change. It does not claim
+to freeze those. The run record makes them inspectable.
+
+The same functions run whether an answer comes from a person (GUI/terminal),
+from an agent driving DS, or from a recipe. They do not know or care.
+
+
+2. Recipe format
+----------------
+
+    {
+      "name": "zscore_boxplots_per_scene",
+      "description": "Load a stem, z-score per slide_scene, boxplots by celltype.",
+      "steps": [
+        {"do": "home.load_prepared_data", "with": {"stem": "AH08_v3"}},
+        {"do": "home.analysis",
+         "with": {"repeat_column": "slide_scene", "key_strings": []},
+         "steps": [
+           {"do": "ifp.scaling", "steps": [
+             {"do": "ifp.zscore", "with": {"overwrite": "y"}}
+           ]}
+         ]},
+        {"do": "home.visualization",
+         "with": {"save_folder": "D:/figs/run1", "repeat_column": "all data",
+                  "categories": ["Primary Celltype"], "autoclean": "y"},
+         "steps": [
+           {"do": "ifv.boxplot", "with": {...}},
+           {"do": "ifv.hist", "legacy_args": ["Ki67_", "y"]}
+         ]}
+      ]
+    }
+
+One meaning per field:
+  "do"           one stable action id, valid at this menu level
+  "with"         named answers owned by that action itself
+  "steps"        rows for the child menu that action opens, and nothing else
+  "legacy_args"  TRANSITIONAL. The positional answers of an action not yet ported
+                 to named answers (section 5). Replaces "with" for that row only.
+  "source"       optional. Set when the step was copied from another recipe
+                 (name + date). Ignored by replay.
+
+Ownership rule: workflow context belongs to the action that owns the loop. A
+repeat column, key-string filter, category list, save folder or autoclean choice
+is an answer on home.analysis / home.visualization. It is not inherited by
+arbitrary descendants. That action resolves it once and runs its children under
+it, as DAS does today.
+
+Steps communicate through the live session (the triplet and controller state),
+as today. No variables, recipe-to-recipe references, loops, conditionals, sweep
+syntax or sticky values. A sweep is a copied recipe with one answer changed. No
+schema or action version fields: recipes have no backwards compatibility, so a
+format or meaning change is migrated on disk. The run record's git commit shows
+which code a run used.
+
+An answer omitted from "with" means "ask here". Interactive runs prompt, and
+headless runs fail (section 7).
+
+
+3. Menu entries and declarations
+--------------------------------
+
+Every menu's option/function lists become one module-level declaration, keyed by
+the id of the action that opens the menu:
+
+    MENUS = {
+      "ifp.scaling": [
+        # id            label                            fn      description              answers
+        ("ifp.log2",   "log2",                          log2,   "Log-transform df.",     None),
+        ("ifp.zscore", "zscore across samples (cells)", zscore, "Z-score df columns.",
+                       {"overwrite": ("yes_no", "y = replace columns; n = add _zscored copies")}),
+        ...
+      ],
+    }
+
+- ids are given to EVERY entry at once (Pass 3), so every recording is id-based
+  from then on.
+- "answers" is the action contract: answer name -> (kind, help). None means not
+  yet ported, so the action records legacy_args.
+- kinds are a small vocabulary matching io_adapter's existing prompt kinds:
+  yes_no, text, number, path, column, columns, values, list. A name ending in
+  "?" is conditional (asked only on some branches), e.g. "suffix?".
+- The menu still displays numbered labels exactly as today. Numbers are display
+  only.
+
+Drift guard: ask() fails if called with a name the action didn't declare. A test
+lints ported modules so every ask("literal", ...) name is declared and every
+declared name is asked somewhere. The declaration is the authority. Reading the
+source is only a test.
+
+
+4. Ported actions: ask() and collecting()
+-----------------------------------------
+
+The pattern:
+
+    DATASET = "bcc"                          # module knob, standalone/IDE runs
+
+    def run(state, dataset=None):
+        dataset = ask("dataset", dataset, "dataset? ")
+        if collecting():
+            return
+        process(dataset)
+
+    if __name__ == "__main__":
+        run(None, dataset=DATASET)
+
+ask(name, value, prompt). Narrow on purpose:
+  - value is not None -> use it. Test with `is None`, never truthiness.
+    0, False, "" and [] are real answers.
+  - else, interactive: prompt via io.iget. prompt is a string, or a callable such
+    as getCats/obMenu that prints its own options and returns the final answer,
+    so the GUI's existing prompt-kind detection still renders buttons.
+  - else, headless: raise MissingAnswer(action id, name)
+  - record name -> answer on the step at the top of the step stack, but only
+    during a recording pass (section 5)
+  - fail if name isn't declared for the action
+  No defaults, coercion, sticky values or composition.
+
+MissingAnswer subclasses BaseException, not Exception. 36 prompt sites sit inside
+broad try/except today ("send non-int to escape" loops, fallbacks to "all data",
+1000, .8). An Exception would be swallowed into a silent default. Ports narrow
+bare `except:` around prompts to `except Exception`.
+controler._run_legacy_call re-raises MissingAnswer next to io.UserAbortError.
+
+collecting() keeps its legacy meaning: true while a collect-then-execute module
+(IFprocessing7 / IFvisualization2) gathers its command list, which is exactly
+where its menu runs with empty com today. It is NOT used for preflight
+(section 7).
+
+Translation of a legacy leaf:
+
+    legacy                                   ported
+    ---------------------------------------  -----------------------------------------
+    def zscore(dfs, com=[], cat=''):         def zscore(dfs, cat='', overwrite=None):
+        if len(com) == 0:                        overwrite = ask("overwrite", overwrite,
+            ow = input('overwrite? (y)')                         "overwrite? (y)")
+            return ([], [ow])                    if collecting():
+        ow = com[1]                                  return dfs
+        ...unchanged...                          ...unchanged...
+
+Porting rules:
+  R-a  Asks come first. No state, global or filesystem change before
+       `if collecting():`. Known violation to fix: samType creates .lnk
+       shortcuts in collect. Pure computation used to build prompt choices
+       (clustering's cdf, bubblePlot copies) is fine.
+  R-b  No prompts after `if collecting():`. Known execute-time prompts, each
+       becomes a collect-time ask:
+         chanThresh via maxeyType: "default threshold for markers with no stored
+           threshold" (today a silent 1000 when headless)
+         _allow_exact_silhouette: "allow exact silhouette above N rows? (y)"
+         ifv.main autoclean when reached from IFprocessing7.visu: answer on the
+           visualize step
+       Small fixes: clag `if not ch:` -> `is None`; sortMap / mapByRankH debug
+       pauses print instead of wait; delete IFvisualization2.menu's dead
+       freezeError branch.
+  R-c  Record what the user meant, before derivation. Names, not indices
+       (obMenu/getCats). Micrometres, not pixels (neighborhoodCount /
+       neighborhoodEntropy / regionAverage divide by PXSIZE after collecting).
+       The category list before the MAXcATS filter. Derive after
+       `if collecting():`.
+  R-d  When blank means "reuse a saved value" (ifv color categories), record the
+       resolved value. An explicit [] stays [] (it means zero figures).
+  R-e  A prompt that loops until done ("send non-int when done", 23 sites) becomes
+       one ask whose callable returns the final list. These are restructures, not
+       translations. nearestOfType is the hardest.
+  R-f  Columns are resolved by name through resolve_columns(frame, names), which
+       fails, naming the step, if a name is missing or duplicated. No ported
+       action keeps numeric-column behaviour.
+  R-g  Each ported action gets a parity fixture (section 11). The porting unit is
+       one coherent behaviour with its fixture, not a count of replaced prompts.
+
+
+5. Menu loops: recording and replay
+-----------------------------------
+
+Each existing menu loop stays (IFprocessing7.menu, IFvisualization2.menu, the
+controller's root menus). Inside it, three changes, using helpers from
+support/recipe_v0.py.
+
+Collect / interactive mode, where the loop did
+    nn, com = functions[ch](dfs, com=[]); coms.append([ch] + com)
+it now does
+    with recipe.step(action_id) as step:        # push on the step stack
+        result = fn(dfs)                        # ported: asks record into step.with
+                                                # nested menus record into step.steps
+    if not ported: step.legacy_args = answers returned by the legacy fn
+    rows.append(step.row)                        # only if fn returned normally
+
+Replay mode, where the loop did
+    ch = subcom[0]; functions[ch](dfs, subcom, cat)
+it now does
+    recipe.check_level(rows, MENUS[menu_id])     # ids/placement, before any row
+    for row in rows:
+        with recipe.step(row["do"], row) as step:
+            if "legacy_args" in row: fn(dfs, [row["do"]] + row["legacy_args"], cat)
+            else:                    fn(dfs, cat=cat, **row.get("with", {}))
+and everything around that call stays: IFvisualization2's try/except +
+_report_visualization_failure, its DEVMODE branch, mpl.style.use('default'),
+progress ticks.
+
+Step stack. Steps form a stack, not a single "current" slot.
+IFprocessing7.visu opens IFvisualization2's menus inside its own step, and
+those child steps attach to visu's "steps".
+
+Record once. Recording happens only in the collect/interactive pass. Execute
+passes repeat rows per group and per category. They push steps (for "with" lookup
+and the unread-answer check) but never record, so a row isn't recorded N times.
+
+Unread answers. When a replayed step ends normally, every "with" key must have
+been read by an ask. An unread key is a misspelled name and fails the step.
+
+Failure while recording: a step whose function raises is not appended (same as
+today). On Ctrl-C, completed root steps stay recorded and the interrupted one,
+with its partial children, is dropped. That matches spine.run_session's baseline
+restore.
+
+
+6. Headless runs go through the controller
+------------------------------------------
+
+The headless runner drives the same root-menu functions a user would, through
+controler._run_legacy_call and the other existing action paths. It never calls
+ifp/ifv directly. So figure .summary.txt companions, artifact stubs,
+state-log entries, subset-project adoption, align_triplet /
+normalize_primary_labels and dirty-triplet bookkeeping all happen as in the GUI.
+_new_das_meta keeps receiving ifp/ifv replay_path and replay_mode, pointing at
+the recipe file, so artifact stubs point back to the recipe that made them.
+
+Headless setup:
+  - project: --project is the data folder, resolved once with resolve_native_path
+    and recorded. A missing or unusable folder fails. No navigator, project
+    confirmation, fallback project or first-run setup.
+  - pixel size: read from das_config. Absent -> fail. Recorded.
+  - DEVMODE: pinned off, and recorded.
+  - io_adapter headless mode: any io.iget that ask() didn't answer raises
+    MissingAnswer with the prompt text. That catches unported or undeclared
+    prompts.
+  - no writes to das_config, project_config or the master config.
+
+One prompt transport: ask() goes through io.iget, which is what legacy input()
+already becomes inside legacy_ifa5_context. There is no recipe-only input path.
+
+
+7. Validation, in layers
+------------------------
+
+Layer 1, structural check: pure, required, no data loaded, no imports of
+heavy modules beyond the menu declarations.
+  - JSON shape and field meanings (section 2)
+  - every "do" is valid at its level (placement), against MENUS
+  - every "with" name is declared for that action
+  - missing declared answers: an ERROR for headless runs, except conditional
+    ("?") names. For interactive runs they're listed as "will prompt".
+  - legacy_args rows are reported as "unchecked"
+  - --project exists and is readable
+  Nothing is executed, written or mutated.
+
+Layer 2, runtime, at the step that owns it:
+  - ask() with no answer: MissingAnswer (headless), prompt (interactive)
+  - unread answer names (section 5)
+  - resolve_columns: missing or duplicate columns
+  - action-specific readiness checks, added only with a port and its test (e.g.
+    output folder writable)
+
+There is no "replay everything with collecting() on" dry run. Several collect
+paths aren't pure today, and a check must not be able to mutate data.
+
+Interactive runs with missing answers run layer 1, then replay. Each missing
+answer is prompted at its own ask, which comes before that action's work (R-a).
+In collect-then-execute modules every prompt therefore happens before any group
+executes.
+
+
+8. Storage and last run
+-----------------------
+
+- Project recipes: <data folder>/recipes/*.json. The data folder is the one
+  resolved at invocation (headless) or at save time (interactive). There is no
+  parent-folder inheritance. A subset project has its own recipes folder. A
+  direct file path also works.
+- Prefabs: DAS_v2/prefab_recipes/*.json. A project recipe with the same name
+  takes precedence.
+- Root menu "recipes" entry (added in Pass 2):
+      run saved recipe     layer-1 check, then replay from the root
+      save recording       name + description -> <data folder>/recipes/<name>.json
+      clear recording
+  Running a saved recipe while recording copies its steps in, with "source" set.
+- "Repeat last run? (y)" / "save commands? (y)" stay where they are. Their storage
+  becomes <data folder>/recipes/_last_<menu id>.json in the new row format,
+  instead of ifp7_lastrun.txt / ifv2_lastrun.txt / ifv2_repeat_context.txt /
+  ifv2_color_categories.txt. Lookup is this data folder only. There is no
+  fallback to other projects or to this machine's most recent last run (Jalaa,
+  2026-10-15: last-run behaviour beyond this is legacy and out of scope).
+- An interrupted or failed headless run does not overwrite _last_*.json.
+
+
+9. Run record and failure status
+--------------------------------
+
+<data folder>/recipe_runs/<UTC stamp>_<name>/
+  recipe.json   the recipe as run
+  run.json      project folder, stem and input identity, git commit, pixel size,
+                DEVMODE, start/end, overall status
+  steps.jsonl   per requested step: id, effective answers, status
+                (ok | failed | interrupted | ok_with_failures), seconds, error
+                text, outputs reported
+  run.log       built from io_adapter's existing session log / prompt-reply
+                capture (no second tee)
+
+Error behaviour is unchanged per module. The record makes it visible:
+  - IFvisualization2 reports a failed plot and continues (today's behaviour). The
+    failure is recorded on that child, and the parent becomes ok_with_failures,
+    not ok.
+  - An ifp.main failure discards that whole ifp result, because _run_legacy_call
+    returns before updating state, as in the GUI. Headless then stops, with the
+    record written. It does not continue to the next root step on stale data.
+  - Interrupted or failed file outputs are recorded as such and never listed as
+    successful outputs. Restoring the in-memory baseline is not file rollback.
+  - Exit status is nonzero for failed, interrupted or ok_with_failures, so agents
+    see partial failure without reading logs.
+
+
+10. Agent interface
+-------------------
+
+    python run_recipe.py --actions [ID_PREFIX]   menu tree from MENUS: id, label,
+                                                 description, parent, ported or not
+    python run_recipe.py --action ID             contract: parent, child menu,
+                                                 declared answers (name, kind,
+                                                 help), example rows from saved
+                                                 recipes when any exist
+    python run_recipe.py --project P --check R   layer-1 check
+    python run_recipe.py --project P --run R     check, then headless run
+    python run_recipe.py [--project P] --list    prefab + project recipes
+
+The check warns when a yes_no answer isn't 'y', 'n' or ''. Most legacy checks are
+`== 'y'`, so "yes" would silently mean no.
+
+Mixed mode (no extra code): an agent driving a DS session can run a recipe
+interactively with a few answers left out. DS then receives exactly those
+prompts. That's the cheap way to explore one changed parameter.
+
+
+11. Passes and proof
+--------------------
+
+Pass 0  Fixtures. On a small real project, capture GUI legacy command payloads
+        (current *_lastrun.txt files) and outputs for the proof workflow:
+        load stem -> analysis (zscore, per slide_scene) -> visualization
+        (boxplot). The caller inventory is already done (DAS1 Q3): controller
+        _run_legacy_call, IFA.py root menu, IFprocessing7.visu -> ifv.
+Pass 1  support/recipe_v0.py (ask, collecting, step stack, MissingAnswer,
+        check_level, structural check, resolve_columns, recipe load/save/lookup,
+        run record), io_adapter headless mode, run_recipe.py, tests including the
+        declaration lint. Delete IFprocessing7's dead s_to_l/l_to_s copies.
+Pass 2  Controller root menus on ids. home.load_prepared_data ported. Headless
+        runner through the controller path (section 6). "recipes" menu entry.
+        MissingAnswer re-raise in _run_legacy_call.
+Pass 3  IFprocessing7 + IFvisualization2 menu loops on ids for all entries.
+        Unported leaves record legacy_args. Both mains' own prompts (repeat
+        column/key strings, save folder, repeat context, categories,
+        autoclean) become declared asks on home.analysis / home.visualization.
+        IFprocessing7.visu nesting works through the step stack.
+        Outcome: any GUI session records a complete, id-based recipe that
+        replays headless. That's useful immediately.
+Pass 4  Proof slice ported to named answers: ifp.zscore, ifv.boxplot. Parity
+        tests against the Pass 0 fixtures.
+Pass 5+ Remaining actions in value order, one coherent behaviour per pass, each
+        with a parity fixture. Hand-ports: clustering (subset answer becomes
+        "with", children become "steps"), visu, autotype, maxeyType/chanThresh,
+        nearestOfType.
+
+Proof (after Pass 4):
+  - GUI-record the proof workflow, save it, check it, replay it headless.
+  - Compare with the Pass 0 GUI run: triplets with pd.testing.assert_frame_equal
+    (float tolerance); figure count and paths; .summary.txt companions
+    identical; artifact stubs present and pointing at the recipe.
+  - The same recipe with zscore/boxplot as legacy_args rows (Pass 3 recording)
+    produces the same outputs as the named version.
+  - Unknown id, wrong placement, undeclared or misspelled answer, and missing
+    answer each fail at --check before anything runs. Headless MissingAnswer
+    inside a try/except-wrapped prompt still fails (not a silent default).
+  - Processing -> visualize nesting records once and replays per group.
+  - A neighborhood step replayed with a different pixel size uses the recorded
+    micrometres (R-c).
+  - Reorder a menu. The recipe still replays.
+  - Draft a new recipe using only --actions/--action output. It passes --check.
+  - Note the size of each Pass 4 port as the cost estimate for Pass 5+.
+
+
+12. Removal gates
+-----------------
+
+Per module, when its last entry declares answers (no legacy_args rows possible):
+  - delete com-indexed reads, the legacy collect/replay branches, lastrun(),
+    saveCommands()
+  - legacy_args is rejected for that module's ids
+  - check: rg "lastrun|com\[|subcom|com=\[\]" <module> is empty
+When IFprocessing7 and IFvisualization2 both close: delete ifv's s_to_l/l_to_s,
+and the stale ifv2_*.txt files in the repo root.
+
+Until a gate closes, legacy_args keeps the old positional answers load-bearing,
+but only inside id-based rows, only for unported leaves, and with a mechanical
+gate. feature_extraction_ifa, spectral_flow_ifa, IFA.py menus and cmifAnalysis50
+keep their own replay until their own passes.
+
+
+13. Notes for the later CNN port (from DAS3)
+--------------------------------------------
+
+- Reuse existing machinery: io_adapter transport, shared_utils checkChange/
+  flexMenu, project_config load/save/select_project_path, path_compat,
+  image_sources/conventions, invalidate_project_config. No recipe-only readers or
+  transports.
+- run_project.main is not a collector. It stages data, writes run folders and
+  saves project config. A CNN action needs pure answer binding (asks, then
+  `if collecting():`), then explicit settings passed to the existing launcher.
+  Module knobs (EPOCHS, TUNE_LR, ...) become one validated settings path, with
+  standalone defaults feeding that same path. "prepare" is a real operation,
+  never a check.
+- When project/module defaults may fill an omitted answer, the action resolves
+  and records the value. Otherwise an omitted required answer fails headless.
+- Product handoff (e.g. checkpoint from tune -> predict) needs an explicit
+  product result from the operation, not directory scans or "latest". Design it
+  with the CNN port, separately from the triplet session handoff.
+- Recipe check, operation input checks and saved-model verification stay
+  separate checks.
+
+
+14. How review points were handled
+----------------------------------
+
+Adopted:
+  DAS1 C1   per-action porting with transitional legacy_args. This reverses
+            v2.1's whole-module, no-adapter rule. Reasons: IFprocessing7
+            depends on IFvisualization2 (P2); IFvisualization2 is under active
+            development (R5); every DAS reply favoured incremental porting with
+            parity fixtures. Bounded by section 12's gates.
+  DAS1 P1   MissingAnswer(BaseException), narrowed excepts, _run_legacy_call
+            re-raise.
+  DAS1 P4, DAS0 3   headless through the controller path.
+  DAS1 P5, Q5, DAS3 2   record semantic answers before derivation; `is None`, not
+            truthiness.
+  DAS1 Q1   execute-time prompt list (R-b).
+  DAS1 R1   step stack; record only in the collect pass.
+  DAS1 R3   yes_no warning; kinds from io_adapter's vocabulary.
+  DAS1 C2   run.log from io_adapter's existing capture.
+  DAS1 C4   DS mixed mode.
+  DAS1 C5, DAS0 4   failure status per step, ok_with_failures, nonzero exit.
+  DAS1 P3   DEVMODE pinned off and recorded.
+  DAS1 R4   optional "source" field.
+  DAS0 1    recipe = intent, run record = evidence.
+  DAS0 2    ownership rule for "with" / "steps".
+  DAS0 5, DAS2 preflight, DAS3 4   structural check plus runtime readiness checks.
+            The collecting-replay preflight is dropped.
+  DAS0 7, DAS2 5   explicit answer declarations at registration. Source scanning
+            is a lint only.
+  DAS0 6, DAS2 Pass 0   narrow proof first; fixtures captured before porting.
+  DAS2 Q7, DAS3 6, DAS0 guardrail   storage root resolved once, recorded, no
+            parent inheritance (differs from DAS1 Q7's parent lookup).
+  DAS3 4    interactive partial-recipe policy (section 7, last paragraph).
+  DAS3      CNN notes, section 13.
+
+Not adopted:
+  DAS2 named->positional adapters per action. legacy_args covers the "replay
+            known-good legacy payloads now" need without a hand-written mapping
+            layer per action. Named answers arrive by porting the action itself.
+  DAS2 recipe_schema_version / action_version. Jalaa's policy is no backwards
+            compatibility. Meaning changes are migrated on disk; the run record's
+            git commit identifies the code.
+  DAS2 "record raw and resolved blank". Per DAS1's survey there is one case (ifv
+            color categories), and recording the resolved list handles it (R-d).
+  DAS1 Q7 parent-folder lookup for recipes. See storage above.
+
+
+15. Open questions
+------------------
+
+For Jalaa:
+  O1  Confirm the reversal to per-action porting with transitional legacy_args
+      (section 14, DAS1 C1). It's the main structural change from v2.1.
+  O2  RESOLVED: "repeat last run" across projects (DAS1 P6). Per data folder,
+      no fallback (section 8).
+
+For reviewers:
+  O3  Conditional answers are marked with "?" in the declaration. Is that enough
+      for the conditional prompts you know of, or are there prompts whose
+      existence depends on data (not on another answer) that layer 1 would
+      wrongly call missing?
+  O4  Pass 3 puts all IFprocessing7/IFvisualization2 menu loops on ids at once.
+      Any loop besides menu(), mainMenu() and the submenu wrappers (scaling,
+      clustering, celltyping, ...) that records or replays com rows?
+
+
+16. Implementation addendum (Codex, 2026-10-16)
+---------------------------------------------
+
+These points supersede conflicting statements above:
+
+- Keep declarations in one lightweight, data-only module with lazy function
+  targets. Menus and --actions/--check consume that same declaration; inspecting
+  a recipe must not import the scientific/plotting stack.
+- Structural submenu wrappers migrate with their menus, including clustering,
+  processing's visu, and clusteringEvaluation. legacy_args is for leaves only.
+  Pass 3 proves the verified paths, not universal headless support: unresolved
+  execute-time prompts and bare excepts remain blockers for individual actions.
+- At each collect-then-execute workflow entry, complete missing interactive
+  answers once into a working copy of the command tree before running groups.
+  Replay uses that completed copy for every group/category. This is actual input
+  collection, never structural --check. Empty child lists mean no commands;
+  only an absent child list requests interactive collection.
+- Execution records identify both the recipe-tree position and the current
+  group/category. Repeated invocations never overwrite one another's status.
+- Suppress automatic startup/config-confirmation writes in headless setup.
+  Deliberate action effects, such as activating a subset project, retain their
+  normal behavior and are recorded. Failure stops headless processing, but live
+  dataframe references may already be changed; there is no rollback guarantee.
+- Preserve per-marker threshold choices as a named mapping. A single fallback
+  threshold is an explicit option, not a replacement for those choices.
+
+Begin with the fixture-backed framework proof. Expand action coverage only after
+the shared recording/replay lifecycle and controller boundary are verified.
+
+Verification scope update (Jalaa, 2026-10-18): do not require a new parity
+fixture/test for every mechanical input-binding port. The framework lifecycle
+and representative math paths already have coverage. For unchanged bodies,
+use manual review, the shared declaration lint, compile checks, existing
+regressions and selected end-to-end smokes. New scientific behavior still needs
+appropriate verification. This supersedes R-g's blanket per-action fixture rule.
+
+
+17. Implementation progress (updated 2026-10-18)
+---------------------------------------------
+
+Initial slice built:
+- Lightweight proof action contracts, named-answer/collection contexts, stack,
+  structural checks, column resolution, atomic recipe save/load, scoped run
+  evidence and io_adapter headless mode.
+- run_recipe.py --actions/--action/--list/--check; inspection imports only the
+  standard library. --run is added with the controller boundary, not stubbed.
+- Synthetic prepared triplet, legacy zscore/boxplot answer shapes, frozen zscore
+  expectations and renderer-input baseline. This is not a live GUI capture.
+- Removed only IFprocessing7's unused serializer copies. Its active serializers
+  remain IFvisualization2's existing implementations.
+
+Controller proof completed in the next implementation pass:
+- Added --run, explicit headless state construction, root recording/replay and
+  the startup/loaded-menu recipes entry. They use the existing controller calls
+  and preserve summaries, artifact stubs, state logs and project adoption.
+- Migrated both modules' menu declarations/loops and structural wrappers,
+  including clustering, processing -> visualize and clusteringEvaluation.
+  Unported leaves use legacy_args; unported root entries explicitly reject
+  recipe replay while retaining their interactive route.
+- Named zscore and boxplot ports use the same functions for GUI/DS/headless.
+  Incomplete workflows collect once before the repeat loop. Explicit empty
+  child lists remain empty. Run records freeze completed answers and distinguish
+  recipe positions from processing groups, plot groups and categories.
+- Scripted GUI record/save -> headless replay matches triplets, figure paths and
+  companion contents. Real rendered PNGs and recipe-linked artifact manifests
+  are verified. DS file transport, nested plots, clustering subsets, reordering,
+  failure-stop/partial-status behavior and declaration-vs-ask lint are tested.
+- Installed the missing declared plotting dependencies in the main conda env;
+  retained numpy 1.26.4, with a compatible scikit-image/tifffile version.
+
+Clarification to the Pass-4 legacy parity bullet: named actions reject
+legacy_args, as specified in sections 5/12. Parity compares frozen pre-port
+test functions and recorded renderer inputs with the new named path. No old-row
+adapter or backwards-compatibility runtime was added for zscore or boxplot.
+
+Next slice completed: all four neighborhood leaves now store radii in
+micrometres and observation names, not pixels or column positions. Nearest-type
+targets are an ordered list of {column, values} objects. Multiply/ratio use
+marker names; stretch and negative adjustment have explicit empty contracts.
+No additional framework layer or positional compatibility adapter was needed.
+
+Frozen pre-port parity covers all eight operations, including center filters,
+minimum-neighbor behavior, empty neighborhoods and absent nearest types. A
+scripted GUI -> headless controller proof checks neighborhood results at two
+pixel sizes representing the same physical layout. A named scaling chain also
+proves references to columns produced by earlier steps; column-existence checks
+must therefore happen at execution, not during collection.
+
+Threshold slice completed: Maxey's channel comparisons now collect a per-marker
+map before execution; chanThresh is prompt-free and never writes global
+thresholds. Optional explicit default_threshold handles missing entries; the
+default is to fail, not silently guess. Known round thresholds and manual
+overrides keep their existing precedence. Outlier subtraction freezes its own
+overrides while retaining its distinct missing-marker default of zero. Log2
+and reference-category mean scaling also have named answers. Matrix resource
+selection happens only after the collection return, not during input gathering.
+
+Frozen parity covers masks, all five matrix-typing outputs, log scaling and
+outlier/reference-category math. Controller coverage collects a missing marker
+threshold once for both scene groups, then proves replay is unchanged after
+the module's manual-threshold defaults change. Collection has no frame, file
+or global-state effects in this slice.
+
+Clustering slice completed (2026-10-18): KMeans, GMM, Leiden, Auto-Leiden and
+Torch clustering now use named answers. KMeans/GMM store count lists; the old
+single-number compatibility helper is deleted. Existing temporary normalization,
+feature subsets, scoped output names/labels and algorithm bodies are retained.
+Torch summary paths now enter step output evidence. Frozen parity uses actual
+sklearn/Torch engines. Leiden frames, primary-marker requests and iterative
+search calls are compared with a deterministic engine boundary double; real
+Scanpy numerical validation remains open because the optional stack is absent.
+
+The named KMeans controller proof collects once for both scenes, then renders
+a boxplot using the new annotations and replays without prompts. It exposed a
+run-record alias: adding provenance to the session recording could mutate
+earlier effective rows before a later recipe write. Copying each completed row
+into the run snapshot isolates that evidence. No execution behavior changed.
+
+Preserved caveats: Torch standardizes inside its engine even when wrapper
+normalization is off; Auto-Leiden may lower an unreachable requested target.
+Leiden's existing missing-dependency skip behavior is unchanged. These are not
+claimed to be fixed or scientifically validated by this port.
+
+Bulk mechanical port (2026-10-18): 34 additional entries now have named
+answers: every remaining plot/evaluation entry, autoclean, save, rank mapping,
+subset selection, equalization, ComBat, SD typing, phenotype labeling, vector
+typing, SAM gating and cluster auto-typing. Names replace saved column numbers;
+repeat-loop group values are derived at execution. Quantile bins and positivity
+sources are ordinary documented objects, not positional command payloads.
+The large exact-silhouette approval is collected once, before execution. SAM
+resource shortcuts are created only after collection, and existing links are
+reused. clag now accepts column zero without reopening the picker. The dead
+string serializers are deleted; internal autoclean callers use its direct API.
+
+No new test files/fixtures were drafted for this batch. The existing 86 tests
+and 45 subtests passed. A one-off temporary-project controller run produced 12
+figures without prompts: barplot, scatter, correlation, sorted heatmap, quantile,
+silhouette, score sweep, elbow and confusion. Compile/declaration/undefined-name
+checks were used during review. The smoke is evidence for those paths, not a
+claim that every plot is visually or scientifically validated.
+
+One leaf remains transitional: ifp.manual_threshold / manThresh. Its CSV path
+is straightforward, but its primary/secondary/tertiary branches open an
+interactive orthogonal threshold editor during execution. Capturing only the
+outer menu choices would falsely claim replayability. A clean next decision is
+to separate interactive threshold editing from applying the resulting CSV; do
+not build a second event-replay language just to automate that editor.
+
+Preserved, not fixed by input porting: neighborhood enrichment and co-occurrence
+still use a fixed 0.325 um/pixel internally; their declarations call this out.
+The unregistered mlEvaluation/orthoType helpers also reference missing names
+and remain outside the supported menu. No new runtime was added for them.
+
+Remaining: decide the manual-editor/apply split, manual browser usability, and
+real-engine optional-dependency checks. All ordinary processing/plotting menu
+ports are done. No real projects or machine preferences were changed by the
+automated proof; tests use temporary projects and isolated preference paths.
+
+Verification: 86 tests passed (plus 45 parameterized subtests) across recipe
+core, controller/GUI/DS integration, frozen legacy/processing parity, spine,
+triplet/path I/O and the existing CNN project I/O tests. Compile, lightweight
+python -S recipe inspection and diff-whitespace checks passed. Warnings expose
+existing pandas dtype promotion, slice assignment and deprecation behavior,
+also retained in the frozen parity fixtures. Manual browser interaction and
+the remaining named leaf ports are next.

@@ -1,0 +1,153 @@
+Named recipes: controller proof
+===============================
+
+Current status (2026-10-19)
+--------------------------
+The controller has a recipes entry at startup and in the loaded-data menu:
+run saved recipe, save recording, clear recording. Prepared-data loading,
+analysis and visualization record through the same functions used by replay.
+The processing/plotting menus use stable ids throughout. Named ports include
+zscore, boxplot, neighborhood analysis, basic scaling, Maxey celltyping and
+all five clustering methods.
+All ordinary processing/plotting leaves now use named answers. Only the manual
+threshold/phenotype editor remains transitional: its interactive editing
+branches are not unattended-replayable. Use --actions or --action for the
+current authoritative answer contracts.
+Unported controller entries are marked replayable:false and are not recorded.
+Their ordinary interactive behavior remains available.
+
+From DAS_v2:
+
+    python run_recipe.py --actions
+    python run_recipe.py --action ifv.boxplot
+    python run_recipe.py --list
+    python run_recipe.py --project tests/fixtures/recipe_framework_v0 --check proof_zscore_boxplot
+    python run_recipe.py --project C:\path\to\project --run NAME_OR_PATH
+
+--action includes named answers, their kinds/help, parent/child menus, and rows
+from existing prefab/project recipes. These commands need only the Python
+standard library for inspection/checking; --run imports the DAS execution stack.
+Run it in the DAS conda environment. Headless execution requires the existing
+machine-local pixel-size preference; set it once through DAS if it is absent.
+It does not open startup prompts or replace project/machine defaults.
+
+Draft format
+------------
+The proof_* bundled recipes are synthetic examples, not ready-made recipes for
+real project data. Their recipe_fixture input is in tests/fixtures. The menu
+labels [project] and [example] and prints the chosen recipe file path.
+
+Use the examples as structural references, then name actual inputs explicitly
+for a task-specific recipe:
+
+    {"do": "home.load_prepared_data", "with": {
+      "folder": "C:/data/my_project", "stem": "AH_08.1"
+    }}
+
+folder is already supported. Omit it to use the active project's data folder;
+relative folders resolve from that folder, not from the recipe JSON's location.
+Use an absolute save_folder on home.visualization when output must not depend
+on the starting project. Absolute paths must be updated when moving machines.
+Successful loading adopts the existing project context through the ordinary
+controller path; there is no new recipe-specific project/config mechanism.
+The load prints its resolved folder/stem before reading. Expected file/recipe
+errors return interactive users to the Recipes menu; completed steps are not
+rolled back. Headless errors still produce a nonzero exit status.
+
+Work-machine checklist
+----------------------
+Bring the complete DAS_v2 checkout, not just the modified old modules: the new
+support/recipe_*.py files, run_recipe.py and prefab_recipes are required too.
+Bring project recipes and resources, and use an environment with the required
+analysis/plotting dependencies. Update absolute input/output paths if the work
+machine differs. Complete ordinary startup configuration, then do one small
+GUI recipe run there before a long analysis. Raw-table preparation/index
+editing and interactive manual phenotyping remain outside unattended replay;
+prepared-triplet analysis/plotting is the verified workflow.
+
+Each row selects an action
+valid at its parent menu. `with` contains that action's own named answers;
+`steps` contains its child menu's rows. Enter symbolic column names rather than
+menu numbers in named actions. Preserve list order. Use y/n for yes_no answers; "yes" is warned
+about because legacy actions usually compare to "y" literally.
+
+An omitted or null answer needs collection. Empty string, 0, false, and [] are
+explicit values. --check treats missing required answers as errors; adding
+--interactive reports them as future prompts. Conditional names ending in ? in
+the declaration omit that suffix in recipe rows. An explicit steps: [] means
+run no child commands; missing steps requests collection in interactive use.
+GUI/terminal/DS replay completes missing answers once before that workflow's
+group/category loop, then freezes those choices for every invocation.
+
+Checks validate structure, names and placement. They do not load the triplet,
+check column existence, call actions, or write files. Legacy leaves are checked
+only for envelope shape and are reported as unchecked. Their old selectors,
+scientific checks and possible execute-time prompts have not all been ported;
+prefer named actions for agent-authored recipes. There are no positional
+adapters for named actions, version migrations, variables or recipe references.
+
+Threshold choices
+-----------------
+For ifp.maxey, compare_thresholds=y requires a per-marker thresholds mapping:
+
+    {"do": "ifp.maxey", "with": {
+      "compare_thresholds": "y", "log_transform": "n",
+      "thresholds": {"CD45": 2500, "Ecad": 1250}
+    }}
+
+Keys are marker prefixes before the first underscore, matching the existing
+channel-threshold calculation. GUI/DS collection freezes known thresholds and
+asks once per unknown marker, before any group runs. Missing map entries fail
+at execution unless default_threshold was explicitly supplied. Use thresholds:
+{} plus default_threshold to deliberately request one scalar for all markers;
+this is optional, not a replacement for per-marker choices.
+
+ifp.outliers uses subtract_thresholds=y plus its own thresholds map. Unlisted
+markers retain its existing zero-subtraction behavior, unlike Maxey's missing
+threshold error. subtract_thresholds=n retains the existing quantile clipping.
+Neither named path consults changing global thresholds during replay.
+
+Clustering
+----------
+KMeans and GMM take n_clusters as a list, for example [4, 8], plus normalize as
+y/n. An explicit [] requests no runs; old positional cluster rows and scalar
+count shortcuts are not accepted. Other clustering methods expose their own
+named settings through --action. The subset mapping still belongs to the
+ifp.clustering wrapper, and repeat groups belong to home.analysis.
+
+prefab_recipes/proof_kmeans_boxplot.json demonstrates load -> cluster per scene
+on one selected marker -> plot the newly created labels. Tests seed randomness
+to compare old/new results; production stochastic engine settings are unchanged.
+The Torch engine retains its internal standardization regardless of the
+wrapper's normalize answer. Auto-Leiden retains its existing search, including
+lowering an unreachable target. These are preserved behaviors, not new policies.
+Leiden requires the optional Scanpy stack; its real-engine numerical check is
+still pending, separate from the tested wrapper/request boundary.
+
+Storage and evidence
+--------------------
+Project recipes are <explicit project>/recipes/*.json, with no parent lookup.
+Project names shadow matching shipped prefabs. Explicit JSON file paths work.
+The framework provides atomic save/load helpers and an execution-record context
+that writes recipe.json, run.json, steps.jsonl and run.log. Events distinguish
+the recipe position from the group/category of each execution. Errors and
+interrupts retain evidence and never promise rollback of live data or files.
+
+The load -> per-scene zscore -> boxplot proof is verified through scripted GUI
+transport and headless replay: equal triplets, same figure paths, identical
+companions, and artifact references to the run's recipe. A DS file-transport
+test also verifies incomplete recipes ask once through ds_events/ds_replies.
+Nested processing -> visualize, clustering subset wrappers, menu reordering,
+failure propagation and partial-run exit codes have integration coverage.
+This is not a manual browser usability check or a full audit of every legacy
+editor. A bulk temporary-project smoke also rendered 12 figures through the
+new barplot/scatter/correlation/sorted-map/quantile/evaluation bindings. The old
+text serializers have been removed; named rows do not accept positional args.
+
+Plot/evaluation answers use literal names: embedding method=umap/tsne/pca,
+cluster family=Kmeans/GMM/Leiden, silhouette detail=summary/all/one, confusion
+normalization=counts/rows/columns. allow_large_exact is an explicit y/n policy
+for large pairwise silhouette calculations, collected before group execution.
+Column names are resolved when the step runs, including columns created by
+earlier steps. Use --action to inspect structured quantile-bin and positivity
+answers rather than guessing their keys.

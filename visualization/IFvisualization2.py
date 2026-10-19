@@ -73,6 +73,9 @@ if str(_NEW_DAS_DIR) not in sys.path:
     sys.path.append(str(_NEW_DAS_DIR))
 from embedding_utils import compute_embedding, load_scanpy_stack, plot_embedding
 from shared_utils import checkChange as shared_check_change
+from shared_utils import flexMenu as shared_flex_menu
+import recipe_v0 as recipe
+import recipe_actions_v0 as recipe_actions
 
 def _load_scanpy_stack(action_label="this action"):
     return(load_scanpy_stack(action_label))
@@ -783,30 +786,29 @@ def _normalize_repeat_context(obs, repeat_context):
 
 
 def _load_repeat_context(obs):
-    try:
-        nn,repeat_context = lastrun(title='repeat_context')
-    except:
-        repeat_context = _default_repeat_context()
-    return(_normalize_repeat_context(obs, repeat_context))
+    row = recipe.load_last("home.visualization")
+    answers = row["with"]
+    return _normalize_repeat_context(obs, [answers["repeat_column"], answers["key_strings"]])
 
 
-def _prompt_repeat_context(obs):
+def _prompt_repeat_column(obs):
     robs = _repeat_obs_frame(obs)
-    uch = []
     try:
-        ch,uch = obMenu(robs,'repeat analysis on each unique value in:')
-        repeat_context = [robs.columns[ch],[]]
-    except:
-        repeat_context = _default_repeat_context()
-    if len(uch) > 0:
-        print(uch)
-    while True:
-        ks = logInput("key string, if any, for categories to consider (skips others- if blank, processes all) (end with ! for exact match)")
-        if ks == '': #TODO: add hooks for 'done' or 'skip' button in gui
-            break
-        repeat_context[1].append(ks)
-    saveCommands(com=repeat_context,title='repeat_context')
-    return(_normalize_repeat_context(robs, repeat_context))
+        index, _ = obMenu(robs, "repeat analysis on each unique value in:")
+        return robs.columns[index]
+    except (ValueError, TypeError):
+        return "all data"
+
+
+def _prompt_plot_categories(obs):
+    selected = getCats(obs, required=False,
+                       title="Columns to color figures by (or sort x axis for boxplot). Blank reuses the last saved set.")
+    if selected:
+        return selected
+    try:
+        return recipe.load_last("home.visualization")["with"]["categories"]
+    except FileNotFoundError:
+        return []
 
 
 def _repeat_value_matches(value, filters):
@@ -851,139 +853,107 @@ def _set_ifv_repeat_meta(base_spath, repeat_column, repeat_targets, repeat_filte
     sink["ifv_repeat_key_filters"] = list(repeat_filters)
 
 
-def main(df,obs,dfxy,spath=None,catlist=None,commands=None,clean=True, lastRun = False, batch = '',returns=4,repeat_context=None,track_progress=True):
-    global SPATH
-    global UMAP
-    global CATS
-    global DONE
-    global BATCH
-    global PROGRESS_ENABLED
+def main(df, obs, dfxy, spath=None, catlist=None, commands=None, clean=True,
+         lastRun=False, batch="", returns=4, repeat_context=None, track_progress=True,
+         save_folder=None, repeat_column=None, key_strings=None, categories=None,
+         autoclean=None, nested_folder=""):
+    global SPATH, CATS, DONE, BATCH, PROGRESS_ENABLED
+    if recipe.current_step() is None:
+        with recipe.step("home.visualization"):
+            return main(df, obs, dfxy, spath, catlist, commands, clean, lastRun,
+                        batch, returns, repeat_context, track_progress, save_folder,
+                        repeat_column, key_strings, categories, autoclean, nested_folder)
+    owner = recipe.current_step()
+    if lastRun:
+        saved = recipe.load_last("home.visualization")
+        owner.row.setdefault("with", {}).update(saved["with"])
+        if commands is None:
+            commands = saved["steps"]
+    if repeat_context is not None:
+        repeat_column = repeat_context[0] if repeat_column is None else repeat_column
+        key_strings = repeat_context[1] if key_strings is None else key_strings
+    save_folder = recipe.ask("save_folder", save_folder if save_folder is not None else spath,
+                             lambda: checkChange(SPATH, "save folder"))
+    repeat_column = recipe.ask("repeat_column", repeat_column,
+                               lambda: _prompt_repeat_column(obs))
+    key_strings = recipe.ask("key_strings", key_strings,
+                              lambda: shared_flex_menu(
+                                  "key string for repeat categories (end ! for exact match)",
+                                  input_fn=logInput))
+    categories = recipe.ask("categories", categories if categories is not None else catlist,
+                             lambda: _prompt_plot_categories(obs))
+    default_clean = None if clean and df.isna().values.any() else ("y" if clean else "n")
+    autoclean = recipe.ask("autoclean", autoclean if autoclean is not None else default_clean,
+                           lambda: "y" if _prompt_yes_no_default_yes(
+                               "NaN values detected; autoclean? (y/n) [y]: ") else "n")
+    dfs = [df, obs.astype(str), dfxy]
+    recipe.resolve_columns(dfs[1], categories)
+    CATS = [cat for cat in categories if len(dfs[1][cat].unique()) <= MAXcATS]
     BATCH = batch
-    print(BATCH,'BATCH!')
-    #logInput()
-
-    print('visu')
     DONE.clear()
-    CATS.clear()
-
-
-    obs = obs.astype(str)
-    #obs = deleteTrailing(obs)  #used to be in boxplot function, I think it caused errors despite being run on a copy.. only matters when trailing chars like after agreethresh iirc. surprisingly slow.
-    dfs = [df,obs,dfxy]
+    commands = recipe.child_rows(commands)
+    saving = False
+    if commands is None and not recipe.collecting():
+        answer = logInput("repeat last run? (y)")
+        if answer == "y" or (DEVMODE and answer == ""):
+            commands = recipe.load_last("home.visualization")["steps"]
+        else:
+            saving = True
+    with recipe.collection():
+        _, commands = mainMenu(dfs, commands, batch=batch)
+    owner.row["steps"] = commands
+    if recipe.collecting():
+        return (dfs[0], dfs[1], dfs[2], VLOG) if returns == 4 else (dfs, commands)
+    if saving and logInput("save commands? (y)") == "y":
+        saveCommands(com=commands)
     odfs = copy.deepcopy(dfs)
-    if clean and df.isnull().values.any():
-        clean = _prompt_yes_no_default_yes('NaN values detected; autoclean? (y/n) [y]: ')
-    if clean:
-        #print(df.columns)
-        #input()
-        dfs,n = autoClean(dfs)
-
-    if spath:
-        SPATH = spath
-    print(SPATH,'saving here SPATH!!!')
-    if not spath: #not DEVMODE and
-        SPATH = checkChange(SPATH,'save folder')
-    base_spath = str(SPATH)
-
-    if repeat_context is None:
-        if lastRun:
-            repeat_context = _load_repeat_context(dfs[1])
-        elif commands:
-            repeat_context = _default_repeat_context()
-        else:
-            repeat_context = _prompt_repeat_context(dfs[1])
-    else:
-        repeat_context = _normalize_repeat_context(dfs[1], repeat_context)
-    repeat_col,repeat_targets,repeat_filters = _resolve_repeat_targets(dfs[1], repeat_context)
+    if autoclean == "y":
+        dfs, _ = autoClean(dfs)
+    robs = _repeat_obs_frame(dfs[1])
+    recipe.resolve_columns(robs, [repeat_column])
+    recipe.resolve_columns(dfs[1], categories)
+    repeat_col, repeat_targets, repeat_filters = _resolve_repeat_targets(
+        dfs[1], [repeat_column, key_strings])
+    # Relative output answers are anchored by the controller's project cwd.
+    base_spath = os.path.abspath(os.path.join(str(save_folder), nested_folder))
     _set_ifv_repeat_meta(base_spath, repeat_col, repeat_targets, repeat_filters)
-
-    if not catlist:
-        catlist = []
-        if not lastRun:
-            catlist = getCats(
-                dfs[1],
-                required=False,
-                title=(
-                    'Columns to color figures by (or sort x axis for boxplot).\n'
-                    'Enter one category number or range() at a time.\n'
-                    'Send x, q, or blank when done. If nothing is chosen, the last saved set will be reused.'
-                ),
-            )
-        if len(catlist) == 0:
-            nn,catlist = lastrun(title='color_categories')
-            print(catlist,'CATS')
-        else:
-            saveCommands(com=catlist,title='color_categories')
-
-
-    ncl = []
-    for cat in catlist:
-        if len(dfs[1].loc[:,cat].unique()) <= MAXcATS:
-            ncl.append(cat)
-    catlist = ncl
-    CATS = catlist
-
-
-
-
-    if not commands:
-
-        if not lastRun:
-            rlr = logInput("repeat last run? (y)")
-        else:
-            rlr = 'y'
-        if DEVMODE:
-            if rlr == '':
-                rlr = 'y'
-        if rlr == 'y':
-            nn,commands = lastrun(dfs)
-            print(commands,'com')
-        if not commands:
-            nn,commands = mainMenu(dfs,com=[],cat='',batch=batch)
-            sci = logInput("save commands? (y)")
-            if sci == 'y':
-                saveCommands(9,commands,9)
-    total_ticks = len(repeat_targets) * len(catlist) * len(commands)
+    CATS = [cat for cat in categories if len(dfs[1][cat].unique()) <= MAXcATS]
+    BATCH = batch
+    sink = _ifv_meta_sink()
+    if sink is not None and recipe.run_reference():
+        sink.update(ifv_replay_path=recipe.run_reference(), ifv_replay_mode="recipe")
+    total_ticks = len(repeat_targets) * len(CATS) * len(commands)
     PROGRESS_ENABLED = bool(track_progress and total_ticks > 0)
     if PROGRESS_ENABLED:
         ifprog.reset_progress(total_ticks, "Visualization")
     try:
-        if len(repeat_targets) == 0:
-            print('no repeat targets matched')
         for repeat_value in repeat_targets:
             if repeat_col == "all data":
                 sdfs = dfs
                 BATCH = batch
             else:
-                key = dfs[1].loc[:,repeat_col] == repeat_value
-                sdfs = []
-                for d in dfs:
-                    sdfs.append(d.loc[key,:])
+                key = dfs[1][repeat_col] == repeat_value
+                sdfs = [frame.loc[key, :] for frame in dfs]
                 BATCH = _join_batch_tokens(batch, repeat_value)
-            SPATH = os.path.join(base_spath, removeBadS(repeat_value)).replace("\\","/")
+            SPATH = os.path.join(base_spath, removeBadS(repeat_value)).replace("\\", "/")
             os.makedirs(SPATH, exist_ok=True)
             DONE.clear()
-            for cat in catlist:
-                mainMenu(sdfs,commands,cat,batch=BATCH)
-        SPATH = base_spath
-        BATCH = batch
-        sink = _ifv_meta_sink()
+            for cat in CATS:
+                mainMenu(sdfs, commands, cat, batch=BATCH)
         if sink is not None:
-            sink["ifv_save_root"] = os.path.abspath(base_spath)
-        if returns == 4:
-            return(odfs[0],odfs[1],odfs[2],VLOG) #expecting 'com' returned idk why only vlog here or where else it'll crash
-        else:
-            return([odfs[0],odfs[1],odfs[2]],[])
+            sink["ifv_save_root"] = base_spath
+        return (odfs[0], odfs[1], odfs[2], VLOG) if returns == 4 else (odfs, [])
     finally:
+        SPATH, BATCH = base_spath, batch
         if PROGRESS_ENABLED:
             ifprog.clear_progress()
         PROGRESS_ENABLED = False
 
-def autoClean(DFs,com=['n'],cat=''): #duplicated in IFA4, IFV2 except it takes df,obs,dfxy
+def autoClean(DFs, cat=''):
     df,obs,dfxy = DFs[0],DFs[1],DFs[2]
     old_rows = df.shape[0]
     old_cols = df.shape[1]
-    if len(com) == 0:
+    if recipe.collecting():
         return([],[])
     if not df.isnull().values.any():
         print('visualization autoclean skipped: no missing values')
@@ -1031,180 +1001,88 @@ def autoClean(DFs,com=['n'],cat=''): #duplicated in IFA4, IFV2 except it takes d
     )
     return([df,obs,dfxy],[])
 
-def mainMenu(dfs,com=[],cat='', batch = ''):
-    print('main menu')
-    #global BATCH
-    #BATCH = batch
-    #print(BATCH,'BATCH!')
-    op = ['spatial pseudoimage','embedding','barplot','[] boxplot','error bar plot','histogram','cluster heatmap',
-          'biomarker sorted heatmap', 'annotation sorted heatmap', 'correlation heatmaps','quantile plot', 'scatterplot',
-          'threshold sweep', 'spatial by expression',
-          'volcano plot','clustering evaluation','bubble plot','differential abundance','neighborhood enrichment','co-occurrence','centroid distance map']
-    fn = [spatialLite,showUmap,barplot,boxplot,errorBar,hist,heatmap,
-          biomSortedMap,sortedMap,correlationMatrix,quantilePlot,scatterplot,thresholdSweep,spat2,volcanoPlot,clusteringEvaluation,bubblePlot,differentialAbundance,neighborhoodEnrichment,coOccurrence]
-    fn.append(centroidDistanceMap)
-    dfs1,coms=menu(dfs,op,fn,com,cat)
-    if len(dfs1) > 0:
-        dfs = dfs1
-    #print(coms,'coms out from mainMenu')
-    return(dfs,coms)
+def mainMenu(dfs, com=None, cat="", batch=""):
+    print("main menu")
+    result, rows = menu(dfs, "ifv.main", recipe.child_rows(com), cat)
+    return (result if len(result) else dfs), rows
 
 
-def menu(dfs,options,functions,com=[],cat=''):
-    print(com,'com into menu')
-    #print("we need to split processing from visu so\n visu can do-for-each obs category e.g. make pseudoimage of prolif, then celltype, then a barplot of each.")
-    if len(com) == 0:
-        coms = []
+def menu(dfs, menu_id, com=None, cat=""):
+    entries = recipe_actions.MENUS[menu_id]
+    if recipe.collecting():
+        rows = []
+        if com is not None:
+            recipe.check_level(com, menu_id, interactive=True)
+            for index, row in enumerate(com):
+                _, built = recipe.invoke(row["do"], dfs, row, index=index,
+                                         recording=True, cat=cat)
+                rows.append(built.row)
+            return [], rows
         while True:
             print("\n")
-            for i,op in enumerate(options):
-                print(i,":",op)
+            for index, action in enumerate(entries):
+                print(index, ":", action.label)
+            print("send non-int when done (return to previous menu)")
+            raw = logInput("number: ").strip()
             try:
-                print("send non-int when done (return to previous menu)")
-                ch = int(logInput("number: "))
-            except KeyboardInterrupt:
+                choice = int(raw)
+            except ValueError:
+                return [], rows
+            if choice < 0 or choice >= len(entries):
+                print("Invalid option.")
+                continue
+            _, built = recipe.invoke(entries[choice].id, dfs, index=len(rows),
+                                     recording=True, cat=cat)
+            rows.append(built.row)
+    if com is None:
+        raise recipe.MissingAnswer(menu_id, "steps")
+    recipe.check_level(com, menu_id)
+    for index, row in enumerate(com):
+        action = recipe_actions.get_action(row["do"])
+        print("running subcommand:", row, action.label, "on category", cat)
+        mpl.style.use("default")
+        before = _snapshot_ifv_save_state()
+        try:
+            recipe.invoke(action.id, dfs, row, index=index,
+                          scope={"plot_group": str(BATCH), "category": str(cat)},
+                          recording=False, cat=cat)
+            if PROGRESS_ENABLED:
+                ifprog.tick_progress(f"Visualization | {action.label} | {cat}")
+        except Exception as exc:
+            if DEVMODE:
                 raise
-            except:
-                print(coms,"coms out of menu")
-                return([],coms)
-            nn,com=functions[ch](dfs,com=[])
-            coms.append([ch]+com)
-
-    else:
-        freezeError = 0
-        print(com,'executing com')
-        for subcom in com:
-            print(com)
-            if type(subcom) == list:
-                ch = subcom[0]
-                print('running subcommand:',subcom,options[ch], 'on category',cat)
-                #dfs,nn = functions[ch](dfs,subcom,cat)
-                mpl.style.use('default')
-                if DEVMODE:
-                    functions[ch](dfs,subcom,cat)
-                    if PROGRESS_ENABLED:
-                        ifprog.tick_progress(f"Visualization | {options[ch]} | {cat}")
-                else:
-                    save_state_before = _snapshot_ifv_save_state()
-                    try:
-                        functions[ch](dfs,subcom,cat)
-                        if PROGRESS_ENABLED:
-                            ifprog.tick_progress(f"Visualization | {options[ch]} | {cat}")
-                    except Exception as e:
-                        _report_visualization_failure(options[ch], cat, subcom, e, save_state_before)
-                        if freezeError:
-                            logInput('hit any key to continue')
-                            freezeError = 0
-        return(dfs,[])
+            _report_visualization_failure(action.label, cat, row, exc, before)
+    return dfs, []
 
 def checkChange(s,cat='string',paths=False):
     return(shared_check_change(s, cat or 'string', input_fn=logInput))
 
 
-def lastrun(dfs=9,com=[],cat='',title='lastrun'):
-    replay_path = os.path.abspath("ifv2_"+title+".txt")
-    with open(replay_path,'r') as f:
-        coms = f.readlines()[0]
-    sink = globals().get("_new_das_meta")
-    if isinstance(sink, dict):
-        sink["ifv_replay_path"] = replay_path
-        sink["ifv_replay_mode"] = "loaded"
-        sink["ifv_replay_title"] = str(title)
-    print("com read in:",coms,type(coms))
-    com = s_to_l(coms)[0]
-    print(com,type(com))
-    return(dfs,com)
+def lastrun(dfs=9, com=None, cat="", title="lastrun"):
+    path = recipe.find_recipe("_last_home.visualization", Path.cwd())
+    row = recipe.load_recipe(path)["steps"][0]
+    sink = _ifv_meta_sink()
+    if sink is not None:
+        sink.update(ifv_replay_path=str(path), ifv_replay_mode="loaded",
+                    ifv_replay_title=title)
+    return dfs, row["steps"]
 
 
-def saveCommands(dfs=9,com=[],cat='',title='lastrun'):
-    print(com)
-    coms = l_to_s(com)
-    coms = coms.replace("][","],[")
-    print(coms,"COMS OUT")
-    replay_path = os.path.abspath("ifv2_"+title+".txt")
-    with open(replay_path,'w') as f:
-        f.write(coms)
-    sink = globals().get("_new_das_meta")
-    if isinstance(sink, dict):
-        sink["ifv_replay_path"] = replay_path
-        sink["ifv_replay_mode"] = "saved"
-        sink["ifv_replay_title"] = str(title)
-    return(dfs,com)
-
-def s_to_l(coms):
-    #print(coms,"s2l")
-
-
-    ocom = []
-    #print(ocom,"ocom")
-    i = 0
-    while i < len(coms):
-        ch = coms[i]
-        if ch == "[":
-            inbrkt = ""
-            nbrkt = 0
-            j = i+1
-            while True:
-                ch2 = coms[j]
-
-                if nbrkt == 0 and ch2 == "]":
-                    break
-                if ch2 == "[":
-                    nbrkt += 1
-                elif ch2 == "]":
-                    nbrkt -= 1
-                inbrkt += ch2
-                j += 1
-            ocom.append(s_to_l(inbrkt))
-            i = j
-
-        elif ch == "]":
-            i += 1
-        else:
-            cs = ""
-            j = i
-            while True:
-                ch2 = coms[j]
-                j += 1
-                if ch2 == ",":
-                    switch = 0
-                    if len(cs) > 0 and "." in cs:
-                        try:
-                            ocom.append(float(cs))
-                            switch = 1
-                        except:
-                            pass
-                    if len(cs)>0 and switch == 0:
-                        if cs == "False":
-                            ocom.append(False)
-                        else:
-                            try:
-                                ocom.append(int(cs))
-                            except:
-                                ocom.append(str(cs))
-                    break
-                else:
-                    cs+=ch2
-            i  = j
-    return(ocom)
+def saveCommands(dfs=9, com=None, cat="", title="lastrun"):
+    row = dict(recipe.current_step().row)
+    if com is not None:
+        row["steps"] = com
+    path = recipe.save_last("home.visualization", row)
+    sink = _ifv_meta_sink()
+    if sink is not None:
+        sink.update(ifv_replay_path=str(path), ifv_replay_mode="saved",
+                    ifv_replay_title=title)
+    return dfs, row["steps"]
 
 
 
 
-def l_to_s(com,outs = ""):
 
-    outs += "["
-    for item in com:
-        #print(outs)
-        #print(item,'\n')
-        if type(item) == list:
-            outs += l_to_s(item)
-        elif len(str(item)) == 0:
-            outs+= "'"+"'"+"," #this does not seem to work- string gets saved blank.... wait maybe ju
-        else:
-            outs += str(item)+','
-    outs += "]"
-    return(outs)
 
 
 def saveF(data,foln,filn,typ="png"):
@@ -1231,6 +1109,9 @@ def saveF(data,foln,filn,typ="png"):
         os.makedirs(SPATH+"/"+foln)
     if typ == "png":
         save_path = os.path.abspath(SPATH+"/"+foln+"/"+filn+'.png')
+        owner = recipe.current_step()
+        if owner is not None:
+            owner.outputs.append(save_path)
         print(save_path,'SAVING!')
         sink = globals().get("_new_das_meta")
         if isinstance(sink, dict):
@@ -1291,7 +1172,7 @@ def getCats(obs,title='',required = True, typ = 'abc'):
             try:
                 for im in imp:
                     cols.append(obs.columns[im])
-            except:
+            except Exception:
                 cols.append(obs.columns[imp])
         except Exception as e:
             print(cols)
@@ -1370,18 +1251,14 @@ def preload(bl1,bl2,bl3,path = r'D:\U54 DDR',devmode=False): #'D:\WOO' and tstem
 menu functions ^
 visu functions v
 '''
-def sortedMap(dfs,com=[],cat=''):
-    #make sort-by-dendrogram function that adds "1- 2-" in front of any label so this has dendrogram option
-    #then can run aggregate by leiden and run through here (after sorting highest level label (or any) by dendrogram)
+def sortedMap(dfs, cat="", individual=None, normalize=None, manual_order=None):
+    individual = recipe.ask("individual", individual, "show each annotation category individually? (y)")
+    normalize = recipe.ask("normalize", normalize, "z-score data? (y)")
+    manual_order = recipe.ask("manual_order", manual_order, "use manual column order? (y)")
+    if recipe.collecting():
+        return [], []
     import textwrap
-
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        imap = logInput('show each annotation category individually? (y)')
-        azsc = logInput('z-score data? (y)')
-        mansort = logInput('use manual column order? (y)')
-        return([],[imap,azsc,mansort])
-
+    df, obs, dfxy = dfs
     def _measure_text_width_in(txt,fontsize='x-large'):
         tfig = plt.figure(figsize=(4,2))
         tax = tfig.add_axes([0,0,1,1])
@@ -1444,7 +1321,7 @@ def sortedMap(dfs,com=[],cat=''):
         plt.close(tfig)
         return(outw,outfs,ouths,gap_in)
 
-    imap,azsc,mansort = com[1],com[2],com[3]
+    imap, azsc, mansort = individual, normalize, manual_order
     if imap == 'y':
         allcombs = [cat]
     else:
@@ -1762,57 +1639,47 @@ def sortMap(df,obs,dfxy=9,cols=["no cols included"],allutys = None): #cols aka a
 
 
 
-def boxplot(dfs,com=[],cat=''):
-    df,obs = dfs[0].copy(),dfs[1].copy()
-    if len(com) == 0:
-        vich = logInput("violin plot instead? (y): ")
-        fich = logInput("show outliers? (y)")
-        print(r'C:\Users\youm\Desktop\src\maxey matrices\markers_to_show.csv\nonly works with matrix type- for autotype, change column name in boxh')
-        mich = logInput('show only relevant celltypes, as outlined in the file specified above? (y)')
-        colors = getCats(obs,title='category to color by')
+def boxplot(dfs, cat="", violin=None, outliers=None, relevant_only=None,
+            color_columns=None, per_row=None):
+    violin = recipe.ask("violin", violin, "violin plot instead? (y): ")
+    outliers = recipe.ask("outliers", outliers, "show outliers? (y)")
+    relevant_only = recipe.ask("relevant_only", relevant_only,
+                               "show only configured relevant celltypes? (y)")
+    color_columns = recipe.ask("color_columns", color_columns,
+                               lambda: getCats(dfs[1], title="category to color by"))
+    per_row = recipe.ask("per_row", per_row, _prompt_boxplot_per_row)
+    if recipe.collecting():
+        return [], []
+    df, obs = dfs[0].copy(), dfs[1].copy()
+    recipe.resolve_columns(obs, [cat])
+    recipe.resolve_columns(obs, color_columns)
+    ncols = int(per_row)
+    if ncols < 1:
+        raise ValueError("boxplots per row must be a positive integer")
+    for color in sorted(color_columns):
         try:
-            ncols = int(logInput('boxplots per row in fig'))
-        except:
-            ncols = 6
-
-
-        return([],[colors,vich,fich,ncols,mich])
-
-
-    colors,vich,fich,ncols,mich = com[1],com[2],com[3],com[4],com[5]
-    ch = list(obs.columns).index(cat)
-    for color in sorted(colors):
-        if color not in obs.columns:
-            print('skipping',color)
-            continue
+            binCol = obs.columns[list(obs.columns).index(cat)].astype(int)
+        except Exception:
+            binCol = cat
         try:
-            binCol = obs.columns[ch].astype(int)
-        except:
-            binCol = obs.columns[ch]
-        try:
-            obs[binCol+' temp'] = obs[binCol].apply(lambda n: n.split('_')[0])
-            flt = False
-            if '.' in obs[binCol+' temp'].iloc[0]:
-                flt = True
-            if not flt:
-                obs[binCol+' temp']=obs[binCol+' temp'].astype(int)
-                print('int type bins')
-            else:
-                obs[binCol+' temp']=obs[binCol+' temp'].astype(float)
-                print('float type bins')
-
-        except Exception as e:
-            print('str type bins',e)
-            obs[binCol+' temp'] = obs[binCol]+'!'
-
-
-        obs = obs.sort_values(binCol+' temp',axis=0) #sorting changes index order
-        obs[binCol]=obs[binCol].astype(str)
+            obs[binCol + " temp"] = obs[binCol].apply(lambda value: value.split("_")[0])
+            floating = "." in obs[binCol + " temp"].iloc[0]
+            obs[binCol + " temp"] = obs[binCol + " temp"].astype(float if floating else int)
+        except Exception:
+            obs[binCol + " temp"] = obs[binCol] + "!"
+        obs = obs.sort_values(binCol + " temp", axis=0)
+        obs[binCol] = obs[binCol].astype(str)
         colCol = obs[color].sort_values()
-        title = cat+' x '+color
+        boxH(df, obs, binCol, colCol, violin, outliers, relevant_only,
+             title=cat + " x " + color, corr=False, ncols=ncols)
+    return None
 
-        boxH(df,obs,binCol,colCol,vich,fich,mich,title=title,corr=False,ncols=ncols)
-    return()#9,[dfs]) #also doesn't need to return anything... temps are getting returned somehow, maybe axis messed up..
+
+def _prompt_boxplot_per_row():
+    try:
+        return int(logInput("boxplots per row in fig"))
+    except ValueError:
+        return 6
 
 
 def boxH_layout(dfo,binCol,colCol_name,ubins,hord=None,total_slots=None,
@@ -2191,23 +2058,20 @@ def deleteTrailing(df):
     return(df)
 
 
-def biomSortedMap(dfs,com=[],cat=''):
+def biomSortedMap(dfs, cat="", sort_markers=None, split_column=None):
+    sort_markers = recipe.ask("sort_markers", sort_markers, lambda: getCats(dfs[0], "markers to sort by"))
+    split_column = recipe.ask("split_column", split_column, lambda: _prompt_column(dfs[1], "make different plots for each value in: "))
+    if recipe.collecting():
+        return [], []
     global DONE
-    df,obs,dfxy = dfs[0].copy(),dfs[1].copy(),dfs[2]
-    if len(com) == 0:
-        for i,col in enumerate(df.columns):
-            print(i,":",col)
-
-        chs = getCats(df,'markers to sort by')  #chs sorting
-        #print(chs,'should be int')
-        ch2,uch2 = obMenu(obs,'make different plots for each category in column:')
-        ch2 = obs.columns[ch2]
-        return([],[chs,ch2])
+    df, obs, dfxy = dfs[0].copy(), dfs[1].copy(), dfs[2]
+    recipe.resolve_columns(df, sort_markers)
+    recipe.resolve_columns(obs, [split_column])
     if 'biomSortedMap' in DONE:
         return(dfs,9)
 
     DONE.append('biomSortedMap')
-    chs,ch2 = com[1],com[2]
+    chs, ch2 = sort_markers, split_column
     ch2 = list(obs.columns).index(ch2)
     for ch in chs: #int for each biomarker
         if ch not in df.columns:
@@ -2269,23 +2133,15 @@ def biomSMH(df,obs,dfxy,ch,ch1s,uch1s,title = 'all cells'):
     return(df,obs,dfxy)
 
 
-def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
+def showUmap(dfs, cat="", method=None, normalize=None):
+    method = recipe.ask("method", method, lambda: _prompt_choice("embedding", ["umap", "tsne", "pca"], default="umap"))
+    normalize = recipe.ask("normalize", normalize, lambda: "y" if _prompt_yes_no_default_yes("normalize before computing? (y/n) [y]: ") else "n")
+    if recipe.collecting():
+        return [], []
     global UMAP
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        print('0 : UMAP')
-        print('1 : tSNE')
-        print('2 : PCA')
-        try:
-            ch = int(logInput('number: '))
-        except:
-            ch = 0
-        normalize_embedding = _prompt_yes_no_default_yes('normalize before computing? (y/n) [y]: ')
-        return([],[ch, 'y' if normalize_embedding else 'n'])
-    mode = str(com[1]) if len(com) > 1 else '0'
-    normalize_embedding = True
-    if len(com) > 2:
-        normalize_embedding = str(com[2]).strip().lower() in ['', 'y', 'yes', 'use', 'true', '1']
+    df, obs, dfxy = dfs
+    mode = {"umap": "0", "tsne": "1", "pca": "2"}[method]
+    normalize_embedding = normalize == "y"
     mname = 'umap'
     if mode == '1':
         mname = 'tsne'
@@ -2294,7 +2150,7 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
     done_key = 'showEmbedding_'+mname+('_zscore' if normalize_embedding else '_raw')
     if done_key in DONE:
         print(mname,'already done')
-        return(dfs,com)
+        return(dfs,[])
     DONE.append(done_key)
     colors = CATS
 
@@ -2320,7 +2176,7 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
     except Exception as exc:
         print("[DAS embedding] failed to build", mname, "embedding.")
         print("[DAS embedding]", type(exc).__name__, exc)
-        return(dfs,com)
+        return(dfs,[])
 
     plt.rcParams['figure.figsize'] = 8, 8
     _embedding_detail("[DAS embedding detail] color columns:", colors)
@@ -2339,7 +2195,7 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
             else:
                 try:
                     clr.append(allc.colors[j])
-                except:
+                except Exception:
                     _embedding_detail('[DAS embedding detail] PLACEHOLDER NOT ENOUGH COLORS ON EMBEDDING')
                     clr.append('black')
         return(dict(zip(itm,clr)))
@@ -2413,29 +2269,19 @@ def showUmap(dfs,com=[],cat='doesnt matter to calculate umap once',ymin=0):
     return([df,obs,dfxy],9)
 
 
-def centroidDistanceMap(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        zsc = logInput('z-score biomarkers before centroiding? (y): ')
-        split_col = ''
-        if logInput('split each current category by another annotation? (y): ') == 'y':
-            try:
-                ch,uch = obMenu(obs,'column to split each current category by (send non-int to skip): ')
-                split_col = obs.columns[ch]
-            except Exception:
-                split_col = ''
-        return([],[zsc,split_col])
-
+def centroidDistanceMap(dfs, cat="", normalize=None, split_column=None):
+    normalize = recipe.ask("normalize", normalize, "z-score biomarkers before centroiding? (y): ")
+    split_column = recipe.ask("split_column", split_column, lambda: _prompt_optional_column(dfs[1], "split each current category by another annotation? (y): ", "column to split by: "))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(obs, [split_column] if split_column else [])
     if cat not in obs.columns:
         print('skipping centroid distance map; current category not available:',cat)
         return(dfs,9)
 
-    zsc = (str(com[1]).strip().lower() == 'y') if len(com) > 1 else False
-    split_col = ''
-    if len(com) > 2:
-        chosen = str(com[2]).strip()
-        if chosen != '' and chosen in obs.columns and chosen != cat:
-            split_col = chosen
+    zsc = str(normalize).strip().lower() == 'y'
+    split_col = split_column if split_column != cat else ''
 
     num_df = df.apply(pd.to_numeric, errors='coerce')
     valid_cols = []
@@ -2731,21 +2577,20 @@ def centroidDistanceMap(dfs,com=[],cat=''):
     return(dfs,9)
 
 
-def barplot(dfs,com=[],cat='',showPercentageText=True):
-    print(cat)
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
+def barplot(dfs, cat="", bin_columns=None, dendrogram=None):
+    bin_columns = recipe.ask("bin_columns", bin_columns, lambda: getCats(dfs[1], "columns to sort x axis by"))
+    dendrogram = recipe.ask("dendrogram", dendrogram, "sort bars by dendrogram? (y): ")
+    if recipe.collecting():
+        return [], []
+    recipe.resolve_columns(dfs[1], bin_columns)
+    for column in bin_columns:
+        _barplot_one(dfs, cat, column, dendrogram == "y", True)
+    return dfs, []
+
+
+def _barplot_one(dfs, cat, binCol, dend_sort, showPercentageText):
+    df, obs, dfxy = dfs
     mpl.style.use('default')
-    if len(com) == 0:
-        binCol = getCats(obs,'columns to sort x axis by')
-        dend_sort = logInput('sort bars by dendrogram? (y): ')
-        return([],[binCol,dend_sort])
-    print('showing spatial')
-    binCol = com[1]
-    if type(binCol) == list:
-        for bcol in binCol:
-            barplot(dfs,[0,bcol,com[2]],cat,showPercentageText)
-        return(9,9)
-    dend_sort = str(com[2]).strip().lower() == 'y' if len(com) > 2 else False
     if binCol not in obs.columns:
         print('skipping',binCol,'for',cat)
     ch = list(obs.columns).index(binCol)
@@ -2904,17 +2749,17 @@ def exp_rgb(values, min_alpha=.1):
     return (np.column_stack([r, g, b, a]),p1,p99)
 
 
-def spat2(dfs,com=[],cat=''):
+def spat2(dfs, cat="", columns=None):
+    columns = recipe.ask("columns", columns, lambda: getCats(dfs[0], "columns to color by"))
+    if recipe.collecting():
+        return [], []
     if "spat2" in DONE:
-        return()
+        return dfs, []
     fsm = 1
-    if len(com) == 0:
-        df = dfs[0]
-        cols=getCats(df,'columns to color by')
-        return([],[cols])
+    recipe.resolve_columns(dfs[0], columns)
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     #ymin = dfxy.iloc[:,1])
-    cols = com[1]
+    cols = columns
     for col in cols:
         for ss in obs.loc[:,'slide_scene'].unique():
             key = obs.loc[:,'slide_scene'] == ss
@@ -2939,28 +2784,14 @@ def spat2(dfs,com=[],cat=''):
 
 
 
-def spatialLite(dfs,com=[],cat='',ymin=0):
-    #df,obs,dfxy = dfs[0],dfs[1],dfs[2]
+def spatialLite(dfs, cat="", colors=None, size_multiplier=None, ymin=0):
+    size_multiplier = recipe.ask("size_multiplier", size_multiplier, lambda: _prompt_number("figsize modifier?", 1.0))
+    colors = recipe.ask("colors", colors, lambda: _prompt_spatial_colors(dfs[1]))
+    if recipe.collecting():
+        return [], []
     mpl.style.use('default')
-    if len(com) == 0:
-        try:
-            fsm = float(logInput('figsize modifier?'))
-        except:
-            fsm = 1
-        colors = []
-        if len(CATS) == 1:
-            uch = sorted(list(dfs[1].loc[:,CATS[0]].unique()))
-            print(uch)
-            if '3: tumor' not in uch and '2: immune' not in uch and '3: epithelial':
-                while True:
-                    cin = logInput('color to add in ordered list for all cats:')
-                    if cin == '':
-                        break
-                    colors.append(cin)
-        return([],[colors,fsm])
+    fsm = float(size_multiplier)
     print('showing spatial')
-    colors = com[1]
-    fsm = com[2]
     nobs,nxy = dfs[1],dfs[2]
     ch1 = cat
     uch = sorted(list(nobs.loc[:,ch1].unique()))
@@ -3029,11 +2860,11 @@ def spatialLite(dfs,com=[],cat='',ymin=0):
         plt.show()
     return(dfs,9)
 
-def errorBar(dfs,com=[],cat='',ymin=0):
-    if len(com) == 0:
-        zsc = logInput('z-score biomarkers? (y)')
-        return([],[zsc])
-    zsc = com[1]
+def errorBar(dfs, cat="", normalize=None, ymin=0):
+    normalize = recipe.ask("normalize", normalize, "z-score biomarkers? (y)")
+    if recipe.collecting():
+        return [], []
+    zsc = normalize
     df,obs,dfxy = dfs[0],dfs[1],dfs[2]
     dfs[1] = df.copy()
     if zsc == 'y':
@@ -3097,11 +2928,213 @@ def errorBar(dfs,com=[],cat='',ymin=0):
     return(dfs,9)
 
 
-def hist(dfs,com=[],cat=''): #['Primary Celltype autoCellType res: 1.0','Primary Celltype Leiden_30_primariescluster autotype0.75']
+def _prompt_column(frame, prompt):
+    index, _ = obMenu(frame, prompt)
+    return frame.columns[index]
 
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        return([],[])
+
+def _prompt_choice(title, choices, default=None):
+    for i, choice in enumerate(choices):
+        print(i, ":", choice)
+    raw = logInput(title + " number: ").strip()
+    if not raw and default is not None:
+        return default
+    return choices[int(raw)]
+
+
+def _prompt_number(prompt, default):
+    try:
+        return float(logInput(prompt))
+    except ValueError:
+        return default
+
+
+def _prompt_values(series, prompt):
+    choices = sorted(series.unique())
+    selected = []
+    while True:
+        for i, value in enumerate(choices):
+            print(i, ":", value)
+        raw = logInput(prompt).strip()
+        if raw.lower() in {"", "x", "done"}:
+            return selected
+        try:
+            selected.append(choices[int(raw)])
+        except (ValueError, IndexError):
+            print("Choose a category number from the list.")
+
+
+def _prompt_optional_column(obs, question, prompt):
+    if logInput(question) != "y":
+        return ""
+    return _prompt_column(obs, prompt)
+
+
+def _prompt_spatial_colors(obs):
+    colors = []
+    if len(CATS) == 1:
+        values = sorted(obs[CATS[0]].unique())
+        if "3: tumor" not in values and "2: immune" not in values:
+            while True:
+                value = logInput("color to add in ordered list for all cats:")
+                if not value:
+                    break
+                colors.append(value)
+    return colors
+
+
+def _prompt_quantile_bins():
+    while True:
+        try:
+            step = float(logInput("quantile to divide by (between .05 and .99): "))
+            if not .05 <= step <= 1:
+                raise ValueError("quantile step must be between .05 and 1")
+            edges, value = [0], step
+            while value <= 1.00000001:
+                edges.append(round(value, 4))
+                value += step
+            show = [1] * len(edges)
+            if logInput("pick which quantiles are shown? (y)") == "y":
+                for i in range(len(edges) - 1):
+                    print(edges[i], "to", edges[i + 1])
+                    choice = logInput("show? (y) or combine with lower (c)")
+                    show[i] = 1 if choice == "y" else -1 if choice == "c" else 0
+            i = 0
+            while i < len(show):
+                if show[i] == -1:
+                    edges.pop(i)
+                    show.pop(i)
+                else:
+                    i += 1
+            return {"edges": edges, "show": show}
+        except ValueError as exc:
+            print(str(exc))
+
+
+def _prompt_cooccurrence_bands():
+    bands = []
+    while True:
+        try:
+            inner = float(logInput("inner radius (in um) for band (blank done): "))
+            outer = float(logInput("outer radius (in um) for band: "))
+            bands.append([inner, outer])
+        except ValueError:
+            return bands or [[0.0, 25.0], [25.0, 50.0], [50.0, 100.0]]
+
+
+def _prompt_cluster_family():
+    return _prompt_choice("cluster family", [value[0] for value in CLUSTER_COLUMN_PATTERNS.values()])
+
+
+def _prompt_cluster_column(obs, family):
+    _, columns = _cluster_columns(obs, family)
+    columns = sorted(columns, key=lambda column: (_cluster_param_value(column), str(column)))
+    if not columns:
+        return ""
+    for i, column in enumerate(columns):
+        print(i, ":", column)
+    return columns[int(logInput("cluster column number: "))]
+
+
+def _prompt_exact_silhouette(df):
+    if len(df) <= int(SILHOUETTE_EXACT_WARN_ROWS):
+        return "n"
+    print("Exact silhouette uses pairwise distances and can be slow and memory-heavy.")
+    return logInput("allow exact silhouette above " + str(SILHOUETTE_EXACT_WARN_ROWS) + " rows? (y): ")
+
+
+def _prompt_bubble_positivity(dfs):
+    df, obs, dfxy = dfs
+    packed_candidates = []
+    for col in obs.columns:
+        ser = obs.loc[:,col].dropna().astype(str)
+        if ser.shape[0] == 0:
+            continue
+        ser = ser[~ser.str.strip().str.lower().isin(['', 'nan', 'none', '-', 'na'])]
+        if ser.shape[0] == 0:
+            continue
+        plus_frac = ser.str.contains('+', regex=False).mean()
+        if plus_frac >= .4 and ser.nunique() > 1:
+            packed_candidates.append(col)
+
+    binary_candidates = []
+    for source_name,tdf in [['obs',obs],['df',df]]:
+        for col in tdf.columns:
+            if str(col)[-1:] != '+':
+                continue
+            ser = tdf.loc[:,col].dropna()
+            if ser.shape[0] == 0:
+                continue
+            good = False
+            if np.issubdtype(ser.dtype, np.number):
+                vals = sorted(list(pd.Series(ser).dropna().unique()))
+                if len(vals) <= 3 and all(float(v) in [0.0,1.0] for v in vals):
+                    good = True
+            else:
+                vals = [str(v).strip().lower() for v in pd.Series(ser).dropna().unique()]
+                allowed = ['0','1','true','false','yes','no','-','','nan','none',str(col).strip().lower(),str(col)[:-1].strip().lower()]
+                if len(vals) <= 8 and all(v in allowed for v in vals):
+                    good = True
+            if good:
+                binary_candidates.append([source_name,col])
+
+    mode = ''
+    packed_col = ''
+    sep = '_'
+    chosen_binary = []
+
+    if len(packed_candidates) > 0:
+        print('detected packed positivity columns:')
+        for i,col in enumerate(packed_candidates):
+            print(i,':',col)
+        if logInput('use detected packed positivity column? (y): ') == 'y':
+            if len(packed_candidates) == 1:
+                packed_col = packed_candidates[0]
+            else:
+                try:
+                    packed_col = packed_candidates[int(logInput('number: '))]
+                except Exception:
+                    packed_col = packed_candidates[0]
+            mode = 'packed'
+
+    if mode == '' and len(binary_candidates) > 0:
+        print('detected marker+ columns:')
+        for i,ent in enumerate(binary_candidates):
+            print(i,':',ent[0],':',ent[1])
+        if logInput('use detected marker+ columns? (y): ') == 'y':
+            mode = 'binary'
+            while True:
+                try:
+                    print('send non-int when done (all detected if none selected)')
+                    ch = int(logInput('number: '))
+                    chosen_binary.append(binary_candidates[ch])
+                except Exception:
+                    break
+            if len(chosen_binary) == 0:
+                chosen_binary = binary_candidates.copy()
+            elif len(chosen_binary) < len(binary_candidates):
+                print('partial marker+ column list selected, skipping bubble plot')
+                return {"mode": "skip", "packed_column": "", "separator": "_", "binary_columns": []}
+
+    if mode == '':
+        try:
+            ch,uch = obMenu(obs,"column with positivity labels")
+            packed_col = obs.columns[ch]
+            sep = logInput('separator between labels in positivity column? hit enter to use "_":')
+            if sep == '':
+                sep = '_'
+            mode = 'packed'
+        except Exception:
+            print('no positivity labels selected, skipping bubble plot')
+            return([],['skip'])
+
+    return {"mode": mode, "packed_column": packed_col, "separator": sep, "binary_columns": chosen_binary}
+
+
+def hist(dfs, cat=""):
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
     colNames = [cat]
     for col in df.columns:
         colSeries = df[col]
@@ -3126,7 +3159,7 @@ def hist(dfs,com=[],cat=''): #['Primary Celltype autoCellType res: 1.0','Primary
                         ys.append(list(y))
                     else:
                         ys.append(rollingAve(y,n=nroll))
-                except:
+                except Exception:
                     ys.append(list(y))
                 try:
                     q25 = float(np.quantile(tcol, 0.25))
@@ -3144,7 +3177,7 @@ def hist(dfs,com=[],cat=''): #['Primary Celltype autoCellType res: 1.0','Primary
                 try:
                     x,y,c,ty = xs[i],ys[i],allc.amcolors[i],sCN[i]
                     ax.plot(x,y,color=c,label=ty, alpha=0.5)
-                except:
+                except Exception:
                     x,y,c,ty = xs[i],ys[i],allc.colors[i],sCN[i]
                     ax.plot(x,y,color=c,label=ty, alpha=0.5)
             ax.legend(fontsize='large')
@@ -3169,38 +3202,17 @@ def hist(dfs,com=[],cat=''): #['Primary Celltype autoCellType res: 1.0','Primary
     return([df,obs,dfxy],[])
 
 
-def volcanoPlot(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        if cat not in obs.columns:
-            print('current category not available during command build; volcano plot will compare all labels in the execution category unless specific labels are collected later')
-        print('0 : Mann-Whitney U')
-        print('1 : t-test')
-        print('2 : standard deviation only')
-        try:
-            mode = int(logInput('number: '))
-        except:
-            mode = 0
-        labels = []
-        if cat in obs.columns:
-            uch = sorted(list(obs.astype(str).loc[:,cat].unique()))
-            while True:
-                for i,uc in enumerate(uch):
-                    print(i,":",uc)
-                try:
-                    print("send non-int when done (all labels if none selected)")
-                    ch = int(logInput("number: "))
-                    ks = str(uch[ch])+'!'
-                    if ks not in labels:
-                        labels.append(ks)
-                except:
-                    break
-        return([], [mode, labels])
+def volcanoPlot(dfs, cat="", method=None, label_filters=None):
+    method = recipe.ask("method", method, lambda: _prompt_choice("statistic", ["mannwhitney", "ttest", "stdev"], default="mannwhitney"))
+    label_filters = recipe.ask("label_filters", label_filters, lambda: [str(value) + "!" for value in _prompt_values(dfs[1][cat], "label number (blank all/done): ")] if cat in dfs[1].columns else [])
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    mode = ["mannwhitney", "ttest", "stdev"].index(method)
     if cat not in obs.columns:
         print('skipping volcano plot for',cat)
         return([df,obs,dfxy],[])
-    mode = com[1]
-    label_filters = list(com[2])
+    label_filters = list(label_filters)
     cobs = obs.astype(str)
     gdf = df.apply(pd.to_numeric, errors='coerce')
     if mode < 2:
@@ -3320,7 +3332,10 @@ def volcanoPlot(dfs,com=[],cat=''):
 
 def _cluster_columns(obs,fam):
     cols = []
-    famn,patterns = CLUSTER_COLUMN_PATTERNS.get(str(fam), ('', []))
+    famn, patterns = next((value for value in CLUSTER_COLUMN_PATTERNS.values()
+                           if value[0].lower() == str(fam).lower()), ('', []))
+    if not famn:
+        raise ValueError('cluster family must be Kmeans, GMM or Leiden')
     for col in obs.columns:
         text = str(col).strip()
         for pat in patterns:
@@ -3338,7 +3353,7 @@ def _cluster_param_value(col):
             if match is not None:
                 try:
                     return(float(match.group('value')))
-                except:
+                except Exception:
                     return(999999)
     return(999999)
 
@@ -3347,7 +3362,7 @@ def _value_sort_key(val):
     text = str(val)
     try:
         return(0,float(text))
-    except:
+    except Exception:
         return(1,text)
 
 
@@ -3368,53 +3383,30 @@ def _cluster_scoring_subset(ndf, obs, col):
     return(sub_df, labels, dropped)
 
 
-def _allow_exact_silhouette(n_rows, col, guard_state):
-    limit = int(SILHOUETTE_EXACT_WARN_ROWS)
-    if n_rows <= limit or guard_state.get("approved", False):
-        return(True)
-    print('WARNING: exact silhouette for '+str(col)+' will use '+str(n_rows)+' cells.')
-    print('This can be slow and memory-heavy because silhouette uses pairwise distances.')
-    resp = logInput('proceed anyways? (y): ').strip().lower()
-    if resp.startswith('y'):
-        guard_state["approved"] = True
-        return(True)
-    print('skipping exact silhouette for', col)
-    return(False)
+def _allow_exact_silhouette(n_rows, col, allow_large_exact):
+    if n_rows <= int(SILHOUETTE_EXACT_WARN_ROWS) or str(allow_large_exact).lower().startswith("y"):
+        return True
+    print("skipping exact silhouette above the approved size for", col)
+    return False
 
 
-def clusteringEvaluation(dfs,com=[],cat=''):
-    print('clustering evaluation')
-    op = ['silhouette score','cluster score sweep','elbow plot','confusion plot']
-    fn = [clusterSilhouette, clusterScoreSweep, clusterElbow, clusterConfusion]
-    dfs,com=menu(dfs,op,fn,com,cat)
-    return(dfs,com)
+def clusteringEvaluation(dfs, cat=""):
+    return menu(dfs, "ifv.clustering_evaluation", recipe.child_rows(), cat)
 
 
-def clusterSilhouette(dfs,com=[],cat=''):
+def clusterSilhouette(dfs, cat="", family=None, detail=None, detail_column=None, allow_large_exact=None):
+    family = recipe.ask("family", family, _prompt_cluster_family)
+    detail = recipe.ask("detail", detail, lambda: _prompt_choice("silhouette detail", ["summary", "all", "one"]))
+    if detail == "one" or detail_column is not None:
+        detail_column = recipe.ask("detail_column", detail_column, lambda: _prompt_cluster_column(dfs[1], family))
+    allow_large_exact = recipe.ask("allow_large_exact", allow_large_exact, lambda: _prompt_exact_silhouette(dfs[0]))
+    if recipe.collecting():
+        return [], []
     global DONE
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        print('0 : Kmeans')
-        print('1 : GMM')
-        print('2 : Leiden')
-        fam = logInput('number: ')
-        print('0 : summary only')
-        print('1 : detailed panels for all saved cluster columns')
-        print('2 : detailed panel for one selected cluster column')
-        detail = logInput('number: ')
-        detail_col = ''
-        if str(detail) == '2':
-            famn,cols = _cluster_columns(obs,fam)
-            cols = sorted(cols, key=lambda col: (_cluster_param_value(col), str(col)))
-            if len(cols) > 0:
-                for i,col in enumerate(cols):
-                    print(i,":",col)
-                try:
-                    detail_col = cols[int(logInput('number: '))]
-                except:
-                    detail_col = ''
-        return([], [fam, detail, detail_col])
-    famn,cols = _cluster_columns(obs,com[1])
+    df, obs, dfxy = dfs
+    if detail_column:
+        recipe.resolve_columns(obs, [detail_column])
+    famn,cols = _cluster_columns(obs,family)
     dkey = 'clusterSilhouette_'+famn
     if dkey in DONE:
         return(dfs,9)
@@ -3424,17 +3416,16 @@ def clusterSilhouette(dfs,com=[],cat=''):
         return(dfs,9)
     ndf = df.apply(pd.to_numeric, errors='coerce').fillna(0)
     scored = []
-    detail_mode = str(com[2]) if len(com) > 2 else '0'
-    silhouette_guard = {"approved": False}
+    detail_mode = {"summary": "0", "all": "1", "one": "2"}[detail]
     for col in cols:
         score_df, labels, dropped = _cluster_scoring_subset(ndf, obs, col)
         ncl = len(sorted(list(labels.unique())))
         if ncl < 2 or ncl >= score_df.shape[0]:
             continue
-        if not _allow_exact_silhouette(score_df.shape[0], col, silhouette_guard):
+        if not _allow_exact_silhouette(score_df.shape[0], col, allow_large_exact):
             continue
         try:
-            need_samples = detail_mode == '1' or (detail_mode == '2' and len(com) > 3 and str(com[3]) == str(col))
+            need_samples = detail_mode == '1' or (detail_mode == '2' and detail_column is not None and str(detail_column) == str(col))
             sco = silhouette_score(score_df, labels)
             silhouette_vals = silhouette_samples(score_df, labels) if need_samples else None
             scored.append([col, ncl, sco, silhouette_vals, labels, _cluster_param_value(col)])
@@ -3486,8 +3477,8 @@ def clusterSilhouette(dfs,com=[],cat=''):
     if detail_mode == '1':
         detail_cols = [item[0] for item in scored]
     elif detail_mode == '2':
-        if len(com) > 3 and str(com[3]) != '':
-            detail_cols = [str(com[3])]
+        if detail_column is not None and str(detail_column) != '':
+            detail_cols = [str(detail_column)]
     for col,ncl,sco,silhouette_vals,labels,pv in scored:
         if col not in detail_cols:
             continue
@@ -3532,16 +3523,14 @@ def clusterSilhouette(dfs,com=[],cat=''):
     return(dfs,9)
 
 
-def clusterScoreSweep(dfs,com=[],cat=''):
+def clusterScoreSweep(dfs, cat="", family=None, allow_large_exact=None):
+    family = recipe.ask("family", family, _prompt_cluster_family)
+    allow_large_exact = recipe.ask("allow_large_exact", allow_large_exact, lambda: _prompt_exact_silhouette(dfs[0]))
+    if recipe.collecting():
+        return [], []
     global DONE
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        print('0 : Kmeans')
-        print('1 : GMM')
-        print('2 : Leiden')
-        fam = logInput('number: ')
-        return([], [fam])
-    famn,cols = _cluster_columns(obs,com[1])
+    df, obs, dfxy = dfs
+    famn,cols = _cluster_columns(obs,family)
     dkey = 'clusterScoreSweep_'+famn
     if dkey in DONE:
         return(dfs,9)
@@ -3551,13 +3540,12 @@ def clusterScoreSweep(dfs,com=[],cat=''):
         return(dfs,9)
     ndf = df.apply(pd.to_numeric, errors='coerce').fillna(0)
     out = []
-    silhouette_guard = {"approved": False}
     for col in cols:
         score_df, labels, dropped = _cluster_scoring_subset(ndf, obs, col)
         ncl = len(sorted(list(labels.unique())))
         if ncl < 2 or ncl >= score_df.shape[0]:
             continue
-        if not _allow_exact_silhouette(score_df.shape[0], col, silhouette_guard):
+        if not _allow_exact_silhouette(score_df.shape[0], col, allow_large_exact):
             continue
         try:
             sil = silhouette_score(score_df, labels)
@@ -3623,16 +3611,13 @@ def clusterScoreSweep(dfs,com=[],cat=''):
     return(dfs,9)
 
 
-def clusterElbow(dfs,com=[],cat=''):
+def clusterElbow(dfs, cat="", family=None):
+    family = recipe.ask("family", family, _prompt_cluster_family)
+    if recipe.collecting():
+        return [], []
     global DONE
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        print('0 : Kmeans')
-        print('1 : GMM')
-        print('2 : Leiden')
-        fam = logInput('number: ')
-        return([], [fam])
-    famn,cols = _cluster_columns(obs,com[1])
+    df, obs, dfxy = dfs
+    famn,cols = _cluster_columns(obs,family)
     dkey = 'clusterElbow_'+famn
     if dkey in DONE:
         return(dfs,9)
@@ -3702,22 +3687,17 @@ def clusterElbow(dfs,com=[],cat=''):
     return(dfs,9)
 
 
-def clusterConfusion(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        print('0 : Kmeans')
-        print('1 : GMM')
-        print('2 : Leiden')
-        fam = logInput('number: ')
-        print('0 : raw counts')
-        print('1 : normalize each cluster row')
-        print('2 : normalize each annotation column')
-        norm = logInput('number: ')
-        return([], [fam, norm])
+def clusterConfusion(dfs, cat="", family=None, normalization=None):
+    family = recipe.ask("family", family, _prompt_cluster_family)
+    normalization = recipe.ask("normalization", normalization, lambda: _prompt_choice("normalization", ["counts", "rows", "columns"]))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    norm = {"counts": "0", "rows": "1", "columns": "2"}[normalization]
     if cat not in obs.columns:
         print('confusion plot requires current category in obs columns, skipping',cat)
         return(dfs,9)
-    famn,cols = _cluster_columns(obs,com[1])
+    famn,cols = _cluster_columns(obs,family)
     if len(cols) == 0:
         print('no',famn,'cluster columns found')
         return(dfs,9)
@@ -3738,10 +3718,10 @@ def clusterConfusion(dfs,com=[],cat=''):
         ctab = ctab.loc[:, sorted(list(ctab.columns), key=_value_sort_key)]
         plot_df = ctab.copy()
         title = BATCH+'\n'+str(col)+' vs '+cat
-        if str(com[2]) == '1' or str(com[2]).lower() == 'y':
+        if str(norm) == '1' or str(norm).lower() == 'y':
             plot_df = plot_df.div(plot_df.sum(axis=1).replace(0,1), axis=0)
             title += ' (row normalized)'
-        elif str(com[2]) == '2':
+        elif str(norm) == '2':
             plot_df = plot_df.div(plot_df.sum(axis=0).replace(0,1), axis=1)
             title += ' (column normalized)'
         ari = None
@@ -3756,7 +3736,7 @@ def clusterConfusion(dfs,com=[],cat=''):
         figh = max(6, plot_df.shape[0]*0.45)
         fig,ax = plt.subplots(figsize=(figw,figh))
         annot = plot_df.shape[0] * plot_df.shape[1] <= 250
-        fmt = '.2f' if str(com[2]) in ['1','2'] or str(com[2]).lower() == 'y' else 'g'
+        fmt = '.2f' if str(norm) in ['1','2'] or str(norm).lower() == 'y' else 'g'
         sns.heatmap(plot_df, cmap='viridis', annot=annot, fmt=fmt, ax=ax)
         ax.set_xlabel(cat)
         ax.set_ylabel(col)
@@ -3771,12 +3751,12 @@ def clusterConfusion(dfs,com=[],cat=''):
                     top_n = int(row.loc[top_ref])
                     row_total = int(row.sum())
                     overlap_lines.append(str(lab)+': top_'+str(cat)+'='+str(top_ref)+'; n_overlap='+str(top_n)+'; row_total='+str(row_total))
-                except:
+                except Exception:
                     continue
             norm_name = 'raw_counts'
-            if str(com[2]) == '1' or str(com[2]).lower() == 'y':
+            if str(norm) == '1' or str(norm).lower() == 'y':
                 norm_name = 'row_normalized'
-            elif str(com[2]) == '2':
+            elif str(norm) == '2':
                 norm_name = 'column_normalized'
             _queue_ifv_summary(
                 "clustering_evaluation",
@@ -3805,101 +3785,19 @@ def clusterConfusion(dfs,com=[],cat=''):
         plt.show()
     return(dfs,9)
 
-def bubblePlot(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        packed_candidates = []
-        for col in obs.columns:
-            ser = obs.loc[:,col].dropna().astype(str)
-            if ser.shape[0] == 0:
-                continue
-            ser = ser[~ser.str.strip().str.lower().isin(['', 'nan', 'none', '-', 'na'])]
-            if ser.shape[0] == 0:
-                continue
-            plus_frac = ser.str.contains('+', regex=False).mean()
-            if plus_frac >= .4 and ser.nunique() > 1:
-                packed_candidates.append(col)
-
-        binary_candidates = []
-        for source_name,tdf in [['obs',obs],['df',df]]:
-            for col in tdf.columns:
-                if str(col)[-1:] != '+':
-                    continue
-                ser = tdf.loc[:,col].dropna()
-                if ser.shape[0] == 0:
-                    continue
-                good = False
-                if np.issubdtype(ser.dtype, np.number):
-                    vals = sorted(list(pd.Series(ser).dropna().unique()))
-                    if len(vals) <= 3 and all(float(v) in [0.0,1.0] for v in vals):
-                        good = True
-                else:
-                    vals = [str(v).strip().lower() for v in pd.Series(ser).dropna().unique()]
-                    allowed = ['0','1','true','false','yes','no','-','','nan','none',str(col).strip().lower(),str(col)[:-1].strip().lower()]
-                    if len(vals) <= 8 and all(v in allowed for v in vals):
-                        good = True
-                if good:
-                    binary_candidates.append([source_name,col])
-
-        mode = ''
-        packed_col = ''
-        sep = '_'
-        chosen_binary = []
-
-        if len(packed_candidates) > 0:
-            print('detected packed positivity columns:')
-            for i,col in enumerate(packed_candidates):
-                print(i,':',col)
-            if logInput('use detected packed positivity column? (y): ') == 'y':
-                if len(packed_candidates) == 1:
-                    packed_col = packed_candidates[0]
-                else:
-                    try:
-                        packed_col = packed_candidates[int(logInput('number: '))]
-                    except:
-                        packed_col = packed_candidates[0]
-                mode = 'packed'
-
-        if mode == '' and len(binary_candidates) > 0:
-            print('detected marker+ columns:')
-            for i,ent in enumerate(binary_candidates):
-                print(i,':',ent[0],':',ent[1])
-            if logInput('use detected marker+ columns? (y): ') == 'y':
-                mode = 'binary'
-                while True:
-                    try:
-                        print('send non-int when done (all detected if none selected)')
-                        ch = int(logInput('number: '))
-                        chosen_binary.append(binary_candidates[ch])
-                    except:
-                        break
-                if len(chosen_binary) == 0:
-                    chosen_binary = binary_candidates.copy()
-                elif len(chosen_binary) < len(binary_candidates):
-                    print('partial marker+ column list selected, skipping bubble plot')
-                    return([],['skip'])
-
-        if mode == '':
-            try:
-                ch,uch = obMenu(obs,"column with positivity labels")
-                packed_col = obs.columns[ch]
-                sep = logInput('separator between labels in positivity column? hit enter to use "_":')
-                if sep == '':
-                    sep = '_'
-                mode = 'packed'
-            except Exception:
-                print('no positivity labels selected, skipping bubble plot')
-                return([],['skip'])
-
-        return([],[mode,packed_col,sep,chosen_binary])
-
+def bubblePlot(dfs, cat="", positivity=None):
+    positivity = recipe.ask("positivity", positivity, lambda: _prompt_bubble_positivity(dfs))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
     if cat not in obs.columns:
         print('bubble plot requires current category in obs columns, skipping',cat)
         return(dfs,9)
-    if len(com) > 1 and com[1] == 'skip':
+    if positivity["mode"] == "skip":
         print('bubble plot skipped because no valid positivity columns were selected or detected')
         return(dfs,9)
-    mode,packed_col,sep,chosen_binary = com[1],com[2],com[3],com[4]
+    mode, packed_col, sep, chosen_binary = (positivity["mode"], positivity["packed_column"],
+                                                positivity["separator"], positivity["binary_columns"])
     maps = []
 
     if mode == 'binary':
@@ -4048,21 +3946,17 @@ def bubblePlot(dfs,com=[],cat=''):
     plt.show()
     return(dfs,9)
 
-def differentialAbundance(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        ch,uch = obMenu(obs,'column with labels to count')
-        count_col = obs.columns[ch]
-        unit_col = ''
-        if logInput('aggregate to sample/core/patient level first? (y): ') == 'y':
-            ch2,uch2 = obMenu(obs,'aggregation unit column')
-            unit_col = obs.columns[ch2]
-        return([],[count_col,unit_col])
-
+def differentialAbundance(dfs, cat="", count_column=None, unit_column=None):
+    count_column = recipe.ask("count_column", count_column, lambda: _prompt_column(dfs[1], "column with labels to count: "))
+    unit_column = recipe.ask("unit_column", unit_column, lambda: _prompt_optional_column(dfs[1], "aggregate to sample/core/patient level first? (y): ", "aggregation unit column: "))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(obs, [count_column] + ([unit_column] if unit_column else []))
     if cat not in obs.columns:
         print('differential abundance requires current category in obs columns, skipping',cat)
         return(dfs,9)
-    count_col,unit_col = com[1],com[2]
+    count_col, unit_col = count_column, unit_column
     if count_col not in obs.columns:
         print('count column missing, skipping',count_col)
         return(dfs,9)
@@ -4133,7 +4027,7 @@ def differentialAbundance(dfs,com=[],cat=''):
                 try:
                     mstat,pval = mannwhitneyu(vals1,vals2)
                     diff_lines.append((abs(diff), str(lab)+': '+str(g1)+' minus '+str(g2)+' = '+str(round(diff,4))+'; Mann-Whitney p='+str(round(float(pval),6))))
-                except:
+                except Exception:
                     diff_lines.append((abs(diff), str(lab)+': '+str(g1)+' minus '+str(g2)+' = '+str(round(diff,4))))
 
     ax.set_xticks(x)
@@ -4165,25 +4059,19 @@ def differentialAbundance(dfs,com=[],cat=''):
     plt.show()
     return(dfs,9)
 
-def neighborhoodEnrichment(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        try:
-            radius_um = float(logInput('radius (in um) to consider neighbors: '))
-        except:
-            radius_um = 25.0
-        ch,uch = obMenu(obs,title='category number to evaluate neighborhood enrichment')
-        try:
-            nshuf = int(logInput('number of label shuffles for null (blank = 25): '))
-        except:
-            nshuf = 25
-        return([],[radius_um,ch,nshuf])
-
-    radius_um,ch,nshuf = float(com[1]),int(com[2]),int(com[3])
+def neighborhoodEnrichment(dfs, cat="", radius_um=None, column=None, shuffles=None):
+    radius_um = recipe.ask("radius_um", radius_um, lambda: _prompt_number("radius (in um) to consider neighbors: ", 25.0))
+    column = recipe.ask("column", column, lambda: _prompt_column(dfs[1], "category to evaluate neighborhood enrichment: "))
+    shuffles = recipe.ask("shuffles", shuffles, lambda: int(_prompt_number("number of label shuffles for null (blank = 25): ", 25)))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(obs, [column])
+    radius_um, nshuf = float(radius_um), int(shuffles)
     pxsize = .325
     radius = radius_um/pxsize
     obs = obs.astype(str)
-    obcol = obs.columns[ch]
+    obcol = column
     labels = sorted(list(obs.loc[:,obcol].unique()))
     if len(labels) < 2:
         print('not enough labels for neighborhood enrichment, skipping')
@@ -4280,30 +4168,18 @@ def neighborhoodEnrichment(dfs,com=[],cat=''):
     plt.show()
     return(dfs,9)
 
-def coOccurrence(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        bands = []
-        while True:
-            try:
-                inner_um = float(logInput('inner radius (in um) for band: '))
-                outer_um = float(logInput('outer radius (in um) for band: '))
-                bands.append([inner_um,outer_um])
-            except:
-                break
-        if len(bands) == 0:
-            bands = [[0.0,25.0],[25.0,50.0],[50.0,100.0]]
-        ch,uch = obMenu(obs,title='category number to evaluate co-occurrence')
-        try:
-            nshuf = int(logInput('number of label shuffles for null (blank = 25): '))
-        except:
-            nshuf = 25
-        return([],[bands,ch,nshuf])
-
-    bands,ch,nshuf = com[1],int(com[2]),int(com[3])
+def coOccurrence(dfs, cat="", bands_um=None, column=None, shuffles=None):
+    bands_um = recipe.ask("bands_um", bands_um, _prompt_cooccurrence_bands)
+    column = recipe.ask("column", column, lambda: _prompt_column(dfs[1], "category to evaluate co-occurrence: "))
+    shuffles = recipe.ask("shuffles", shuffles, lambda: int(_prompt_number("number of label shuffles for null (blank = 25): ", 25)))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(obs, [column])
+    bands, nshuf = bands_um, int(shuffles)
     pxsize = .325
     obs = obs.astype(str)
-    obcol = obs.columns[ch]
+    obcol = column
     labels = sorted(list(obs.loc[:,obcol].unique()))
     if len(labels) < 2:
         print('not enough labels for co-occurrence, skipping')
@@ -4477,7 +4353,7 @@ def clusterMeans(df,obs,dfxy,ch):
         cl = df.loc[obs['Cluster'] == c,:]
         try:
             markerMeans = np.mean(cl.values,axis = 0)
-        except:
+        except Exception:
             markerMeans = np.mean(cl.values.astype(float),axis = 0)
         clusterA[i,:] = markerMeans
     #print(clusterA,"clusterA")
@@ -4498,11 +4374,11 @@ def obCluster(df,obs,dfxy,ch):
     return(df,obs,dfxy)
 
 
-def heatmap(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        dend = logInput('sort biomarkers by dendrogram? (y): ')
-        return([],[dend])
+def heatmap(dfs, cat="", dendrogram=None):
+    dendrogram = recipe.ask("dendrogram", dendrogram, "sort biomarkers by dendrogram? (y): ")
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
     ch = list(obs.columns).index(cat)
     if len(list(obs.iloc[:,ch].unique())) < 3:
         print('skipping heatmap for',cat)
@@ -4524,7 +4400,7 @@ def heatmap(dfs,com=[],cat=''):
     print(cdf.index,"cdfind!")
     #print(min(10+cdf.shape[0]/5,2**15/100))
     print(cdf)
-    dend = str(com[1]).lower() == 'y'
+    dend = str(dendrogram).lower() == 'y'
     h = min(10+cdf.shape[0]/5,2**15/100)
     if dend:
         sns.clustermap(cdf,xticklabels=cdf.columns,yticklabels=cdf.index,center=np.mean(cdf.values),cmap='bwr',figsize=(20,h),row_cluster=False,col_cluster=True)
@@ -4581,18 +4457,17 @@ def heatmap(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def correlationMatrix(dfs,com=[],cat=''):
-
-
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        ch,uch = obMenu(obs,"sort correlation matrices by:")
-        print(SPATH,'SPATH')
-        fileName = input('filename: (send blank to skip)')
-        return([],[ch,uch,fileName])
-
-    ch,uch,fileName = com[1],com[2],com[3]
-    group_col = obs.columns[ch]
+def correlationMatrix(dfs, cat="", group_column=None, filename=None):
+    group_column = recipe.ask("group_column", group_column, lambda: _prompt_column(dfs[1], "sort correlation matrices by: "))
+    filename = recipe.ask("filename", filename, "filename: (send blank to skip)")
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(obs, [group_column])
+    ch = list(obs.columns).index(group_column)
+    uch = sorted(obs[group_column].unique())
+    fileName = filename
+    group_col = group_column
     zsw = True
     clean = False#True
     ordf,oobs,oxy = df.copy(),obs.copy(),dfxy.copy()
@@ -4762,46 +4637,15 @@ def heatmap_cor(df,obs,dfxy,cdf,title=None,cat='',summary_meta=None):
     return(df,obs,dfxy)
 
 
-def quantilePlot(dfs,com=[],cat=''):
-    if len(com) == 0:
-        while True:
-            try:
-                quant = float(logInput('quantile to divide by (between .05 and .99): '))
-                if quant > 1 or quant < .05:
-                    1/0
-                #st = logInput('show all cats together? (y)')
-                zsc = logInput('zscore?')
-                q = quant
-                quants = [0]
-                while q <= 1.00000001:
-                    quants.append(round(q,4))
-                    q += quant
-                print(quants)
-                toPlot = np.ones(len(quants))
-                if logInput('pick which quantiles are shown? (y)') == 'y':
-                    for i,q in enumerate(quants[:-1]):
-                        print(q,'to',quants[i+1])
-                        choice = logInput('show? (y) or combine with lower (c)')
-                        if choice == 'y':
-                            pass
-                        elif choice == 'c':
-                            toPlot[i] = -1
-                        else:
-                            toPlot[i] = 0
-                toPlot = list(toPlot)
-                j = 0
-                for i in range(len(toPlot)):
-                    if toPlot[j] == -1:
-                        quants.pop(j)
-                        toPlot.pop(j)
-                    else:
-                        j += 1
-                toShow = getCats(dfs[0],'markers to divide into quantiles')#markers to show
-                return([],[quants,zsc,toPlot,toShow])
-            except Exception as e:
-                print(e)
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    quants,zsc,toPlot,toShow = com[1],com[2],com[3],com[4]
+def quantilePlot(dfs, cat="", bins=None, normalize=None, markers=None):
+    bins = recipe.ask("bins", bins, _prompt_quantile_bins)
+    normalize = recipe.ask("normalize", normalize, "zscore?")
+    markers = recipe.ask("markers", markers, lambda: getCats(dfs[0], "markers to divide into quantiles", required=False))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(df, markers)
+    quants, zsc, toPlot, toShow = bins["edges"], normalize, bins["show"], markers
     if zsc == 'y':
         df = df.apply(ZSC)
         #print(df)
@@ -4921,12 +4765,13 @@ def quantilePlot(dfs,com=[],cat=''):
 
 
 
-def scatterplot(dfs,com=[],cat=''):
-    df,obs,dfxy = dfs #splat(*dfs) #dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        xcols = getCats(df,title='markers to show on x axis',required = True, typ = 'abc')
-        ycols = getCats(df,title='y axis markers',required = True, typ = 'abc')
-        return([],[xcols,ycols])
+def scatterplot(dfs, cat="", x_columns=None, y_columns=None):
+    x_columns = recipe.ask("x_columns", x_columns, lambda: getCats(dfs[0], title="markers to show on x axis"))
+    y_columns = recipe.ask("y_columns", y_columns, lambda: getCats(dfs[0], title="y axis markers"))
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
+    recipe.resolve_columns(df, x_columns + y_columns)
     LCOR = True
     zdf = df.apply(ZSC)
 
@@ -4936,7 +4781,7 @@ def scatterplot(dfs,com=[],cat=''):
     uch = sorted(list(obs.loc[:,cat].unique()))
     if len(uch) == 1:
         LCOR = False
-    xcols,ycols = com[1],com[2]
+    xcols, ycols = x_columns, y_columns
     for ch1 in xcols:
         if ch1 not in df.columns:
             print('no',ch1,'in',df.columns)
@@ -4981,7 +4826,7 @@ def scatterplot(dfs,com=[],cat=''):
                     p = np.poly1d(z)
                     x_line = np.linspace(x_cat.min(), x_cat.max(), 100)
                     ax.plot(x_line, p(x_line), color=allc.colors[i], linestyle='--', alpha=0.8)
-                except:
+                except Exception:
                     print('line of best fit failed!')
                 cx = np.mean(x_cat)
                 cy = np.mean(y_cat)
@@ -5036,10 +4881,10 @@ def scatterplot(dfs,com=[],cat=''):
     return(df,obs,dfxy)
 
 
-def thresholdSweep(dfs,com=[],cat='',ncols=1):
-    df,obs,dfxy = dfs #splat(*dfs) #dfs[0],dfs[1],dfs[2]
-    if len(com) == 0:
-        return([],[])
+def thresholdSweep(dfs, cat="", ncols=1):
+    if recipe.collecting():
+        return [], []
+    df, obs, dfxy = dfs
     #each marker in subplot like boxplot
     #multiple on one plot like boxplot
     #sweep from maximum value to minimum value with 100 steps
@@ -5075,10 +4920,10 @@ def thresholdSweep(dfs,com=[],cat='',ncols=1):
             iy = int(ii/ncols)
             try:
                 axind = ax[iy,ix]
-            except:
+            except Exception:
                 try:
                     axind = ax[iy]
-                except:
+                except Exception:
                     axind = ax
             if ii == 0:
                 axind.plot(threshs,counts,color = allc.colors[i], label = uc)

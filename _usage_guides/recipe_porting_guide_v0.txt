@@ -1,0 +1,121 @@
+Named recipe porting
+=====================
+
+The current functions live in support/recipe_v0.py. The shared action contract
+table is support/recipe_actions_v0.py; targets are module:function strings and
+are imported only by Action.resolve(). Controller, processing and visualization
+menus now consume this table. Do not create a second action registry. The extra
+mapping answer kind describes an ordinary JSON object (currently clustering's
+mode/keys/prefix); it adds no execution syntax or generic conversion.
+
+Leaf pattern
+------------
+
+    def transform(dfs, cat="", overwrite=None):
+        overwrite = recipe.ask("overwrite", overwrite, "overwrite? (y)")
+        if recipe.collecting():
+            return dfs
+        ... existing math ...
+
+The owning menu calls recipe.invoke, which opens a step and calls the registered
+function. During collection the menu appends step.row only after completion.
+For structural wrappers invoke assigns the returned child rows to steps. Return
+those rows from collection; returning an empty placeholder would erase nested
+choices. The menu retains its own loop, progress and failure handling.
+
+For replay, open recipe.step(action_id, row, index=recipe_row_number,
+scope={"group": group, "category": category}). Named arguments may be supplied
+as kwargs; ask also reads the same step's with mapping. Supplied fields must be
+consumed by an ask, including conditional fields when supplied intentionally.
+get_action requires a declaration, but direct standalone calls to ask outside a
+step can use an explicit argument or the current input transport.
+
+Collection and replay
+----------------------
+With recipe.collection(), calls collect real inputs and return before math.
+For incomplete interactive recipes, enter collection and use
+recipe.step(action_id, row, recording=True). This completes a copy of the row;
+keep that copy and replay it across every group. Never prompt independently on
+each group, and never use collection to implement structural --check.
+
+Replay steps have recording=False by default. They record execution evidence
+inside run_record, but do not append another reusable command for every group.
+index identifies a position in the recipe tree; scope identifies an invocation
+of that position. A failed child marks its parent ok_with_failures even when
+the menu catches the child exception and continues.
+
+Preservation rules
+-------------------
+- Record micrometres and column names; derive pixels/indices at execution.
+- Resolve column answers with resolve_columns before use. Duplicate or missing
+  names fail explicitly. Preserve explicit empty selections.
+- Keep all input collection on io_adapter. io.init_headless rejects unresolved
+  prompts, including prompts with defaults. MissingAnswer is a BaseException;
+  bare except blocks still swallow it and must be narrowed on supported paths.
+- Preserve per-marker threshold choices; do not replace them with one scalar.
+- Move filesystem/state effects after the collection return.
+- Check actual column existence at execution, not collection: an earlier step
+  may create a named input that is not yet in the collected triplet. Collection
+  must preserve those supplied names without trying to run the earlier math.
+- Structural submenu wrappers must migrate alongside their loops. legacy_args
+  is only for unported leaves; never embed positional child menu commands in it.
+- Open run_record around real execution only. Report output strings through the
+  current step's outputs list; partial outputs on failure stay distinguishable.
+- The headless controller must use the existing normal action wrappers so state
+  alignment, summaries, artifacts and project adoption still occur. A leaf-only
+  test is insufficient proof of that boundary.
+
+Tests and remaining work
+------------------------
+tests/test_recipe_v0.py covers the framework lifecycle. The synthetic triplet
+and recorded legacy answer shapes are in tests/fixtures/recipe_framework_v0.
+test_recipe_legacy_baseline.py pins current zscore values and boxplot renderer
+inputs without importing unrelated optional engines. Replace the extraction
+harness with direct old/new parity as those actions migrate.
+
+tests/test_recipe_integration.py verifies the actual controller wrappers,
+scripted GUI record/save -> headless replay, real figures/companions/manifests,
+DS missing-answer collection, nested processing plots, named clustering leaf
+replay, menu reordering and failure status. It also lints named declarations
+against the literal asks in their binding functions (controller wrappers bind
+workflow answers in the module mains).
+
+The four neighborhood leaves now store physical radii and named observations;
+multiply/ratio store marker names; stretch/negative adjustment have no answers.
+test_recipe_processing_ports.py compares all eight with frozen pre-port bodies.
+The neighborhood controller proof records GUI answers, replays headlessly, and
+checks equivalent physical coordinates represented at different pixel sizes.
+proof_neighborhood.json is executable against the same synthetic triplet.
+
+Maxey/chanThresh no longer prompt during execution. ifp.maxey collects known
+and entered per-marker thresholds as one mapping before group execution; an
+optional explicit scalar handles missing entries, otherwise they fail loud.
+Outlier subtraction freezes its existing global overrides into a mapping at
+collection, preserving zero subtraction for unlisted markers. Log base and
+reference-category scaling are also named. test_recipe_threshold_ports.py
+compares the frozen math, masks and all matrix labels, and verifies collection
+does not mutate frames, globals or files. Controller coverage verifies one
+threshold collection for multiple groups and replay after globals change.
+
+All five clustering leaves now declare named answers. Ordered count lists,
+normalization, marker subsets, group-specific labels and the existing math are
+retained. _as_int_list was removed rather than retained as a scalar-row adapter.
+test_recipe_clustering_ports.py compares actual sklearn labels and Torch
+labels/summaries with frozen code, and checks Leiden frames/search calls using
+a deterministic boundary double (not a real Scanpy numerical proof). Torch
+summary paths are reported on the owning step's outputs. The controller proof
+collects settings once, runs both scenes, plots the new labels and replays the
+frozen recipe. Completed run rows are copied, so adding provenance to the
+session recording cannot later mutate the executed recipe.
+
+The final mechanical batch ports all ordinary remaining processing/plotting
+leaves without new per-leaf test scaffolding. Existing declaration lint,
+compile checks, regression coverage and a 12-figure controller smoke were used.
+Use that proportional approach for straightforward bindings; retain deeper
+coverage for changes to shared lifecycle or scientific calculations.
+
+Only manThresh remains transitional because it delegates to an interactive
+orthogonal threshold editor during execution. Separate editing from applying
+its saved CSV before claiming that path is unattended-replayable. There is no
+named-to-positional adapter. The dead text serializers are gone; frozen old
+functions in fixtures remain test evidence only, never a second runtime.
