@@ -264,7 +264,9 @@ MENUS = {
         Action("ifv.spatial", "spatial pseudoimage", "IFvisualization2:spatialLite",
                "spatial pseudoimage", {
                    "colors": ("list", "Optional custom palette prefix; [] uses default colors."),
-                   "size_multiplier": ("number", "Figure size multiplier.")}),
+                   "size_multiplier": ("number", "Figure size multiplier."),
+                   "outlines?": ("yes_no", "y = draw filled segmentation cell masks instead of centroid dots."),
+                   "segmentation_roots?": ("list", "Viewer-shared mask folders; required when outlines=y.")}),
         Action("ifv.embedding", "embedding", "IFvisualization2:showUmap",
                "embedding", {
                    "method": ("text", "umap, tsne or pca."),

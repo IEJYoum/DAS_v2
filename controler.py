@@ -3227,6 +3227,9 @@ def _run_legacy_call(
     if state.stem == "":
         state.stem = TSTEM
 
+    if legacy_meta.get("ifv_segmentation_root"):
+        invalidate_project_config(state.data_folder)
+        state.segmentation_root = Path(legacy_meta["ifv_segmentation_root"]).resolve()
     runtime_figure_folder_text = str(legacy_meta.get("ifv_runtime_figure_folder") or "").strip()
     if runtime_figure_folder_text:
         runtime_figure_folder = Path(runtime_figure_folder_text).expanduser().resolve()

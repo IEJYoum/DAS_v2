@@ -2784,9 +2784,82 @@ def spat2(dfs, cat="", columns=None):
 
 
 
-def spatialLite(dfs, cat="", colors=None, size_multiplier=None, ymin=0):
+def _prompt_spatial_segmentation_roots():
+    from visualization import call_visu_html_7 as cvh
+    meta = _ifv_meta_sink()
+    project = str((meta or {}).get("data_folder") or Path.cwd())
+    current = cvh.load_inherited_project_segmentation_roots(project)
+    selected = shared_check_change("||".join(current), "segmentation folder or glob", input_fn=logInput)
+    roots = []
+    for spec in cvh._parse_saved_path_list(selected):
+        for root in cvh._expand_viewer_segmentation_glob(spec):
+            if root not in roots:
+                roots.append(root)
+    if not roots:
+        raise ValueError("Filled cells require an existing segmentation folder or matching glob")
+    cvh.save_project_segmentation_roots(project, roots)
+    if meta is not None:
+        meta.update(segmentation_root=roots[0], segmentation_roots=roots,
+                    ifv_segmentation_root=roots[0])
+    return roots
+
+
+def _spatial_mask_plot(sobs, cat, category_colors, scene, roots, size_multiplier):
+    from visualization import call_visu_html_7 as cvh
+    from support.image_sources import read_channel
+    from skimage.segmentation import find_boundaries
+    mask_path = cvh._find_seg_file_multi(roots, str(scene))
+    if mask_path is None:
+        raise ValueError("No exact segmentation mask for slide_scene: " + str(scene))
+    mask = read_channel(mask_path)
+    if mask.ndim != 2:
+        raise ValueError("Filled cells require a two-dimensional label mask: " + mask_path)
+    height, width = mask.shape
+    ids = cvh.prepare_overlay_context(sobs, None, {})["cell_int"]
+    if ids is None or ids.duplicated().any() or (ids <= 0).any():
+        raise ValueError("Filled cells require unique positive mask IDs within " + str(scene))
+    matched = int(np.isin(ids.to_numpy(), np.unique(mask)).sum())
+    if matched == 0:
+        raise ValueError("No annotation cell IDs match the segmentation mask for " + str(scene))
+    print("Spatial filled cells:", scene, "| matched", matched, "of", len(ids), "cells |", mask_path)
+    if matched < len(ids):
+        print("WARNING:", len(ids) - matched, "cells have no matching mask label in", scene)
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+    handles = []
+    for label, color in category_colors.items():
+        selected_ids = ids.loc[sobs[cat] == label].to_numpy()
+        hit = np.isin(mask, selected_ids)
+        if not hit.any():
+            continue
+        rgba[hit] = (
+            np.asarray(mpl.colors.to_rgba(color)) * 255).astype(np.uint8)
+        handles.append(mpatches.Patch(facecolor=color, edgecolor="black", label=label))
+    borders = find_boundaries(mask, connectivity=1, mode="inner")
+    borders[[0, -1], :] = True
+    borders[:, [0, -1]] = True
+    rgba[borders & (rgba[:, :, 3] > 0)] = [0, 0, 0, 255]
+    fig, ax = plt.subplots(figsize=(max(1, width / 500 * size_multiplier),
+                                    max(1, height / 500 * size_multiplier)))
+    # Native mask coordinates: row zero stays at the top. No dfxy transform.
+    ax.imshow(rgba, origin="upper", interpolation="nearest")
+    ax.legend(handles=handles, bbox_to_anchor=(1.05, 1), loc="upper left", title=cat, fontsize="large")
+    return {"segmentation_path": str(mask_path), "matched_cells": matched,
+            "unmatched_cells": len(ids) - matched, "mask_width": width, "mask_height": height}
+
+
+def spatialLite(dfs, cat="", colors=None, size_multiplier=None, ymin=0,
+                outlines=None, segmentation_roots=None):
     size_multiplier = recipe.ask("size_multiplier", size_multiplier, lambda: _prompt_number("figsize modifier?", 1.0))
     colors = recipe.ask("colors", colors, lambda: _prompt_spatial_colors(dfs[1]))
+    step = recipe.current_step()
+    if outlines is None and step is not None and not step.recording and "outlines" not in step.row.get("with", {}):
+        outlines = "n"
+    outlines = recipe.ask("outlines", outlines, "draw filled cells? (y)")
+    use_masks = str(outlines).strip().lower() in ("y", "yes")
+    if use_masks:
+        segmentation_roots = recipe.ask("segmentation_roots", segmentation_roots, _prompt_spatial_segmentation_roots)
+        if not segmentation_roots or not isinstance(segmentation_roots, list):
+            raise ValueError("segmentation_roots must be a nonempty list of mask folders")
     if recipe.collecting():
         return [], []
     mpl.style.use('default')
@@ -2797,66 +2870,60 @@ def spatialLite(dfs, cat="", colors=None, size_multiplier=None, ymin=0):
     uch = sorted(list(nobs.loc[:,ch1].unique()))
 
     colors = colors + allc.colors
+    category_colors = {}
+    for i, ty in enumerate(uch):
+        if ty[:1].isdigit() and ('3: tumor' in uch or '3 tumor' in uch or '2: immune' in uch or '3: epithelial' in uch):
+            co = '#BFBFBF' if ty == '5: stromal' else colors[int(ty[0]) - 1]
+        else:
+            co = colors[i]
+        if ty in ('yes', 'Yes'):
+            co = 'darkred'
+        elif ty in ('no', 'No', 'nan', 'NaN', 'NAN', 'Nan', '-'):
+            co = 'lightgray'
+        category_colors[ty] = co
     for scene in nobs.loc[:,"slide_scene"].unique():
         key=nobs["slide_scene"]==scene
         sobs = nobs.loc[key,:]
-        #sdf = ndf.loc[key,:]
-        sxy = nxy.loc[key,:]
-        #ax.set_aspect('equal')
-        #ax.legend(uch,colors,bbox_to_anchor=(1.05, 1), loc='upper left')
-        try:
-            fig,ax = plt.subplots(figsize=((max(sxy.iloc[:,0])-min(sxy.iloc[:,0]))/500*fsm,(max(sxy.iloc[:,1])-min(sxy.iloc[:,1]))/500*fsm))
-            print(max(sxy.iloc[:,1]),"max Y")
-        except Exception as e:
-            print(e,"error setting fig and ax",scene)
-            print(sxy.isna().any(),"isna")
-            fig,ax = plt.subplots()
-        for i,ty in enumerate(uch):
-            if ty[0].isdigit() and ('3: tumor' in uch or '3 tumor' in uch or '2: immune' in uch or '3: epithelial' in uch):
-                if ty == '5: stromal':
-                    co = '#BFBFBF'
-                else:
-                    uoi = int(ty[0]) - 1
-                    co = colors[uoi]
-            else:
-                co = colors[i]
-            if ty == 'yes' or ty == 'Yes':
-                co = 'darkred'
-            elif ty == 'no' or ty == 'No':
-                co = 'lightgray'
-            #elif ty == 'none': #or ty == '5: stromal':
-            #    co = '#8000FF' #dark purple
-            elif ty == 'nan' or ty == 'NaN' or ty == 'NAN' or ty == 'Nan' or ty == '-':
-                co = 'lightgray'#'whitesmoke'
-            #print(sobs.columns[ch1])
-            key1 = sobs.loc[:,ch1]==ty
-            #print(key1)
-            #tobs = sobs.loc[key,:]
-            #tdf = sdf.loc[key,:]
-            txy = sxy.loc[key1,:]
-            x = []
-            y = []
-            if txy.shape[0] == 0:
-                continue
-            for j in range(txy.shape[0]):
-                pt = list(txy.iloc[j,:])
-                #coords.append((pt[0],pt[1]))
-                x.append(pt[0])
-                y.append(-pt[1])
-            Y = pd.Series(y)
-            #sxy = list(sxy.astype(float))
-            #print(sxy)
-            Y += max(sxy.iloc[:,1])+ymin
-            ax.scatter(x,Y,color=co,label=ty,s=1.2)
-        lg = plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left',title=ch1,fontsize='large')#, scatterpoints=1, fontsize=10)
-        try:
-            for k in range(len(uch)):
-                lg.legend_handles[k]._sizes = [30]
-        except Exception as e:
-            print(e,"index k:",k,len(uch),lg.legend_handles)
+        mask_facts = None
+        if use_masks:
+            mask_facts = _spatial_mask_plot(sobs, ch1, category_colors, scene, segmentation_roots, fsm)
+        else:
+            sxy = nxy.loc[key,:]
+            try:
+                fig,ax = plt.subplots(figsize=((max(sxy.iloc[:,0])-min(sxy.iloc[:,0]))/500*fsm,(max(sxy.iloc[:,1])-min(sxy.iloc[:,1]))/500*fsm))
+                print(max(sxy.iloc[:,1]),"max Y")
+            except Exception as e:
+                print(e,"error setting fig and ax",scene)
+                print(sxy.isna().any(),"isna")
+                fig,ax = plt.subplots()
+            for ty in uch:
+                txy = sxy.loc[sobs.loc[:,ch1]==ty,:]
+                if txy.shape[0] == 0:
+                    continue
+                x = []
+                y = []
+                for j in range(txy.shape[0]):
+                    pt = list(txy.iloc[j,:])
+                    x.append(pt[0])
+                    y.append(-pt[1])
+                Y = pd.Series(y)
+                Y += max(sxy.iloc[:,1])+ymin
+                ax.scatter(x,Y,color=category_colors[ty],label=ty,s=1.2)
+            lg = plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left',title=ch1,fontsize='large')
+            try:
+                for k in range(len(uch)):
+                    lg.legend_handles[k]._sizes = [30]
+            except Exception as e:
+                print(e,"index k:",k,len(uch),lg.legend_handles)
         plt.title(scene)
         if SAVE:
-            plt.savefig(saveF(0,"spatial/"+cat,scene+"_"+cat),bbox_inches='tight')
+            if mask_facts is not None:
+                _queue_ifv_summary("spatial", summary_text="Filled cell masks colored by " + str(cat),
+                    how_made_text="Segmentation labels joined to current obs cell IDs; category-colored fills with black inner borders; centroid coordinates unused.",
+                    orientation_text="Native mask pixel grid; image row zero at the top.",
+                    facts=dict(mask_facts, slide_scene=str(scene), category=str(cat)))
+            save_kw = {"dpi": 500} if use_masks else {}
+            plt.savefig(saveF(0,"spatial/"+cat,scene+"_"+cat),bbox_inches='tight', **save_kw)
         plt.show()
     return(dfs,9)
 
