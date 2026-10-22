@@ -69,7 +69,9 @@ MENUS = {
                    'inference': ('mapping', 'prediction_split=train/val/test/all; predict_all_after_training=true optionally predicts all configured ROIs using best.pt; export_triplet=true saves new DAS triplets for das_triplet sources; deployment_reports=true adds deployment PNGs (default false for all-ROI output). Also inference_tile_px/overlap, target_um_per_px, preview_max_px, error_gallery_limit, debug_scenes, report_classes. {} retains existing behavior.')
                }),
         Action('home.nimbus', 'Nimbus marker positivity', 'controler:startup_nimbus',
-               'Run the external Nimbus image model on explicit TIFF/mask scene mappings; it writes additive marker scores and does not alter the live triplet.', {
+               'Predict or fine-tune the external Nimbus model on explicit TIFF/mask scene mappings; additive outputs preserve the live triplet.', {
+                   'mode?': ('text', 'predict (default) or tune_test (parent checkpoint -> train/validation ROIs -> held-out test ROIs).'),
+                   'training?': ('mapping', 'tune_test: labels (classifier-style das_triplet/classified_csv sources with explicit scenes), marker_classes (marker -> IMMUNE/EPI proxies), splits (disjoint train/val/test/reserved scene lists; omitted uses shared seeded allocation, >=6 ROIs). Optional epochs=10, lr=1e-5, batch_size=1, tile_px=256, overlap=64, threads=2, seed=7, patience=5, weight_decay, initial_regularization, label_smoothing, augmentation_p, keep_cache=false, cache_gb=4. See nimbus_bridge_v0.md.'),
                    'source_manifest?': ('path', 'Nimbus JSON/extraction result, or empty when using inline sources. Relative paths use the active project.'),
                    'sources?': ('list', 'Inline root/pattern sources: image_root, mask_root, marker_patterns, mask_pattern, scenes. Scene strings or objects with slide_scene/scene_id and filename tokens.'),
                    'scenes?': ('list', 'ROI names to include from either input route; [] selects all. Selection happens before file checks.'),
@@ -77,7 +79,7 @@ MENUS = {
                    'mask_role': ('text', 'cell or nucleus; must match the declared source mask and downstream seg_label namespace.'),
                    'nimbus_python?': ('path', 'Python interpreter in the separate Nimbus environment; preview needs none. Omitted uses the project default.'),
                    'output_root': ('path', 'Parent for a new Nimbus run folder. Relative paths use the active project.'),
-                   'settings?': ('mapping', 'Optional checkpoint, device, batch_size, test_time_aug, input_shape, magnification, normalization_quantile, normalization_subset, save_predictions.'),
+                   'settings?': ('mapping', 'Optional checkpoint (upstream name or full DAS-tuned .pt path), device, threads (default 2), batch_size, test_time_aug, input_shape, magnification, normalization_quantile, normalization_subset, save_predictions. Tuned checkpoints carry their normalization factors.'),
                    'triplet?': ('mapping', 'Optional additive DAS export: folder, stem, scene_column (slide_scene), object_column (seg_label), object_table (obs/df/dfxy/index), unmatched_policy (error/exclude). {} writes scores only.'),
                    'reporting?': ('mapping', 'Visual debug defaults on. Optional enabled, native, preview_max_px, companion_px, error_gallery_limit, triplet (truth source, independent of export), truth_columns, marker_classes, label_mapping, decision. decision={} forces highest score; decision.thresholds maps markers to cutoffs (neither positive -> Other); alternatively fit_column and grid_step fit maximum agreement on the selected truth/ROIs (optimistic).'),
                    'reuse_result?': ('path', 'Completed Nimbus result.json to re-report without running the model. Sources and scientific settings must match; inputs must be unchanged. Empty runs the model.'),

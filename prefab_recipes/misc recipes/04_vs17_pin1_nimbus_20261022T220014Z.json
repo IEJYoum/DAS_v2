@@ -1,0 +1,34 @@
+{
+  "name": "04_vs17_pin1_nimbus_20261022T220014Z",
+  "description": "Forward pretrained Nimbus V1 only. Score is not calibrated certainty. Cutoff fitted to balanced agreement with whole-cell corrected Pin1_cell >=200 on six intensity-spanning ROIs. This is a user-guided proxy, not independently validated Pin1 truth. Magnification 20 assumed for 0.325 um/px source; Nimbus model magnification is 10.",
+  "steps": [
+    {
+      "do": "home.nimbus",
+      "with": {
+        "mode": "predict",
+        "source_manifest": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\IY_DAS_VS17_features\\recipes\\vst_pin1_sources_20261022T220014Z.json",
+        "markers": [
+          "Pin1"
+        ],
+        "mask_role": "cell",
+        "scenes": [],
+        "nimbus_python": "D:/NIMBUS_RUNTIME/Scripts/python.exe",
+        "output_root": "D:\\NIMBUS_OUTPUT\\VST_PIN1\\task_20261022T220014Z_115fcc2ef67c\\full",
+        "settings": {
+          "checkpoint": "V1.pt",
+          "device": "cpu",
+          "threads": 2,
+          "magnification": 20,
+          "normalization_subset": 6,
+          "test_time_aug": false,
+          "save_predictions": false
+        },
+        "triplet": {},
+        "reporting": {
+          "enabled": false
+        },
+        "preview_only": "n"
+      }
+    }
+  ]
+}

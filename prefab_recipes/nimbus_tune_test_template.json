@@ -1,0 +1,47 @@
+{
+  "name": "nimbus_tune_test_template",
+  "description": "EDIT paths, ROI splits, ID column, source magnification and marker proxies. Preview first; fine-tunes upstream Nimbus and tests held-out whole ROIs. Pin1/per-marker truth is deferred.",
+  "steps": [{
+    "do": "home.nimbus",
+    "with": {
+      "mode": "tune_test",
+      "sources": [{
+        "image_root": "D:/EDIT_IMAGES",
+        "mask_root": "D:/EDIT_MASKS",
+        "marker_patterns": {"CD45": "{scene_id}/*CD45*.tif*", "PANCK": "{scene_id}/*PANCK*.tif*"},
+        "mask_pattern": "{scene_id}/EDIT_EXACT_MASK.tif",
+        "scenes": ["EDIT_TRAIN_ROI", "EDIT_VAL_ROI", "EDIT_TEST_ROI"]
+      }],
+      "markers": ["CD45", "PANCK"],
+      "mask_role": "cell",
+      "nimbus_python": "D:/EDIT_NIMBUS_ENV/Scripts/python.exe",
+      "output_root": "D:/NIMBUS_OUTPUT",
+      "settings": {"checkpoint": "V1.pt", "magnification": 20},
+      "training": {
+        "labels": [{
+          "adapter": "das_triplet",
+          "triplet_folder": "D:/EDIT_TRIPLET_FOLDER",
+          "triplet_stem": "EDIT_SAVED_STEM",
+          "scene_column": "slide_scene",
+          "object_column": "ObjectNumber",
+          "object_table": "obs",
+          "label_column": "auto",
+          "scenes": ["EDIT_TRAIN_ROI", "EDIT_VAL_ROI", "EDIT_TEST_ROI"]
+        }],
+        "marker_classes": {"CD45": "IMMUNE", "PANCK": "EPI"},
+        "splits": {"train": ["EDIT_TRAIN_ROI"], "val": ["EDIT_VAL_ROI"], "test": ["EDIT_TEST_ROI"]},
+        "epochs": 10,
+        "lr": 0.00001,
+        "batch_size": 1,
+        "tile_px": 256,
+        "overlap": 64,
+        "threads": 2,
+        "patience": 5,
+        "keep_cache": false,
+        "cache_gb": 4
+      },
+      "triplet": {},
+      "preview_only": "y"
+    }
+  }]
+}

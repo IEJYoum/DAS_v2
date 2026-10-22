@@ -2,6 +2,32 @@
 import numpy as np
 
 
+def fit_binary_cutoff(scores, positive, grid_step=.001):
+    """Fit balanced accuracy on explicit binary references, not confidence calibration."""
+    scores, positive = np.asarray(scores, float), np.asarray(positive)
+    if (scores.ndim != 1 or positive.shape != scores.shape or not len(scores)
+            or not np.isfinite(scores).all() or ((scores<0)|(scores>1)).any()
+            or not np.isin(positive, [False, True]).all()):
+        raise ValueError('Binary fitting requires finite [0,1] scores and binary references')
+    if not isinstance(grid_step,(int,float)) or isinstance(grid_step,bool) or not .0001<=grid_step<=.1:
+        raise ValueError('grid_step must be between .0001 and .1')
+    positive = positive.astype(bool)
+    pos, neg = np.sort(scores[positive]), np.sort(scores[~positive])
+    if not len(pos) or not len(neg):
+        raise ValueError('Binary cutoff fitting requires both reference classes')
+    grid = np.linspace(0, 1, round(1/grid_step)+1)
+    tp = len(pos)-np.searchsorted(pos, grid, side='left')
+    fp = len(neg)-np.searchsorted(neg, grid, side='left')
+    balanced = .5*(tp/len(pos) + 1-fp/len(neg))
+    candidates = np.flatnonzero(np.isclose(balanced, balanced.max(), rtol=0, atol=1e-12))
+    best = min(candidates, key=lambda i:(abs(grid[i]-.5), -grid[i]))
+    return dict(threshold=float(grid[best]), balanced_accuracy=float(balanced[best]),
+        objects=len(scores), positive_reference=len(pos), negative_reference=len(neg),
+        tp=int(tp[best]), fp=int(fp[best]), fn=int(len(pos)-tp[best]), tn=int(len(neg)-fp[best]),
+        objective='maximum balanced agreement with supplied binary reference',
+        tie_break='closest to 0.5, then higher cutoff', grid_step=grid_step)
+
+
 def threshold_calls(scores, thresholds):
     """Index of highest passing marker; -1 means Other. Cutoffs are inclusive.
 

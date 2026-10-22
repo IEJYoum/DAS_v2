@@ -74,7 +74,7 @@ Unknown ROI names fail. `markers=[]`/omitted uses all declared markers.
 Use inline sources OR source_manifest, not both.
 
 All settings are validated; omitted settings use the documented bridge defaults:
-checkpoint=latest, device=auto, batch_size=1, test_time_aug=false,
+checkpoint=latest, device=auto, threads=2, batch_size=1, test_time_aug=false,
 input_shape=[1024,1024], magnification=20, normalization_quantile=0.999,
 normalization_subset=50, save_predictions=false. Confirm actual source
 magnification before inference: 20 is a default, not a metadata measurement.
@@ -132,6 +132,9 @@ Each invocation creates `nimbus/nimbus_<stamp>/` with:
 
 - `request.json`: resolved sources and requested settings.
 - `worker.log`: Nimbus process output.
+- `worker_progress.json`: completed/total ROIs and an inference ETA; raw score
+  rows flush after each ROI. Partial rows are inspectable but only the host's
+  completed `result.json` certifies full coverage.
 - `worker_result.json`: isolated worker outcome, resolved checkpoint/hash,
   package version, device, model magnification and normalization provenance.
 - `nimbus_scores_long.csv`: strict long-form scores with
@@ -257,3 +260,119 @@ Pure metrics, palettes, raster outlines and sparse object bounding boxes live in
 `support/cell_reporting.py`; `CLASSIFIER/report.py` keeps its existing imports/API.
 Nimbus-specific interpretation and report orchestration live in
 `data_extraction/nimbus_reports.py`. Neither path imports the other model engine.
+
+## Fine-tune through the same recipe / GUI action
+
+`home.nimbus` now accepts `mode="tune_test"` (default remains `predict`). In the
+GUI choose **Fine-tune then test on held-out ROIs**. Folder/pattern inputs,
+checkpoint selection, CSV/triplet labels, ROI lists and the epoch budget use the
+normal routed menus/use-change prompts and record into replayable recipes.
+The live triplet is never replaced. Save any label edits before launching.
+
+Start from `prefab_recipes/nimbus_tune_test_template.json`. Edit the image/mask
+roots, exact mask pattern, scene names, label source and source magnification.
+Keep `preview_only="y"` initially. The preview needs no Nimbus installation and
+writes `training_plan.json`, `label_audit.csv` and `training_targets.csv` alongside
+the resolved image inventory. Read these before changing preview to `n`.
+
+`training.labels` is a list of label-only classifier-style sources. Mix triplets
+and classified CSVs by adding entries; each ROI must have at most one entry.
+For a triplet use `adapter="das_triplet"`, `triplet_folder`, `triplet_stem`,
+`scene_column`, `object_column`, `object_table`, `label_column` and `scenes`.
+For an aggregate CSV use `adapter="classified_csv"`, `labels_csv`, `scene_column`,
+`object_column`, `label_column` and `scenes`. For per-ROI CSVs replace `labels_csv`
+with `csv_root` and `csv_pattern`, e.g. `{scene_id}.csv`; omit `scene_column` when
+each file already represents one ROI. Scene objects may supply extra filename
+tokens, exactly as in classifier adapters. Optional `label_mapping` extends the
+central alias registry without editing model code.
+
+Automatic label selection is the classifier's existing behavior: an explicit
+`label_column` wins; otherwise prefer `DAS_unet_labels` (case insensitive), else
+strictly intersect recognized current Class/Class:*, Celltype:Gating,
+Subtype:Gating and Primary Celltype:Matrix conventions. A single convention is
+used alone. Artifact in any recognized column overrides the selected label.
+Disagreement/missing labels stay ignored, with no per-cell fallback to a more
+convenient source. Unknown selected names fail and request a registry/mapping
+update. Label policies and counts appear in the GUI session log and audit files.
+
+This first training adapter uses **lineage-derived marker proxies**. Set
+`training.marker_classes`, e.g. `{"CD45":"IMMUNE","PANCK":"EPI"}`. An immune cell
+is positive for the immune marker and negative for the epithelial marker; an
+epithelial cell is the reverse. Other/UNCLASSIFIED cells are negative for both.
+Artifact, missing and disagreeing cells are ignored for both. Background and
+excluded cell pixels contribute no loss. These targets are not independent
+marker-expression measurements: an immune cell may have a real epithelial
+marker signal, and vice versa. Pin1/per-marker positive/negative labels need a
+separate target adapter later; arbitrary markers should not be assigned a
+lineage just to force them through this shortcut. Only IMMUNE/EPI mappings are
+accepted in this version.
+
+`training.splits` contains explicit, disjoint whole-ROI `train`, `val` and `test`
+lists, optionally `reserved`. They must account for every selected image ROI.
+If omitted, reuse the classifier's seeded allocation (at least six ROIs):
+development third, validation from within that third, test sixth, reserved rest.
+No ROI is subdivided between splits. Train/validation need label sources and
+both positive and negative targets per marker; test labels are optional. Every
+supervised cell must fit completely in at least one training tile, including
+rescue windows at seams. Oversized cells or cell interiors erased by scale
+conversion cause an actionable failure rather than silent label loss.
+
+Defaults: epochs=10 (maximum, with patience=5), lr=1e-5, batch_size=1,
+tile_px=256, overlap=64, threads=2, seed=7, weight_decay=1e-4,
+initial_regularization=1e-4, label_smoothing=.05, augmentation_p=.5,
+keep_cache=false, cache_gb=4. Tile size is at Nimbus's **model** magnification,
+not necessarily the original image scale. Named upstream checkpoints or an
+absolute/active-project-relative `.pt` path can be used as the parent.
+
+Normalization is fitted on training ROIs only (positive-pixel quantile as in
+ordinary Nimbus inference), then held fixed for validation and test. There is
+no median/50th-percentile floor. Saved tuned checkpoints include those factors,
+marker names, model magnification, label policy, splits and parent SHA-256.
+When a tuned checkpoint is later selected for `predict`, its saved factors are
+reused rather than estimated from the new test images; incompatible marker
+names fail. To refit normalization for another batch, start a new tune run.
+
+Upstream Nimbus still supplies the network, trainer, AdamW optimizer, scheduler,
+regularization, smoothing and augmentation transforms. DAS adapts input targets,
+complete-cell tiling, valid-pixel loss averaging, validation cell counting and
+checkpoint publication. Sparse mask IDs are compacted for the upstream model
+and restored in raw outputs. There are no new classifier heads or architectures.
+
+Each run adds:
+
+- `best.pt` and `last.pt`: independent new weights, never overwritten parent
+  files or package assets. Best is selected by pooled positive-class validation
+  F1 at cutoff .5, across cell-marker pairs. The initial parent baseline also
+  competes; `best_epoch=0` means the tune did not improve that validation score.
+- `training_history.json`: baseline and every completed validation epoch;
+  `training_tiles.json`: tile/cache inventory; `training_plan.json`,
+  `training_targets.csv`, `label_audit.csv`: complete target provenance.
+- `best_validation_marker_predictions.csv`: cell-marker validation predictions
+  for the selected checkpoint; compact IDs are local to the cached scene.
+  `validation_marker_predictions.csv` represents the final validation pass.
+- `nimbus_scores_long.csv`: forward predictions for **test ROIs only**, with
+  original mask IDs. Existing full-image debug, optional truth reporting and
+  additive triplet export apply to these same test predictions.
+- `test_marker_predictions.csv` and `test_marker_metrics.json`: held-out proxy
+  scoring at a fixed .5 cutoff. Ignored cells retain raw predictions and blank
+  correctness. No test labels select the checkpoint or fit these cutoffs.
+
+Memory is bounded to scene preparation and tile batches. The temporary cache
+contains one normalized plane per marker plus mask/binary planes, rather than
+duplicating overlapping tiles or paired TIFFs. The cache quota is checked while
+writing; increase `cache_gb` explicitly if the ROI selection requires more.
+Successful runs remove only their temporary `training_cache` by default.
+Failed runs retain partial caches for inspection; `keep_cache=true` retains
+successful caches too. Neither policy deletes checkpoints/debug/results.
+
+For later whole-dataset prediction, use the ordinary `mode="predict"`, point
+`settings.checkpoint` at the new run's `best.pt`, omit `training`, and select any
+ROIs through `sources`/`scenes`. This can include training ROIs for visualization;
+their agreement is then in-sample. To regenerate reports from the saved held-out
+scores use `reuse_result` in predict mode, which never retrains.
+
+Engineering checks: `python -m unittest tests.test_nimbus_training` runs host
+label/split/preview/recipe checks without Nimbus. Set the environment variable
+`DAS_NIMBUS_TRAINING_SMOKE` to the isolated Nimbus `python.exe` to also exercise a
+real one-epoch synthetic train -> saved-checkpoint reload -> forward pass. Its
+temporary weights/data are removed after the test; no real dataset is trained.

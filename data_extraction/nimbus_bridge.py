@@ -30,7 +30,7 @@ WORKER = Path(__file__).with_name("nimbus_worker.py")
 RESULT_COLUMNS = ["slide_scene", "mask_label", "marker", "score"]
 DEFAULT_SETTINGS = dict(checkpoint='latest', device='auto', batch_size=1,
     test_time_aug=False, input_shape=[1024,1024], magnification=20,
-    normalization_quantile=.999, normalization_subset=50, save_predictions=False)
+    normalization_quantile=.999, normalization_subset=50, save_predictions=False, threads=2)
 
 
 def validate_settings(settings):
@@ -40,7 +40,7 @@ def validate_settings(settings):
     if set(settings)-set(DEFAULT_SETTINGS):
         raise ValueError(f'Unknown Nimbus settings: {sorted(set(settings)-set(DEFAULT_SETTINGS))}')
     settings = {**DEFAULT_SETTINGS, **settings}
-    for key in ('batch_size','normalization_subset'):
+    for key in ('batch_size','normalization_subset','threads'):
         if type(settings[key]) is not int or settings[key]<1:
             raise ValueError(f'{key} must be a positive integer')
     for key in ('test_time_aug','save_predictions'):
@@ -187,15 +187,17 @@ def _validate_plane(path, *, label):
 
 
 def preflight(source_manifest=None, *, markers=None, mask_role="cell", base_dir=None,
-              sources=None, scenes=None):
+              sources=None, scenes=None, print_fn=None):
     """Resolve an explicit inventory and fail before the external model starts."""
     manifest_path, raw_scenes = load_scenes(source_manifest, markers=markers, mask_role=mask_role,
                                            base_dir=base_dir,sources=sources,scenes=scenes)
     if not raw_scenes:
         raise ValueError("Nimbus source mapping contains no scenes")
     scenes, seen, expected_markers = [], set(), None
-    for raw in raw_scenes:
+    for ordinal, raw in enumerate(raw_scenes, 1):
         scene = str(raw.get("slide_scene") or "").strip()
+        if print_fn:
+            print_fn(f'Nimbus source check {ordinal}/{len(raw_scenes)}: {scene}')
         if not scene or scene in seen:
             raise ValueError(f"Nimbus slide_scene must be nonempty and unique: {scene!r}")
         seen.add(scene)
@@ -306,15 +308,32 @@ def _export_triplet(table, target, folder):
 
 def run(*, source_manifest=None, sources=None, scenes=None, markers=None, mask_role="cell", nimbus_python="", output_root="",
         settings=None, preview_only="n", triplet=None, reporting=None, reuse_result=None, base_dir=None, recipe_reference=None,
-        output_callback=None, print_fn=io.iprint):
+        output_callback=None, print_fn=io.iprint, mode='predict', training=None):
     """Validate DAS sources, launch the isolated worker, and publish result.json."""
     if preview_only not in {"y", "n"}:
         raise ValueError("preview_only must be y or n")
     if triplet is not None and not isinstance(triplet,dict):
         raise ValueError('triplet must be an export settings object or {}')
+    if mode not in {'predict', 'tune_test'}:
+        raise ValueError('Nimbus mode must be predict or tune_test')
+    if mode == 'predict' and training:
+        raise ValueError('training settings require mode=tune_test')
+    if mode == 'tune_test' and reuse_result:
+        raise ValueError('Use mode=predict to re-report saved scores; tune_test always makes a new model')
     settings = validate_settings(settings)
+    checkpoint = settings['checkpoint']
+    if '/' in checkpoint or '\\' in checkpoint or Path(base_dir or '.', checkpoint).is_file():
+        settings['checkpoint'] = str(resolve_native_path(checkpoint, base_dir=base_dir, must_exist=True, kind='file'))
     resolved = preflight(source_manifest, sources=sources, scenes=scenes,
-                         markers=markers, mask_role=mask_role, base_dir=base_dir)
+                         markers=markers, mask_role=mask_role, base_dir=base_dir, print_fn=print_fn)
+    prepared = None
+    training_scenes = None
+    if mode == 'tune_test':
+        from data_extraction import nimbus_training
+        prepared = nimbus_training.prepare(training, resolved, base_dir, print_fn)
+        training_scenes = resolved['scenes']
+        test_names = prepared[0]['splits']['test']
+        resolved = {**resolved, 'scenes': [r for r in training_scenes if r['slide_scene'] in test_names]}
     target=_export_target(triplet,resolved,base_dir) if triplet else None
     from data_extraction import nimbus_reports
     reports=nimbus_reports.prepare(reporting,resolved['markers'],base_dir)
@@ -323,7 +342,7 @@ def run(*, source_manifest=None, sources=None, scenes=None, markers=None, mask_r
         previous_path,previous=_read_json(reuse_result,base_dir)
         if previous.get('status')!='complete':
             raise ValueError('reuse_result requires a completed Nimbus result.json')
-        if previous.get('scenes')!=resolved['scenes'] or previous.get('settings')!=settings:
+        if previous.get('scenes')!=resolved['scenes'] or validate_settings(previous.get('settings'))!=settings:
             raise ValueError('Reused Nimbus sources/settings differ; use the original sources and settings')
         signatures=[image_sources.file_signature_for_source(path)
                     for row in resolved['scenes'] for path in [row['mask'],*row['markers'].values()]]
@@ -333,6 +352,7 @@ def run(*, source_manifest=None, sources=None, scenes=None, markers=None, mask_r
     folder = create_run_directory(root, prefix="nimbus_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_"))
     product = folder / "result.json"
     request = {"status": "preflight" if preview_only == "y" else "running", "recipe": recipe_reference,
+               'mode': mode,
                "source_manifest": resolved["source_manifest"], "scenes": resolved["scenes"],
                "markers": resolved["markers"], "mask_role": mask_role, "settings": settings,
                "output_folder": str(folder), 'triplet':target[2] if target else None,
@@ -340,6 +360,11 @@ def run(*, source_manifest=None, sources=None, scenes=None, markers=None, mask_r
                'source_signatures':[
                    image_sources.file_signature_for_source(path)
                    for row in resolved['scenes'] for path in [row['mask'],*row['markers'].values()]]}
+    if prepared:
+        request['training'] = nimbus_training.write_prepared(prepared, folder)
+        request['training_scenes'] = training_scenes
+        request['training_source_signatures'] = [image_sources.file_signature_for_source(path)
+            for row in training_scenes for path in [row['mask'], *row['markers'].values()]]
     atomic_write_json(folder / "request.json", request)
     atomic_write_json(product, request)
     if output_callback:
@@ -357,6 +382,11 @@ def run(*, source_manifest=None, sources=None, scenes=None, markers=None, mask_r
             table=validate_long_results(worker_result['long_results'],resolved)
         validated = folder / "nimbus_scores_long.csv"
         table.to_csv(validated, index=False)
+        if prepared:
+            request['training_test'] = nimbus_training.score_test(table, request['training'], folder)
+            tuned = worker_result['training']
+            print_fn(f"Nimbus fine-tuning: best validation F1={tuned['best_validation_f1']:.4f}, "
+                     f"epoch={tuned['best_epoch']}; checkpoint={tuned['best_checkpoint']}")
         if target:
             request['triplet_export']=_export_triplet(table,target,folder)
         request['reports']=nimbus_reports.write_reports(table,resolved,worker_result,folder,reports)

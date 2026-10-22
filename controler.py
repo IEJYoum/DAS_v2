@@ -1854,7 +1854,8 @@ def startup_cell_classifier(state: SessionState, mode=None, sources=None, checkp
 
 def startup_nimbus(state: SessionState, source_manifest=None, markers=None, mask_role=None,
                   nimbus_python=None, output_root=None, settings=None, preview_only=None,
-                  sources=None, scenes=None, triplet=None, reporting=None, reuse_result=None):
+                  sources=None, scenes=None, triplet=None, reporting=None, reuse_result=None,
+                  mode=None, training=None):
     """Recipe-aware wrapper for the separate Nimbus marker-expression runtime."""
     import json
     from support.project_config import load_project_settings, save_project_settings, select_project_path
@@ -1960,13 +1961,53 @@ def startup_nimbus(state: SessionState, source_manifest=None, markers=None, mask
     def pick_settings():
         # Routine GUI choices are ordinary routed prompts; advanced controls
         # remain named recipe settings, without asking the user to edit JSON.
-        return dict(checkpoint=checkChange('latest','Nimbus checkpoint name (pin for comparisons)',input_fn=io.iget),
+        return dict(checkpoint=checkChange('latest','Nimbus checkpoint name or full tuned .pt path',input_fn=io.iget),
             device=checkChange('auto','Nimbus device',input_fn=io.iget),
             magnification=float(checkChange('20','Source magnification (confirm acquisition)',input_fn=io.iget)))
+
+    def pick_training():
+        if mode != 'tune_test':
+            return {}
+        io.iprint('Nimbus fine-tuning uses lineage-derived marker proxies. Artifact, disagreement and background are ignored.')
+        splits={key:flexMenu('Nimbus '+key+' ROI name (whole ROI)',input_fn=io.iget)
+                for key in ('train','val','test')}
+        label_sources=[]
+        while True:
+            route=menu_index('Nimbus training labels', ['Saved DAS triplet','One aggregate CSV','Per-ROI classified CSVs'])
+            label_scenes=flexMenu('ROI name supplied by this label source (include test for scoring)',input_fn=io.iget)
+            source=dict(adapter='das_triplet' if route==0 else 'classified_csv',scenes=label_scenes,
+                scene_column=checkChange('slide_scene','Label scene column',input_fn=io.iget),
+                object_column=checkChange('ObjectNumber','Label numeric mask-ID column',input_fn=io.iget),
+                label_column=checkChange('auto','Label column (auto prefers DAS_unet_labels, else agreement)',input_fn=io.iget))
+            if route==0:
+                source.update(triplet_folder=checkChange(str(state.data_folder),'Labels triplet folder',input_fn=io.iget),
+                    triplet_stem=checkChange(state.stem,'Labels triplet stem',input_fn=io.iget),
+                    object_table=checkChange('obs','Labels object table (obs/df/dfxy/index)',input_fn=io.iget))
+            elif route==1:
+                source['labels_csv']=checkChange('','Aggregate labels CSV path',input_fn=io.iget)
+            else:
+                source.update(csv_root=checkChange(str(state.data_folder),'Classified CSV root',input_fn=io.iget),
+                    csv_pattern=checkChange('{scene_id}.csv','Classified CSV pattern',input_fn=io.iget))
+                # A per-ROI CSV need not repeat its scene identity in a column.
+                source['scene_column']=None
+            label_sources.append(source)
+            if menu_index('Additional label sources', ['Done','Add another triplet/CSV source'])!=1:
+                break
+        names=markers or list(dict.fromkeys(m for source in sources for m in source.get('marker_patterns',{})))
+        if not names:
+            names=flexMenu('Nimbus training marker name',input_fn=io.iget)
+        mapping={name:checkChange('IMMUNE' if '45' in name else 'EPI',
+            'Proxy lineage for '+name+' (IMMUNE/EPI)',input_fn=io.iget) for name in names}
+        return dict(labels=label_sources,splits=splits,marker_classes=mapping,
+            epochs=int(checkChange('10','Nimbus maximum epochs (best validation checkpoint wins)',input_fn=io.iget)),
+            lr=float(checkChange('0.00001','Nimbus learning rate',input_fn=io.iget)),
+            tile_px=int(checkChange('256','Nimbus training tile pixels at model scale',input_fn=io.iget)))
 
     reuse_result = recipe.ask('reuse_result',reuse_result if reuse_result is not None else ('' if io.is_headless() else None),
         lambda: '' if menu_index('Nimbus scores',['Run model','Reuse a completed result.json'])==0 else
             checkChange('','Completed Nimbus result.json',input_fn=io.iget))
+    mode = recipe.ask('mode',mode if mode is not None else ('predict' if io.is_headless() or reuse_result else None),
+        lambda:'tune_test' if menu_index('Nimbus operation',['Forward prediction','Fine-tune then test on held-out ROIs'])==1 else 'predict')
     if reuse_result:
         previous_path=resolve_native_path(reuse_result,base_dir=state.data_folder,must_exist=True,kind='file')
         previous=json.loads(Path(previous_path).read_text(encoding='utf-8'))
@@ -2000,12 +2041,13 @@ def startup_nimbus(state: SessionState, source_manifest=None, markers=None, mask
     settings = recipe.ask("settings", settings if settings is not None else ({} if io.is_headless() else None), pick_settings)
     triplet = recipe.ask('triplet',triplet if triplet is not None else ({} if io.is_headless() else None),pick_triplet)
     reporting = recipe.ask('reporting',reporting if reporting is not None else ({} if io.is_headless() else None),pick_reporting)
+    training = recipe.ask('training',training if training is not None else ({} if io.is_headless() or mode=='predict' else None),pick_training)
     if recipe.collecting():
         return state
     module = importlib.import_module("data_extraction.nimbus_bridge")
     owner = recipe.current_step()
     product = module.run(source_manifest=source_manifest, sources=sources,scenes=scenes,triplet=triplet,
-        reporting=reporting,reuse_result=reuse_result,
+        reporting=reporting,reuse_result=reuse_result,mode=mode,training=training,
         markers=markers, mask_role=mask_role,
         nimbus_python=nimbus_python, output_root=output_root, settings=settings, preview_only=preview_only,
         base_dir=state.data_folder, recipe_reference=recipe.run_reference(),
@@ -2023,6 +2065,11 @@ def startup_nimbus(state: SessionState, source_manifest=None, markers=None, mask
         owner.outputs.append(result['triplet_export']['annotations'])
     if owner is not None and result.get('long_results'):
         owner.outputs.append(result['long_results'])
+    if owner is not None and result.get('training'):
+        owner.outputs.extend([result['training']['targets'],result['training']['plan']])
+        tuned=result.get('worker_result',{}).get('training')
+        if tuned:
+            owner.outputs.extend(tuned[key] for key in ('best_checkpoint','last_checkpoint','history'))
     if owner is not None and result.get('reports'):
         owner.outputs.extend([result['reports'][key] for key in ('predictions','metrics','summary')])
         owner.outputs.extend(result['reports']['files'])
