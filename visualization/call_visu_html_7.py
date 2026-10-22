@@ -496,6 +496,7 @@ def build_run_plan(df, obs, dfxy, scene_manifest, project_context, roi_mailbox=N
         ),
         "asset_type_catalog": asset_types,
         "asset_input_specs": list(meta.get("_viewer_asset_inputs", []) or []),
+        "normalization_floors": dict(meta.get("normalization_floors", {}) or {}),
     })
     if isinstance(threshold_store, dict):
         catalog["threshold_store"] = threshold_store
@@ -3157,7 +3158,7 @@ def write_scene_roi_artifacts(core, positions, overlay_context, scene_overlay, c
         return artifacts
     size = tuple(scene_overlay.get("display_size", [1024, 1024]))
     boundary_tag = _overlay_cache_tag(seg_file, [], [], [], [], size)
-    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + safe_tag(core, 60) + "_" + boundary_tag + ".js")
+    boundaries_path = os.path.join(cache_dir, "cell_boundaries_" + safe_tag(core, 24) + "_" + boundary_tag + ".js")
     if not os.path.isfile(boundaries_path):
         from collections import defaultdict
         cells = defaultdict(list)
@@ -3207,8 +3208,6 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
         scenes = sorted(list(set(slide_scene_series.iloc[positions].astype(str).tolist())), key=natural_sort_key)
         if len(scenes) == 1:
             slide_scene = scenes[0]
-    subset_id = str(subset_option.get("id", "")).strip()
-    scene_tag = safe_tag(slide_scene, 72) if slide_scene != "" else "noscene"
     seg_map = segmentation_by_slide_scene if isinstance(segmentation_by_slide_scene, dict) else {}
     seg_file = str(seg_map.get(slide_scene, "") or "").strip()
     if seg_file == "" and isinstance(scene_overlay, dict):
@@ -3224,7 +3223,7 @@ def build_subset_overlay_for_positions(core, subset_option, positions, overlay_c
     data_tag = _overlay_cache_tag(seg_file, positions, ids, xsub, ysub, expected_size)
     base = os.path.join(
         cache_dir,
-        safe_tag(str(core), 24) + "__" + scene_tag + "__" + safe_tag(subset_id, 96) + "__" + data_tag,
+        safe_tag(str(core), 24) + "__" + data_tag,
     )
     seg_out_path = base + "__seg.png"
     centroid_out_path = base + "__centroid.png"

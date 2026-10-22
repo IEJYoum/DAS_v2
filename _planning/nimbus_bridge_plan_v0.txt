@@ -7,6 +7,15 @@ Add Nimbus as a separate, deterministic marker-score runner in DAS. Reuse
 DAS source/config/recipe infrastructure, but do not alter the existing CNN
 classifier or require its label/split/training contracts.
 
+Implementation status (2026-10-21)
+---------------------------------
+home.nimbus, the isolated worker, manifest/pattern inputs, ROI selection, optional
+strict DAS triplet export and recipe/GUI tests are implemented. See the CURRENT
+guide _usage_guides/nimbus_bridge_v0.md and tests/test_nimbus_workflow.py.
+The model boundary is tested with a synthetic Nimbus package; a real one-ROI
+Nimbus/mIHC proof with pinned weights remains to be performed. The historical
+passes below describe the design, not a claim that real-model validation passed.
+
 Pass 0: pin the real Nimbus boundary
 ------------------------------------
 1. Inspect the locally cloned Nimbus-Inference package/notebook and install it

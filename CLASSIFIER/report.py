@@ -11,54 +11,8 @@ from support import io_adapter as io
 print = io.legacy_print
 from PIL import Image, ImageDraw, ImageFont
 
-# Indices follow config.CLASS_NAMES: IMMUNE magenta, EPI green, UNCLASSIFIED
-# orange, ARTIFACT red. This palette colors class maps/outlines, not the RGB input.
-COLORS = np.array([[255, 0, 255], [0, 255, 0], [255, 165, 0], [255, 0, 0]], np.uint8)
-# Deferred lineage expansion: make this palette/legends input/class-schema driven
-# together with the model/checkpoint migration, rather than appending a head alone.
-
-
-def score_cells(predictions, labels, class_names):
-    """Score only supplied truth rows; require a prediction for each labelled cell.
-
-    Macro-F1 includes every configured class, even those with no truth support
-    (whose F1 is zero here). Read per_class support alongside the headline score.
-    """
-    keys = ["scene_id", "cell_id"] if "scene_id" in labels else ["cell_id"]
-    unknown = (set(labels["class"]) | set(predictions.predicted_class)) - set(class_names)
-    if unknown:
-        raise ValueError(f"Metric received unknown classes: {sorted(unknown)}")
-    matched = labels.merge(predictions, on=keys, how="left", validate="one_to_one")
-    if matched.predicted_class.isna().any():
-        raise ValueError("Some labelled cells have no prediction")
-    confusion = np.zeros((len(class_names), len(class_names)), np.int64)
-    for truth, pred in matched[["class", "predicted_class"]].itertuples(index=False, name=None):
-        confusion[class_names.index(truth), class_names.index(pred)] += 1
-    metrics = metrics_from_confusion(confusion, class_names, len(predictions))
-    if "case_tag" in matched:
-        metrics["by_case"] = {}
-        for tag, rows in matched.groupby("case_tag"):
-            case_labels = rows[keys + ["class"]]
-            case_predictions = rows[keys + ["predicted_class"]]
-            metrics["by_case"][str(tag)] = score_cells(case_predictions, case_labels, class_names)
-    return metrics
-
-
-def metrics_from_confusion(confusion, class_names, predicted_cells):
-    """Shared scoring for in-memory tables and streamed source-ROI accumulators."""
-    confusion = np.asarray(confusion, dtype=np.int64)
-    per_class = {}
-    for i, cls in enumerate(class_names):
-        tp, support, called = int(confusion[i, i]), int(confusion[i].sum()), int(confusion[:, i].sum())
-        precision = tp / called if called else 0.0
-        recall = tp / support if support else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-        per_class[cls] = {"precision": precision, "recall": recall, "f1": f1, "support": support}
-    metrics = {"class_order": list(class_names), "confusion_matrix": confusion.tolist(),
-               "per_class": per_class, "macro_f1": float(np.mean([v["f1"] for v in per_class.values()])),
-               "accuracy": float(np.trace(confusion) / confusion.sum()) if confusion.sum() else 0.0,
-               "labelled_cells": int(confusion.sum()), "predicted_cells": int(predicted_cells)}
-    return metrics
+from support.cell_reporting import COLORS, score_cells, metrics_from_confusion, overlay, preview_overlay, cell_boxes, write_classification_images, write_confusion_matrix, report_subdirectory
+from support.cell_reporting import display_stain
 
 
 def reporting_metrics(metrics, class_names):
@@ -94,8 +48,10 @@ def class_rgb(targets):
 
 
 def composite(x):
-    # Epithelial blue, immune red, nucleus white. Display only.
-    return np.clip(np.stack([x[1], np.zeros_like(x[0]), x[2]], axis=-1) + x[0][..., None], 0, 1)
+    # Display only: stretch each available plane independently, using all pixels.
+    # Disk-backed scenes supply normalized cached planes; no model arrays change.
+    nuc,immune,epi=(display_stain(plane) for plane in x)
+    return np.clip(np.stack([immune, np.zeros_like(nuc), epi], axis=-1) + nuc[..., None], 0, 1)
 
 
 def cell_map(probabilities, mask, class_names):
@@ -106,41 +62,9 @@ def cell_map(probabilities, mask, class_names):
     return lut[mask]
 
 
-def overlay(image, mask, targets):
-    """Inner outlines at the supplied raster resolution, including touching IDs."""
-    rgb = image if image.ndim == 3 else np.repeat(image[..., None], 3, axis=-1)
-    rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
-    padded = np.pad(mask, 1)
-    edge = ((mask != padded[:-2, 1:-1]) | (mask != padded[2:, 1:-1])
-            | (mask != padded[1:-1, :-2]) | (mask != padded[1:-1, 2:]))
-    edge &= (mask > 0) & (targets >= 0)
-    rgb[edge] = COLORS[targets[edge]]
-    return rgb
-
-
-def preview_overlay(image, mask, targets, size):
-    """Resize imagery/label rasters FIRST, then draw one display-pixel boundaries.
-
-    Intensities use area averaging for shrinking. IDs and class indices use
-    the same nearest-neighbour coordinates, never interpolated label values.
-    Only display arrays change; native masks, calls and CSVs remain untouched.
-    """
-    width, height = size
-    if mask.shape == (height, width):
-        return overlay(image, mask, targets)
-    ys = np.minimum(((np.arange(height) + .5) * mask.shape[0] / height).astype(int), mask.shape[0] - 1)
-    xs = np.minimum(((np.arange(width) + .5) * mask.shape[1] / width).astype(int), mask.shape[1] - 1)
-    region = np.ix_(ys, xs)
-    resampling = Image.Resampling.BOX if height <= mask.shape[0] and width <= mask.shape[1] else Image.Resampling.BILINEAR
-    def resize(plane):
-        return np.asarray(Image.fromarray(np.asarray(plane, dtype=np.float32)).resize(size, resampling))
-    resized = resize(image) if image.ndim == 2 else np.stack([resize(image[..., c]) for c in range(image.shape[-1])], axis=-1)
-    return overlay(resized, mask[region], targets[region])
-
-
 def write_channels(planes, x, mask, targets, path, class_names, predicted_targets=None, title="", max_panel_px=None):
     """Stitch each scaled channel and a composite, with truth/prediction outline rows."""
-    panels = {**planes, "RGB composite": composite(x)}
+    panels = {**{name:display_stain(plane) for name,plane in planes.items()}, "RGB composite": composite(x)}
     rows = [("Truth", targets)]
     if predicted_targets is not None:
         rows.append(("Prediction", predicted_targets))
@@ -202,43 +126,11 @@ def write_native_roi(scene, probabilities, output_dir, class_names, title, prefi
     PNG title bars add height only; the ROI image is never resized. The companion
     slices whole-scene calls instead of recomputing decisions on partial cells.
     """
-    out = Path(output_dir)
-    sid = scene["metadata"]["scene_id"]
-    mask, truth = scene["mask"], scene["targets"]
-    calls = cell_map(probabilities, mask, class_names) if cell_targets is None else cell_targets
-    rgb = composite(scene["x"])
-    height, width = mask.shape
-    font = ImageFont.truetype(str(Path(matplotlib.get_data_path()) / "fonts/ttf/DejaVuSans.ttf"), 16)
-    paths = []
-    for kind in ("truth", "predictions", "errors"):
-        if kind == "errors":
-            targets = np.full(mask.shape, -1, np.int64)
-            targets[(truth >= 0) & (truth == calls)] = 1  # green
-            targets[(truth >= 0) & (truth != calls)] = 3  # red
-            image = overlay(rgb * .35, mask, targets)
-            legend = "Correct labelled cells: green | Incorrect: red | No truth: no outline"
-        else:
-            image = overlay(rgb, mask, truth if kind == "truth" else calls)
-            legend = "IMMUNE magenta | EPI green | UNCLASSIFIED orange | ARTIFACT red"
-        canvas = Image.new("RGB", (width, height + 84), (24, 24, 24))
-        draw = ImageDraw.Draw(canvas)
-        draw.text((8, 6), title, font=font, fill="white")
-        draw.text((8, 30), f"{kind.title()} | Native ROI {width} x {height}; image starts below this 84-pixel title bar",
-                  font=font, fill="white")
-        draw.text((8, 54), legend, font=font, fill="white")
-        canvas.paste(Image.fromarray(image), (0, 84))
-        path = out / f"{prefix}{sid}__roi_{kind}_native.png"
-        canvas.save(path)
-        paths.append(path)
-    th, tw = min(256, height), min(256, width)
-    y, x = (height - th) // 2, (width - tw) // 2
-    region = np.s_[y:y+th, x:x+tw]
-    path = out / f"{prefix}{sid}__companion_y{y}_x{x}.png"
-    write_channels({m: v[region] for m, v in scene["scaled"].items()},
-        scene["x"][:, y:y+th, x:x+tw], mask[region], truth[region], path, class_names,
-        predicted_targets=calls[region], title=f"{title} | companion x={x}:{x+tw}, y={y}:{y+th}; whole-ROI cell calls")
-    paths.append(path)
-    return paths
+    sid = scene['metadata']['scene_id']
+    calls = cell_map(probabilities, scene['mask'], class_names) if cell_targets is None else cell_targets
+    truth_name = scene['metadata'].get('label_column', 'provided cell labels')
+    return write_classification_images(composite(scene['x']), scene['mask'], calls, scene['targets'], output_dir,
+        scene_id=sid, truth_name=truth_name, prediction_name='DAS CNN', prefix=prefix)
 
 
 def write_debug(scene, prepared, predictions, output_dir, class_names, title=None, prefix="", max_panel_px=None):
@@ -337,17 +229,23 @@ def write_batch(batch, output_path, class_names, probabilities=None, class_weigh
 def write_prediction_report(scenes, predictions, output_dir, class_names, page_size=12, prefix="", title=""):
     """Export all calls and show EVERY labelled error across numbered PNG pages."""
     from CLASSIFIER.infer import report_correctness
-    from scipy.ndimage import find_objects
     if page_size < 1:
         raise ValueError("Error gallery page_size must be >= 1")
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     joined = report_correctness(predictions)
     joined.to_csv(out / f"{prefix}predictions.csv", index=False, encoding="utf-8-sig")
+    labelled = joined.loc[joined.labelled]
+    keys = ['scene_id', 'cell_id'] if 'scene_id' in joined else ['cell_id']
+    metrics = score_cells(joined[keys+['predicted_class']],
+                          labelled[keys+['true_class']].rename(columns={'true_class':'class'}), class_names)
+    write_confusion_matrix(metrics, out/f'{prefix}confusion_matrix.png',
+                           truth_name='provided cell labels', prediction_name='DAS CNN', title=title)
+    error_dir = report_subdirectory(out, 'errors')
     errors = joined[joined.labelled & ~joined.correct.fillna(False)].sort_values("certainty", ascending=False, kind="stable")
     lookup = {s["metadata"]["scene_id"]: s for s in scenes}
     # Whole-ROI scans and RGB construction happen once per scene, not per error.
-    cache = {sid: {"boxes": find_objects(lookup[sid]["mask"]),
+    cache = {sid: {"boxes": cell_boxes(lookup[sid]["mask"]),
                    "rgb": (composite(lookup[sid]["x"]) * 255).astype(np.uint8)}
              for sid in errors.scene_id.unique()}
     page_count = max(1, int(np.ceil(len(errors) / page_size)))
@@ -367,7 +265,7 @@ def write_prediction_report(scenes, predictions, output_dir, class_names, page_s
                 scene = lookup[record["scene_id"]]
                 cached = cache[record["scene_id"]]
                 cell_id = int(record["cell_id"])
-                box = cached["boxes"][cell_id - 1]
+                box = cached["boxes"].get(cell_id)
                 if box is None:
                     raise ValueError(f"Error cell {cell_id} absent from scene mask")
                 y0, y1 = max(0, box[0].start-5), min(scene["mask"].shape[0], box[0].stop+5)
@@ -375,10 +273,10 @@ def write_prediction_report(scenes, predictions, output_dir, class_names, page_s
                 cell = scene["mask"][y0:y1, x0:x1] == cell_id
                 ax.imshow(cached["rgb"][y0:y1, x0:x1])
                 ax.contour(cell, levels=[.5], colors="white", linewidths=.6)
-                ax.set_title(f"{record['scene_id']} / {cell_id}\n{record['true_class']} -> {record['predicted_class']}\np={record['certainty']:.2f}", fontsize=8)
+                ax.set_title(f"{record['scene_id']} / {cell_id}\nTRUTH: {record['true_class']}\nPREDICTION: {record['predicted_class']}\np={record['certainty']:.2f}", fontsize=8)
         caption = title or "Wrong labelled calls, highest certainty first"
         fig.suptitle(f"{caption} | page {page_number+1}/{page_count} | {len(errors):,} total errors")
-        paths.append(_save(fig, out / f"{prefix}errors{page_number}.png"))
+        paths.append(_save(fig, error_dir / f"{prefix}errors{page_number}.png"))
         if (page_number + 1) % 10 == 0 or page_number + 1 == page_count:
             print(f"  error pages written: {page_number+1}/{page_count}", flush=True)
     return paths

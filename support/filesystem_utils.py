@@ -84,10 +84,10 @@ def atomic_write_with_retry(
 
     def _write_once() -> str:
         final.parent.mkdir(parents=True, exist_ok=True)
-        tmp = final.with_name(final.name + ".tmp")
+        # A unique sibling avoids collisions when two GUI actions or processes
+        # publish the same cached artifact at the same time.
+        tmp = final.with_name(final.name + ".tmp." + uuid4().hex)
         try:
-            if tmp.exists():
-                tmp.unlink()
             writer(str(tmp))
             if require_nonempty and (not tmp.exists() or tmp.stat().st_size <= 0):
                 raise OSError("temporary output is empty: " + str(tmp))

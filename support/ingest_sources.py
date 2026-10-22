@@ -101,3 +101,22 @@ def source_display_id(path: str | Path, anchor: str | Path | None = None) -> str
         except (OSError, ValueError):
             pass
     return resolved.as_posix()
+
+
+def resolve_unique_source(root, pattern, tokens, *, base_dir=None) -> Path:
+    """Expand a root-relative filename pattern for one explicitly named scene.
+
+    Naming tokens come from the consumer/convention registry. This helper owns
+    only path resolution and the exactly-one-file policy, not lab filename rules.
+    """
+    root = resolve_native_path(root, base_dir=base_dir, must_exist=True, kind='directory')
+    if not isinstance(pattern,str) or not pattern.strip():
+        raise ValueError('Source filename pattern must be nonempty text')
+    try:
+        expanded = pattern.format(**tokens)
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f'Cannot expand source pattern {pattern!r}: {exc}') from exc
+    matches = expand_source_spec(str(root / expanded), want='files')
+    if len(matches) != 1:
+        raise ValueError(f'Expected one file for {root / expanded}; found {len(matches)}')
+    return matches[0]

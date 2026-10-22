@@ -141,18 +141,19 @@ def write_debug_summary(run_directory, status="complete", phase=None, error=None
             lines.append(f"{label}: {folder / filename}")
     for name in ("validation", "test"):
         target = folder / name
-        pngs = sorted(target.glob("*.png"))
+        pngs = sorted(target.rglob("*.png"))
         lines.append(f"{name} PNG count: {len(pngs)}")
-        for pattern, label in [("*roi_predictions_native.png", "Zoomable ROI"),
+        for pattern, label in [("*__prediction_native.png", "Zoomable ROI prediction"),
                                ("*companion*.png", "One-tile companion"),
                                ("*predictions.csv", "Excel table")]:
             files = sorted(target.glob(pattern))
             if files:
                 lines.append(f"  {label} (last filename): {files[-1]}")
     lines.extend(["", "Native ROI PNGs keep source pixels; an 84px title bar is added above them.",
+                  "Debug display only: per-plane all-pixel p95 stretch, gamma exponent 0.7; correctness background at 75% brightness.",
                   "CSV correct=True/False where truth exists; blank where unlabelled.",
                   "Filter labelled=True before calculating accuracy in Excel.",
-                  "Numbered errors0.png, errors1.png, etc. show all labelled errors; CSVs include all calls.",
+                  "errors/ contains numbered error-gallery pages. TRUTH, PREDICTION and CORRECTNESS are explicit in full-ROI PNG titles; CSVs include all calls.",
                   f"Checkpoint/export verification: {'PASS' if verification.get('passed') else 'not recorded yet'}"])
     if error:
         lines.extend(["", "FAILURE DETAILS", error])

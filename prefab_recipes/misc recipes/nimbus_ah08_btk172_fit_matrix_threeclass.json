@@ -1,0 +1,75 @@
+{
+  "name": "nimbus_ah08_btk172_fit_matrix_threeclass",
+  "description": "Exploratory three-class Nimbus decisions fitted for maximum Matrix agreement on this SAME ROI, not held-out validation. Reuse saved raw scores; shared CNN/Nimbus debug layout; no model execution.",
+  "steps": [
+    {
+      "do": "home.nimbus",
+      "with": {
+        "sources": [
+          {
+            "image_root": "Z:/Multiplex_IHC_studies/AlexGuimaraes/D10/Slides/ColorDecon",
+            "mask_root": "Z:/Multiplex_IHC_studies/AlexGuimaraes/D10/Slides/ColorDecon",
+            "marker_patterns": {
+              "CD45": "{slide}/Processed/{roi}/V*_CD45_{roi}.tif",
+              "PANCK": "{slide}/Processed/{roi}/V*_PANCK_{roi}.tif"
+            },
+            "mask_pattern": "{slide}/Processed/{roi}/label_V_reg_KB_AG_KPC_BTK172_D10_C03R1_H2B_ROI01.tif",
+            "scenes": [
+              {
+                "slide_scene": "BTK172ROI01",
+                "slide": "BTK172",
+                "roi": "ROI01"
+              }
+            ]
+          }
+        ],
+        "scenes": [
+          "BTK172ROI01"
+        ],
+        "markers": [
+          "CD45",
+          "PANCK"
+        ],
+        "mask_role": "cell",
+        "nimbus_python": "D:/NIMBUS_RUNTIME/Scripts/python.exe",
+        "output_root": "D:/NIMBUS_OUTPUT/AH08_BTK172",
+        "settings": {
+          "checkpoint": "V1.pt",
+          "device": "cpu",
+          "magnification": 20,
+          "batch_size": 1,
+          "test_time_aug": false,
+          "save_predictions": false
+        },
+        "triplet": {},
+        "preview_only": "n",
+        "reuse_result": "D:/NIMBUS_OUTPUT/AH08_BTK172/nimbus_20261022T180226Z_11716a0b35bc/result.json",
+        "reporting": {
+          "enabled": true,
+          "native": true,
+          "preview_max_px": 1400,
+          "error_gallery_limit": 36,
+          "triplet": {
+            "folder": "Z:/Multiplex_IHC_studies/AlexGuimaraes/D10/Analysis/IY/DAS/subset_001",
+            "stem": "AH_08.1",
+            "scene_column": "slide_scene",
+            "object_column": "ObjectNumber",
+            "object_table": "obs"
+          },
+          "truth_columns": [
+            "Primary Celltype: Matrix",
+            "Celltype: Gating"
+          ],
+          "marker_classes": {
+            "CD45": "IMMUNE",
+            "PANCK": "EPI"
+          },
+          "decision": {
+            "fit_column": "Primary Celltype: Matrix",
+            "grid_step": 0.001
+          }
+        }
+      }
+    }
+  ]
+}

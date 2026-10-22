@@ -1,0 +1,49 @@
+{
+  "name": "nimbus_ah08_btk172_cd45_panck",
+  "description": "AH08 BTK172 ROI01: pretrained Nimbus V1 CD45/PANCK scores only; no training. Original SVS AppMag=20, MPP=0.5022; processed ROI scale inherited from scan. CellObjects mask namespace; curated AH_08.1 triplet excludes 587 mask objects, so export is deliberately disabled.",
+  "steps": [
+    {
+      "do": "home.nimbus",
+      "with": {
+        "sources": [
+          {
+            "image_root": "Z:/Multiplex_IHC_studies/AlexGuimaraes/D10/Slides/ColorDecon",
+            "mask_root": "Z:/Multiplex_IHC_studies/AlexGuimaraes/D10/Slides/ColorDecon",
+            "marker_patterns": {
+              "CD45": "{slide}/Processed/{roi}/V*_CD45_{roi}.tif",
+              "PANCK": "{slide}/Processed/{roi}/V*_PANCK_{roi}.tif"
+            },
+            "mask_pattern": "{slide}/Processed/{roi}/label_V_reg_KB_AG_KPC_BTK172_D10_C03R1_H2B_ROI01.tif",
+            "scenes": [
+              {
+                "slide_scene": "BTK172ROI01",
+                "slide": "BTK172",
+                "roi": "ROI01"
+              }
+            ]
+          }
+        ],
+        "scenes": [
+          "BTK172ROI01"
+        ],
+        "markers": [
+          "CD45",
+          "PANCK"
+        ],
+        "mask_role": "cell",
+        "nimbus_python": "D:/NIMBUS_RUNTIME/Scripts/python.exe",
+        "output_root": "D:/NIMBUS_OUTPUT/AH08_BTK172",
+        "settings": {
+          "checkpoint": "V1.pt",
+          "device": "cpu",
+          "magnification": 20,
+          "batch_size": 1,
+          "test_time_aug": false,
+          "save_predictions": false
+        },
+        "triplet": {},
+        "preview_only": "n"
+      }
+    }
+  ]
+}

@@ -57,6 +57,7 @@ class HtmlSession:
     port: int = DEFAULT_PORT
     title: str = "DAS_v2 Frontend"
     log: list[str] = field(default_factory=list)
+    log_revision: int = 0
     pending_prompt: Optional[str] = None
     pending_answer: Optional[str] = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -252,6 +253,7 @@ def _set_active_session(session: HtmlSession | None) -> None:
 
 def _append_session_log(session: HtmlSession, text: str) -> None:
     session.log.append(str(text))
+    session.log_revision += 1
     if len(session.log) > MAX_SESSION_LOG_LINES:
         del session.log[: len(session.log) - MAX_SESSION_LOG_LINES]
 
@@ -275,6 +277,7 @@ def _build_handler(session: HtmlSession):
                         "backend_active": bool(session.server is not None),
                         "session_active": _ACTIVE_SESSION is session,
                         "log_count": len(lines),
+                        "log_revision": int(session.log_revision),
                         "render_log_limit": DEFAULT_RENDER_LOG_LIMIT,
                         "log": lines,
                         "progress_fraction": float(session.progress_fraction),
@@ -679,7 +682,7 @@ def _render_index(title: str) -> str:
     const form = document.getElementById("answerForm");
     const answer = document.getElementById("answer");
     const submitBtn = document.getElementById("submitBtn");
-    let lastCount = -1;
+    let lastLogRevision = -1;
     let lastPrompt = "";
     let lastPromptDisplay = "";
     let lastPromptPending = null;
@@ -966,10 +969,11 @@ def _render_index(title: str) -> str:
 
         const cap = Number(data.render_log_limit || 800);
         const visible = lines.length > cap ? lines.slice(lines.length - cap) : lines;
-        if (lines.length !== lastCount) {{
+        const logRevision = Number(data.log_revision ?? data.log_count ?? lines.length);
+        if (logRevision !== lastLogRevision) {{
           logEl.innerHTML = visible.map(t => `<div class="line">${{escapeHtml(t)}}</div>`).join("");
           logEl.scrollTop = logEl.scrollHeight;
-          lastCount = lines.length;
+          lastLogRevision = logRevision;
         }}
       }} catch (_err) {{
         if (seenBackend) {{

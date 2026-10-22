@@ -21,18 +21,20 @@ class ExplicitMultiplexDataset:
         self.fov_paths = list(self.rows)
         self.fovs = list(self.rows)
         self.channels = list(markers)
-        self.magnification = int(settings.get("magnification", 20))
+        self.magnification = float(settings.get("magnification", 20))
         self.clip_values = (0, 2)
         self.normalization_dict = self._normalization(settings)
 
     def get_channel(self, fov, channel):
-        image = np.squeeze(tifffile.imread(self.rows[fov]["markers"][channel]))
+        image = tifffile.imread(self.rows[fov]["markers"][channel])
         if image.ndim != 2:
             raise ValueError(f"{fov}/{channel}: expected a 2D TIFF")
+        if not np.isfinite(image).all() or image.min()<0:
+            raise ValueError(f'{fov}/{channel}: expected finite nonnegative intensities')
         return image
 
     def get_segmentation(self, fov):
-        mask = np.squeeze(tifffile.imread(self.rows[fov]["mask"]))
+        mask = tifffile.imread(self.rows[fov]["mask"])
         if mask.ndim != 2:
             raise ValueError(f"{fov}: expected a 2D segmentation TIFF")
         return mask.astype(np.uint32, copy=False)
@@ -60,10 +62,17 @@ class ExplicitMultiplexDataset:
         return values
 
 
+def _write_result(path,result):
+    """Worker publication is separate from the host's validated completion."""
+    temporary=path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(result,indent=2,allow_nan=False)+'\n',encoding='utf-8')
+    temporary.replace(path)
+
+
 def main(request_path):
     request_path = Path(request_path).resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    output = request_path.with_name("result.json")
+    output = request_path.with_name("worker_result.json")
     try:
         from nimbus_inference.nimbus import Nimbus
         from nimbus_inference.utils import predict_fovs
@@ -92,10 +101,13 @@ def main(request_path):
                   "nimbus_version": importlib.metadata.version("Nimbus-Inference"),
                   "checkpoint": str(checkpoint_path),
                   "checkpoint_sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
-                  "normalization_dict": dataset.normalization_dict}
-        output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+                  "normalization_dict": dataset.normalization_dict,
+                  'normalization_scenes':dataset.fovs[:settings.get('normalization_subset',len(dataset.fovs))],
+                  'settings':settings,'resolved_device':str(app.device),
+                  'model_magnification':app.model_magnification}
+        _write_result(output,result)
     except BaseException as exc:
-        output.write_text(json.dumps({"status": "failed", "error": f"{type(exc).__name__}: {exc}"}, indent=2) + "\n", encoding="utf-8")
+        _write_result(output,{"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
         raise
 
 

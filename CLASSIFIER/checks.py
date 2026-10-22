@@ -268,7 +268,7 @@ def check_full_coverage():
         with Image.open(paths[1]) as native:
             assert native.size == (300, 344)  # original image pixels + title bar
         with Image.open(paths[-1]) as companion:
-            assert companion.getpixel((0, 388 + 118)) == tuple(report.COLORS[0])
+            assert companion.getpixel((256, 84 + 118)) == tuple(report.COLORS[0])
     print("PASS: full coverage, far edges, seam-cell aggregation, padding and nullable correct flags", flush=True)
 
 
@@ -318,6 +318,8 @@ def check_error_pages():
         with patch.object(report, "_save", side_effect=capture):
             paths = report.write_prediction_report([scene], rows, temporary, CLASS_NAMES, page_size=5)
         assert [p.name for p in paths] == ["errors0.png", "errors1.png", "errors2.png"]
+        assert all(p.parent.name == 'errors' for p in paths)
+        assert (Path(temporary)/'confusion_matrix.png').is_file()
         assert displayed == list(range(1, 14))
         exported = pd.read_csv(Path(temporary) / "predictions.csv")
         assert len(exported) == 15 and exported.correct.isna().sum() == 1

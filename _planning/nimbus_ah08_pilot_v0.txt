@@ -1,0 +1,149 @@
+AH08 Nimbus pilot -- 2026-10-22
+=============================
+Purpose: exercise the real pretrained Nimbus path through the registered
+home.nimbus DAS recipe action on one established mIHC ROI. No CNN classifier
+training, fine-tuning, biological phenotype calling, or threshold fitting.
+
+Project:
+Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Analysis\IY\DAS\subset_001
+Project recipes (also copied unchanged to prefab_recipes/misc recipes):
+  nimbus_ah08_btk172_cd45_panck_preview.json
+  nimbus_ah08_btk172_cd45_panck.json
+
+Inputs: original on-share processed CD45 and PANCK 2D TIFFs; BTK172 ROI01;
+3983 x 3983; 31,974 nonzero segmentation object IDs. The mask is the original
+CellObjects label_V_reg_KB_AG_KPC_BTK172_D10_C03R1_H2B_ROI01.tif, not a
+classifier cache or newly generated segmentation. mask_role=cell describes
+that CellObjects namespace; it does not modify mask extents.
+The CD45 source SVS records AppMag=20, MPP=0.5022. Registered and processed
+ROIs have the same 3983 x 3983 grid. The pilot assumes the ROI extraction
+retained native scan spacing; processed TIFFs do not independently record a
+reliable physical pixel size (the generic mask TIFF tags imply 1 um/px).
+Confirm extraction scale before quantitative benchmarking across microscopes.
+
+Runtime:
+  DAS: C:\Users\youm\Anaconda3\envs\das-v2\python.exe
+  Isolated Nimbus venv: D:\NIMBUS_RUNTIME\Scripts\python.exe
+  Package: Nimbus-Inference==0.0.5 (pip); dependencies frozen in runtime.
+  CPU, batch size 1, no test-time augmentation, no saved prediction images.
+  The unchanged V1.pt checkpoint was downloaded from the upstream HF repo
+  JLrumberger/Nimbus-Inference at revision
+  3affc9e774d68408701e44ed6136b1e13503c639.
+  SHA256 0651a3852fbafc03be415a1ec80ef947cc1913a081cf0bc649301ade887a82a9
+  Download provenance: runtime Lib/site-packages/nimbus_inference/assets/
+  V1.provenance.json. Package files are outside the DAS environment.
+
+Normalization: Nimbus adapter mean positive-pixel 99.9th quantile, computed
+per marker on the selected ROI, divide and clip to [0,1]. This does not reuse
+classifier supersignals or classifier percentile normalization. Source
+magnification 20, upstream model magnification 10; Nimbus handles resizing.
+
+Output root: D:\NIMBUS_OUTPUT\AH08_BTK172
+Every preview/inference creates its own nimbus_<timestamp>_<unique>/ folder.
+Open result.json for host-validated status, worker.log for progress/errors,
+worker_result.json for model/device/normalization provenance, and
+nimbus_scores_long.csv for per-object marker scores. Expect 63,948 rows
+(31,974 objects x 2 markers). Scores are not measured intensities or cell types.
+No accuracy claim: AH08 lineage labels are not binary marker-expression truth.
+
+Triplet wrinkle: AH_08.1 has 31,387 observations in this ROI, omitting 587 mask
+objects. Its full saved triplet has 1,097,898 observations. The current strict
+triplet export rejects mask objects absent from the triplet. This pilot uses
+triplet={} (scores only), retaining every mask prediction. Do not synthesize
+587 observations or silently drop predictions to satisfy an export check.
+An eventual optional subset-join policy should explicitly record excluded mask
+objects and preserve missing scores outside the selected ROI. Join using
+(slide_scene, mask_label) against (obs.slide_scene, obs.ObjectNumber), never
+CSV row order or bare cell ID. Do not overwrite existing biological labels.
+
+Rerun from DAS_v2 (PowerShell; run recipe is also selectable in GUI Recipes):
+& 'C:\Users\youm\Anaconda3\envs\das-v2\python.exe' run_recipe.py --project 'Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Analysis\IY\DAS\subset_001' --run nimbus_ah08_btk172_cd45_panck
+
+Preview recipe has identical sources/settings with preview_only=y. To expand,
+add explicit scene records and corresponding unique mask filename patterns;
+verify each source resolves exactly once. To score more proteins, declare their
+marker_patterns and include their names in markers. No training labels needed.
+
+Execution evidence
+------------------
+Preview passed: D:\NIMBUS_OUTPUT\AH08_BTK172\nimbus_20261022T175721Z_9b9e62a4cef8\result.json
+Isolated environment import and pip check passed. Frozen dependencies:
+D:\NIMBUS_RUNTIME\requirements-lock.txt
+Fifteen Nimbus workflow regression tests passed.
+Real run launched 2026-10-22 11:02:22 PDT, PID 18512, CPU threads limited to 4.
+Persistent launcher logs:
+D:\NIMBUS_OUTPUT\AH08_BTK172\launch_20261022_110222
+Scientific output folder:
+D:\NIMBUS_OUTPUT\AH08_BTK172\nimbus_20261022T180226Z_11716a0b35bc
+Runtime: CPU OMP/MKL threads=4; installed requirements-lock.txt records exact versions.
+
+Final outcome: COMPLETE. Recipe replay returned ok; DAS validated all 63,948
+finite scores, exact mask/marker coverage, and no duplicate keys. Actual model
+processing took about 100 seconds on CPU, plus normalization/import/validation.
+No checkpoint or ingest code changes were needed for the real test.
+
+Visual/evaluation follow-up -- 2026-10-22
+---------------------------------------
+Recipe: nimbus_ah08_btk172_debug_score (in project recipes and shipped misc
+examples). Reuses the original completed result without model execution; all
+scientific inputs/settings and input signatures must match. Creates a fresh run:
+D:\NIMBUS_OUTPUT\AH08_BTK172\nimbus_20261022T184139Z_e532113ce0ea
+
+Open validation/debug_summary.txt, then the companion, winner preview, native
+truth/error overlays and numbered galleries. All 19 PNGs, predictions.csv and
+metrics.json are under validation. This native-resolution report occupies about
+163 MB. native=false suppresses large native PNGs on future reports. Galleries
+are explicitly capped at 36 errors per scene/annotation; CSV retains every row.
+
+Scoring explicitly maps CD45 -> IMMUNE, PANCK -> EPI and forces a choice by
+highest score. This does not validate Other/Artifact detection or marker-specific
+positivity calibration. Scores remain raw; no thresholds were selected. Each
+annotation column is compared independently, using the shared alias registry.
+
+Matched triplet objects: 31,387. Mask objects absent from triplet: 587 (excluded
+from scoring, retained in raw predictions and reporting CSV).
+Primary Celltype: Matrix: 16,437 overlapping truth rows, accuracy 0.862262,
+macro-F1 0.853670; 14,950 non-overlapping truth rows excluded.
+Celltype: Gating: 13,853 overlapping truth rows, accuracy 0.923049,
+macro-F1 0.922993; 17,415 non-overlapping and 119 missing truth rows excluded.
+These use different denominators and annotation strategies; they are agreement
+estimates on this ROI, not a four-class accuracy claim or independent benchmark.
+
+Shared metrics, palettes, overlays, resize-before-outline behavior and compact
+object-box lookup now live in support/cell_reporting.py. CLASSIFIER/report.py
+reexports its previous API. Nimbus-specific interpretations/render orchestration
+live in data_extraction/nimbus_reports.py. GUI/recipe settings: reporting,
+reuse_result; optional triplet.unmatched_policy=exclude permits an additive
+intersection export without deleting any raw scores or original observations.
+
+Three-class exploratory fit -- 2026-10-22
+---------------------------------------
+User explicitly requested selecting cutoffs for best Matrix agreement on this
+ROI. Recipe nimbus_ah08_btk172_fit_matrix_threeclass reuses the original V1 raw
+scores, fits/report three classes, and records the optimistic evaluation scope.
+New report: D:\NIMBUS_OUTPUT\AH08_BTK172\nimbus_20261022T191308Z_7d829441780f
+CD45 cutoff=0.156; PANCK cutoff=0.420; inclusive >=. Neither passes -> Other;
+one passes -> that class; both pass -> highest raw passing score. Exact passing
+ties use marker order, not exclusion, so fitting cannot improve agreement by
+dropping hard tied cells. Tie/double-positive flags and raw scores are retained.
+Maximized accuracy over 1,002,001 cutoff pairs on a .001 grid, with deterministic
+lowest-cutoff tie breaking. Verified efficient search against brute force in tests.
+Matrix: 24,364 / 31,387 correct = 0.776245, macro-F1=0.778916.
+Gating: 24,665 / 31,268 correct = 0.788826 (same fitted cutoffs; not a new fit).
+587 unmatched mask objects excluded from fit/scoring; no unknown Matrix labels.
+decision.json and cutoff_search_profile.csv capture fit/objective/grid/provenance.
+This is not independent test accuracy. Future tests must copy fixed cutoffs,
+not refit on the test ROI.
+
+Shared report renderer now generates explicit prediction, truth__<reference>,
+correctness__<reference>, comparison preview and companion files for BOTH CNN
+and Nimbus. Confusion axes explicitly say TRUTH/reference (rows) and PREDICTION
+(columns); galleries moved to errors/ in new runs. Continuous Nimbus maps live
+under marker_scores/. See _usage_guides/cell_model_debug_v0.md.
+Updated comparison triplet and viewer:
+D:\NIMBUS_OUTPUT\AH08_COMPARISON\compare_20261022T191700Z_931cbc1f5fd1
+Adds Nimbus thresholded three-class calls while retaining the old forced-choice
+column. validation/das_baseline and validation/das_10epoch render the same shared
+full-ROI debug against Matrix; NIMBUS_REPORT_LOCATION.txt points to Nimbus debug.
+Three-class Matrix agreement on the same cells: baseline 0.7377, later 0.7500,
+Nimbus 0.7762 (fitted on this reference/ROI, so this comparison favors Nimbus).

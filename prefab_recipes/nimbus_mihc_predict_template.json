@@ -1,0 +1,27 @@
+{
+  "name": "nimbus_mihc_predict_template",
+  "description": "EDIT roots, ROI, exact mask, source magnification and pinned checkpoint. Preview first; scores only unless a triplet target is supplied.",
+  "steps": [{
+    "do": "home.nimbus",
+    "with": {
+      "sources": [{
+        "image_root": "D:/EDIT_MIHC_IMAGES",
+        "mask_root": "D:/EDIT_MIHC_MASKS",
+        "marker_patterns": {
+          "CD45": "{slide}/Processed/{roi}/V*_CD45_{roi}.tif*",
+          "PANCK": "{slide}/Processed/{roi}/V*_PANCK_{roi}.tif*"
+        },
+        "mask_pattern": "{slide}/Processed/{roi}/EDIT_EXACT_MASK_FILENAME.tif",
+        "scenes": [{"slide_scene": "EDIT_SLIDEROI01", "slide": "EDIT_SLIDE", "roi": "ROI01"}]
+      }],
+      "scenes": ["EDIT_SLIDEROI01"],
+      "markers": ["CD45", "PANCK"],
+      "mask_role": "cell",
+      "nimbus_python": "C:/EDIT_NIMBUS_ENV/python.exe",
+      "output_root": "D:/NIMBUS_OUTPUT",
+      "settings": {"checkpoint": "EDIT_PINNED_CHECKPOINT.pt", "device": "auto", "magnification": 20},
+      "triplet": {},
+      "preview_only": "y"
+    }
+  }]
+}

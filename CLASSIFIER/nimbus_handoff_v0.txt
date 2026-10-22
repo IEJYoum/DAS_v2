@@ -444,3 +444,59 @@ Optimizer-only ETA was about 2.1 hours; final reports/verification and all-ROI
 deployment/export remain afterward. This is not a completed-result claim.
 Do not alter/restart this run as part of Nimbus work. This reply changes only
 the handoff document, not scientific code, recipes, environments or running jobs.
+
+
+Nimbus patch update -- 2026-10-21 (after the bridge implementation/review)
+-----------------------------------------------------------------------
+The DAS bridge now exists at data_extraction/nimbus_bridge.py with the isolated
+data_extraction/nimbus_worker.py. The earlier reply's proposed action is now the
+registered home.nimbus action. Read _usage_guides/nimbus_bridge_v0.md and
+prefab_recipes/nimbus_mihc_predict_template.json for CURRENT answers and examples.
+
+The review fixes and operability work are implemented:
+  * GUI settings use ordinary routed checkpoint/device/magnification prompts;
+    no freehand settings JSON. Omitted headless settings get validated defaults.
+    Preview needs neither Nimbus Python nor DAS's machine pixel-size preference.
+  * Either source_manifest (explicit mapping/extraction result) OR inline sources
+    with image_root/mask_root, marker_patterns/mask_pattern and named scenes.
+    Top-level scenes selects ROIs BEFORE unselected-file/marker checks. Shared
+    ingest_sources.resolve_unique_source owns pattern expansion/uniqueness.
+  * Declared mask roles must match; no silent cell/nucleus override. The current
+    bridge still accepts individual single-plane TIFFs, not general ChannelSource
+    dictionaries or OME-channel selection. Do not claim that deferred support.
+  * Runtime failures mark the result failed; interruption stops the worker.
+    worker_result.json is separate from DAS's validated result.json completion.
+    Model/version/hash, actual normalization scenes/factors and settings are saved.
+  * Optional triplet={folder,stem,scene_column,object_column,object_table} exports
+    a NEW triplet with numeric nimbus_score_<marker> features and nimbus_predicted
+    observations. Shared support/triplet_annotations.py owns strict key loading/
+    alignment using the central triplet loader. Original labels/intensities/coords
+    remain; unmatched original rows stay blank. No live-session replacement.
+  * Recipe outputs include score and triplet paths; project config can remember
+    folder/pattern sources for GUI reuse. No label CSV/training splits are needed.
+
+tests/test_nimbus_workflow.py exercises the actual subprocess and worker module
+against a synthetic Nimbus package, plus GUI collection/headless replay, ROI
+filtering, duplicate/missing IDs, failures, cancellation and additive exports.
+No actual Nimbus weights or real mIHC inference were run for this patch. Next:
+fill the preview-first prefab with real mIHC source paths, a confirmed mask role
+and source magnification; inspect one ROI, then run the pinned real Nimbus model.
+No existing classifier job was inspected or modified by this patch.
+
+2026-10-22: Nimbus interpretation/reporting follow-up
+--------------------------------------------------
+Real AH08 test and saved-score report recipes are in prefab_recipes/misc recipes:
+nimbus_ah08_btk172_cd45_panck.json and nimbus_ah08_btk172_debug_score.json.
+The latter reuses scores, checks original inputs/settings/signatures, and writes
+a fresh run folder. See _planning/nimbus_ah08_pilot_v0.txt for exact evidence.
+home.nimbus now records reporting and reuse_result answers. GUI offers visual
+debug, optional saved-triplet scoring, and completed-result reuse; reuse can
+recover the source inventory/settings rather than requiring re-entry.
+Data_extraction/nimbus_reports.py owns forced highest-marker-score interpretation,
+independent per-column overlap evaluation and titled PNG/CSV reports. This is
+not the trained four-class classifier. Unknown/out-of-overlap truth, ties and
+unmatched objects are reported as exclusions, never converted into negatives.
+Pure CNN metrics/outlines/palette/object boxes were extracted to
+support/cell_reporting.py; CLASSIFIER/report.py keeps existing exports. Optional
+triplet.unmatched_policy=exclude retains raw results and exports only matched
+annotations. All original triplet rows remain; coverage is explicit.

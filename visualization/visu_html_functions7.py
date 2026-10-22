@@ -40,6 +40,7 @@ READY_FN = "READY"
 RUNS_DIRNAME = "viewer_runs"
 POOL_DIRNAME = "_asset_pool"
 POOL_REGISTRY_FN = "asset_pool_registry.json"
+DEFAULT_CHANNEL_NORMALIZATION = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0, scale_floor=0.0)
 SOURCE_STAGE_MODE = "link"  # "link" (hardlink/symlink fallback) or "copy"
 CHANNEL_COLORS = [
     (255, 60, 60),
@@ -66,12 +67,15 @@ def clamp_u8(x):
     return np.clip(x, 0, 255).astype(np.uint8)
 
 
-def norm_cycif(arr, out_lo=20, out_hi=200, p=99, gamma=1.0):
+def norm_cycif(arr, out_lo=20, out_hi=200, p=99, gamma=1.0, scale_floor=0.0):
+    scale_floor = float(scale_floor)
+    if not np.isfinite(scale_floor) or scale_floor < 0:
+        raise ValueError("normalization scale_floor must be finite and nonnegative")
     a = np.asarray(arr).astype(np.float32)
     hi = np.percentile(a, p)
     if hi <= 0:
         return np.zeros_like(a, dtype=np.uint8)
-    x = np.clip(a / hi, 0, 1)
+    x = np.clip(a / max(hi, scale_floor), 0, 1)
     if gamma != 1.0:
         x = x ** (1.0 / gamma)
     y = out_lo + x * (out_hi - out_lo)
@@ -89,6 +93,8 @@ def is_channel_source_spec(value):
 
 def safe_imread(fp, Norm=True, **kw):
     if isinstance(fp, dict) and str(fp.get("source_kind", "")) == "cached_png":
+        if Norm and float(kw.get("scale_floor", 0)) > 0:
+            raise ValueError("A normalization floor requires the original TIFF, not a cached PNG")
         with Image.open(str(fp.get("path", ""))) as im:
             a = np.array(im)
         Norm = False
@@ -118,10 +124,11 @@ def write_viewer_plan(catalog, outdir=None, norm_kw=None):
     if len(source_specs) > 0 and recorded_specs != source_specs:
         registry["assets"] = {}
     if norm_kw is None:
-        norm_kw = dict(out_lo=0, out_hi=255, p=99.7, gamma=1.0)
+        norm_kw = dict(DEFAULT_CHANNEL_NORMALIZATION, marker_floors=catalog.get("normalization_floors", {}))
     report = {
         "status": "building",
         "run_dir": os.path.abspath(run_dir),
+        "normalization": norm_kw,
         "features": {
             "core_images": {"status": "pending"},
             "figures": {"status": "pending", "requested": len(list(catalog.get("figure_entries", []) or [])), "written": 0, "skipped": []},
@@ -405,6 +412,7 @@ def make_viewer_data(catalog, built_core_tiles, figure_entries=None):
         "subset_options": catalog.get("subset_options", {}),
         "subset_overlays": catalog.get("subset_overlays", {}),
         "overlay_backend": catalog.get("overlay_backend", {}),
+        "normalization_floors": catalog.get("normalization_floors", {}),
         "roi_data": catalog.get("roi_data", {}),
         "roi_mailbox": catalog.get("roi_mailbox", {}),
         "threshold_store": catalog.get("threshold_store", {}),
@@ -754,6 +762,13 @@ def color_for_marker(marker):
 
 
 def ensure_channel_asset(tiff_path, marker, registry, norm_kw, paths, core_name=""):
+    requested_norm = dict(norm_kw)
+    marker_floors = requested_norm.pop("marker_floors", {})
+    channel_norm = dict(DEFAULT_CHANNEL_NORMALIZATION)
+    channel_norm.update(requested_norm)
+    channel_norm["scale_floor"] = float(marker_floors.get(str(marker), channel_norm["scale_floor"]))
+    if not np.isfinite(channel_norm["scale_floor"]) or channel_norm["scale_floor"] < 0:
+        raise ValueError("Invalid normalization floor for marker: " + str(marker))
     sig = file_sig(tiff_path)
     core_tag = canonical_core_tag(core_name)
     slide_scene = str(core_name or "").strip()
@@ -762,6 +777,9 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, paths, core_name=
     tma_key = safe_tag(tma_tag, 24) if tma_tag != "" else ""
     mark_key = safe_tag(marker, 40)
     key = "ch|" + sig + "|" + mark_key + "|" + tma_key + "|" + core_key
+    # Retain existing default PNGs; changed display settings get their own assets.
+    if channel_norm != DEFAULT_CHANNEL_NORMALIZATION:
+        key += "|norm=" + json.dumps(channel_norm, sort_keys=True)
 
     assets = registry["assets"]
     if key in assets:
@@ -771,7 +789,7 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, paths, core_name=
             return rel, key
 
     try:
-        arr = safe_imread(tiff_path, Norm=True, **norm_kw)
+        arr = safe_imread(tiff_path, Norm=True, **channel_norm)
         arr = np.asarray(arr)
         arr = np.squeeze(arr)
         if arr.ndim != 2:
@@ -801,7 +819,8 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, paths, core_name=
                 out_abs,
                 lambda tmp_path: Image.fromarray(g, mode="L").save(tmp_path, format="PNG"),
                 description="channel PNG write",
-                max_minutes=0,
+                retry_seconds=1,
+                max_minutes=1,
                 require_nonempty=True,
             )
         else:
@@ -816,6 +835,7 @@ def ensure_channel_asset(tiff_path, marker, registry, norm_kw, paths, core_name=
         "core": core_tag,
         "slide_scene": slide_scene,
         "marker": str(marker),
+        "normalization": channel_norm,
         "mode": "L"
     }
     source_spec = source_json(tiff_path)

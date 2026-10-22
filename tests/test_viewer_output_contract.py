@@ -381,6 +381,7 @@ class ViewerOutputContractTests(unittest.TestCase):
             self.assertEqual(report["scenes"]["SceneA"]["matched_id_count"], 4)
             for subset_id in ["celltype_a", "celltype_b"]:
                 path = overlays["all_data__all_data"]["Celltype"][subset_id]["SceneA"][0]
+                self.assertLessEqual(len(Path(path).name), 50)
                 with Image.open(path) as overlay:
                     self.assertEqual(overlay.size, (8, 8))
 

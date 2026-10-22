@@ -1,5 +1,11 @@
 # Run the prepared test and take over the code
 
+Current CNN/Nimbus report naming is documented in
+[cell_model_debug_v0.md](../_usage_guides/cell_model_debug_v0.md): native
+PREDICTION, TRUTH/reference and CORRECTNESS maps, shared confusion matrices,
+and numbered gallery pages under `errors/`. Older paths below describe the
+historical runs that produced them.
+
 **Current entry point:** edit `run_project.py` and press Run. See
 [RUN_PROJECT.md](RUN_PROJECT.md) for shared I/O paths, glob patterns and adapters.
 Defaults now tune the frozen AH08 model on the larger BCC selection. For the previous training experiment choose

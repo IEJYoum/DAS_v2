@@ -1853,16 +1853,89 @@ def startup_cell_classifier(state: SessionState, mode=None, sources=None, checkp
 
 
 def startup_nimbus(state: SessionState, source_manifest=None, markers=None, mask_role=None,
-                  nimbus_python=None, output_root=None, settings=None, preview_only=None):
+                  nimbus_python=None, output_root=None, settings=None, preview_only=None,
+                  sources=None, scenes=None, triplet=None, reporting=None, reuse_result=None):
     """Recipe-aware wrapper for the separate Nimbus marker-expression runtime."""
-    from support.project_config import load_project_settings, save_project_settings
+    import json
+    from support.project_config import load_project_settings, save_project_settings, select_project_path
     from support.shared_utils import flexMenu
 
     values, _ = load_project_settings(state.data_folder)
 
+    try:
+        previous_sources=json.loads(values.get('nimbus_sources','[]'))
+    except (ValueError,TypeError):
+        previous_sources=[]
+    reuse_patterns=False
+
     def pick_source_manifest():
+        nonlocal reuse_patterns
+        choices=['Image folders and filename patterns','Existing source JSON / extraction result']
+        if previous_sources:
+            choices.append('Reuse saved folder/pattern sources')
+        selected=menu_index('Nimbus input source',choices)
+        reuse_patterns=selected==2
+        if selected in (0,2):
+            return ''
         return checkChange(values.get("nimbus_source_manifest", ""),
                            "Nimbus source JSON or feature-extraction result.json", input_fn=io.iget)
+
+    def pick_sources():
+        if reuse_patterns:
+            return deepcopy(previous_sources)
+        image=select_project_path('', 'Nimbus image root',base_dir=state.data_folder,
+            must_exist=True,kind='directory',interactive=True,input_fn=io.iget,print_fn=io.iprint)
+        mask=select_project_path(state.segmentation_root or image,'Nimbus mask root',base_dir=state.data_folder,
+            must_exist=True,kind='directory',interactive=True,input_fn=io.iget,print_fn=io.iprint)
+        names=flexMenu('Marker name to score',input_fn=io.iget)
+        patterns={name:checkChange('{scene_id}/*'+name+'*.tif*',name+' image pattern',input_fn=io.iget) for name in names}
+        mask_pattern=checkChange('{scene_id}/*label*.tif*','Nimbus mask pattern',input_fn=io.iget)
+        rows=flexMenu('ROI name (scene_id); use recipes for extra slide/roi tokens',input_fn=io.iget)
+        return [dict(image_root=str(image),mask_root=str(mask),marker_patterns=patterns,
+                     mask_pattern=mask_pattern,scenes=rows)]
+
+    def pick_triplet():
+        selected=menu_index('Nimbus DAS export',['Scores only','Save a new annotated DAS triplet'])
+        if selected!=1:
+            return {}
+        folder=checkChange(str(state.data_folder),'Saved triplet folder',input_fn=io.iget)
+        stem=checkChange(state.stem,'Saved triplet stem',input_fn=io.iget)
+        return dict(folder=folder,stem=stem,
+            scene_column=checkChange('slide_scene','Triplet scene column',input_fn=io.iget),
+            object_column=checkChange('seg_label','Triplet numeric mask-ID column',input_fn=io.iget),
+            object_table=checkChange('obs','Triplet object table (obs/df/dfxy/index)',input_fn=io.iget),
+            unmatched_policy='exclude' if menu_index('Mask objects missing from triplet',
+                ['Exclude from export; preserve raw scores','Require every mask object in triplet'])==0 else 'error')
+
+    def pick_reporting():
+        choice=menu_index('Nimbus visual debug / scoring',
+            ['Visual debug only','Visual debug and compare saved triplet labels','Disable reports'])
+        if choice==2:
+            return {'enabled':False}
+        if choice!=1:
+            return {}
+        target=dict(folder=checkChange(str(state.data_folder),'Truth triplet folder',input_fn=io.iget),
+                    stem=checkChange(state.stem,'Truth triplet stem',input_fn=io.iget),
+                    scene_column=checkChange('slide_scene','Truth scene column',input_fn=io.iget),
+                    object_column=checkChange('seg_label','Truth mask-ID column',input_fn=io.iget),
+                    object_table=checkChange('obs','Truth object table',input_fn=io.iget))
+        columns=flexMenu('Truth obs column to compare (each scored separately)',input_fn=io.iget)
+        names=markers or list(dict.fromkeys(m for source in sources for m in source.get('marker_patterns',{})))
+        if not names:
+            names=flexMenu('Selected Nimbus marker to map to a cell class',input_fn=io.iget)
+        mapping={m:checkChange('','Class represented by '+m+' (e.g. IMMUNE/EPI)',input_fn=io.iget) for m in names}
+        rule=menu_index('Nimbus cell-class decision', ['Highest score (forced choice)',
+            'Marker cutoffs; neither positive is Other','Fit cutoffs to a truth column (exploratory)'])
+        decision={}
+        if rule==1:
+            decision={'thresholds':{m:float(checkChange('0.5',m+' cutoff',input_fn=io.iget)) for m in names}}
+        elif rule==2:
+            decision={'fit_column':checkChange(columns[0] if columns else '',
+                'Truth column for maximum-agreement fitting',input_fn=io.iget)}
+            io.iprint('Cutoffs will be fitted on the selected ROI labels. Agreement is optimistic, not held-out validation.')
+        else:
+            io.iprint('Highest-score comparison forces a class even when all scores are low.')
+        return dict(triplet=target,truth_columns=columns,marker_classes=mapping,decision=decision)
 
     def pick_markers():
         return flexMenu("Nimbus marker name (blank uses all manifest markers)", input_fn=io.iget)
@@ -1885,38 +1958,74 @@ def startup_nimbus(state: SessionState, source_manifest=None, markers=None, mask
                            "Nimbus output root", input_fn=io.iget)
 
     def pick_settings():
-        default = {"checkpoint": "latest", "device": "auto", "batch_size": 1,
-                   "test_time_aug": False, "input_shape": [1024, 1024],
-                   "magnification": 20, "normalization_quantile": 0.999,
-                   "normalization_subset": 50, "save_predictions": False}
-        raw = checkChange(json.dumps(default), "Nimbus settings JSON", input_fn=io.iget)
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise recipe.RecipeError(f"Nimbus settings must be valid JSON: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise recipe.RecipeError("Nimbus settings must be a JSON object")
-        return parsed
+        # Routine GUI choices are ordinary routed prompts; advanced controls
+        # remain named recipe settings, without asking the user to edit JSON.
+        return dict(checkpoint=checkChange('latest','Nimbus checkpoint name (pin for comparisons)',input_fn=io.iget),
+            device=checkChange('auto','Nimbus device',input_fn=io.iget),
+            magnification=float(checkChange('20','Source magnification (confirm acquisition)',input_fn=io.iget)))
 
+    reuse_result = recipe.ask('reuse_result',reuse_result if reuse_result is not None else ('' if io.is_headless() else None),
+        lambda: '' if menu_index('Nimbus scores',['Run model','Reuse a completed result.json'])==0 else
+            checkChange('','Completed Nimbus result.json',input_fn=io.iget))
+    if reuse_result:
+        previous_path=resolve_native_path(reuse_result,base_dir=state.data_folder,must_exist=True,kind='file')
+        previous=json.loads(Path(previous_path).read_text(encoding='utf-8'))
+        if previous.get('status')!='complete':
+            raise recipe.RecipeError('Reuse requires a completed Nimbus result.json')
+        if source_manifest is None and not sources:
+            source_manifest=str(previous_path)
+            sources=[]
+        if scenes is None:
+            scenes=[]
+        if markers is None:
+            markers=previous['markers']
+        if mask_role is None:
+            mask_role=previous['mask_role']
+        if settings is None:
+            settings=previous['settings']
+    if source_manifest is None and sources:
+        source_manifest=''
     source_manifest = recipe.ask("source_manifest", source_manifest, pick_source_manifest)
-    markers = recipe.ask("markers", markers, pick_markers)
+    sources = recipe.ask('sources', sources if sources is not None else ([] if source_manifest else None),pick_sources)
+    scenes = recipe.ask('scenes', scenes if scenes is not None else ([] if io.is_headless() else None),
+                        lambda:flexMenu('ROI to include (blank selects all source ROIs)',input_fn=io.iget))
+    markers = recipe.ask("markers", markers if markers is not None else ([] if io.is_headless() else None), pick_markers)
     mask_role = recipe.ask("mask_role", mask_role, pick_mask_role)
+    preview_only = recipe.ask("preview_only", preview_only if preview_only is not None else ('n' if io.is_headless() else None),
+        lambda:'y' if menu_index('Nimbus execution',['Preview sources','Run Nimbus'])==0 else 'n')
+    if nimbus_python is None and (preview_only=='y' or reuse_result or io.is_headless()):
+        nimbus_python=values.get('nimbus_python','')
     nimbus_python = recipe.ask("nimbus_python", nimbus_python, pick_python)
     output_root = recipe.ask("output_root", output_root, pick_output)
-    settings = recipe.ask("settings", settings, pick_settings)
-    preview_only = recipe.ask("preview_only", "n" if preview_only is None else preview_only)
+    settings = recipe.ask("settings", settings if settings is not None else ({} if io.is_headless() else None), pick_settings)
+    triplet = recipe.ask('triplet',triplet if triplet is not None else ({} if io.is_headless() else None),pick_triplet)
+    reporting = recipe.ask('reporting',reporting if reporting is not None else ({} if io.is_headless() else None),pick_reporting)
     if recipe.collecting():
         return state
     module = importlib.import_module("data_extraction.nimbus_bridge")
     owner = recipe.current_step()
-    product = module.run(source_manifest=source_manifest, markers=markers, mask_role=mask_role,
+    product = module.run(source_manifest=source_manifest, sources=sources,scenes=scenes,triplet=triplet,
+        reporting=reporting,reuse_result=reuse_result,
+        markers=markers, mask_role=mask_role,
         nimbus_python=nimbus_python, output_root=output_root, settings=settings, preview_only=preview_only,
         base_dir=state.data_folder, recipe_reference=recipe.run_reference(),
         output_callback=owner.outputs.append if owner is not None else None, print_fn=io.iprint)
-    if preview_only == "n":
+    result=json.loads(Path(product).read_text(encoding='utf-8'))
+    if result.get('status') != ('preflight' if preview_only=='y' else 'complete'):
+        raise recipe.RecipeError('Nimbus did not publish a successful result')
+    if preview_only == "n" and not reuse_result:
         save_project_settings(state.data_folder, {"nimbus_source_manifest": str(source_manifest),
             "nimbus_python": str(nimbus_python), "nimbus_output_root": str(Path(output_root)),
+            'nimbus_sources':json.dumps(sources),
             "nimbus_mask_role": str(mask_role)}, on_update=invalidate_project_config)
+    if owner is not None and result.get('triplet_export'):
+        owner.outputs.extend(result['triplet_export']['files'].values())
+        owner.outputs.append(result['triplet_export']['annotations'])
+    if owner is not None and result.get('long_results'):
+        owner.outputs.append(result['long_results'])
+    if owner is not None and result.get('reports'):
+        owner.outputs.extend([result['reports'][key] for key in ('predictions','metrics','summary')])
+        owner.outputs.extend(result['reports']['files'])
     io.iprint("Nimbus result:", product)
     return product
 
