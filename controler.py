@@ -1540,6 +1540,7 @@ def startup_prepare_data(state: SessionState) -> None:
         startup_import_rna_data,
         startup_spectral_flow_import,
         lambda state: perform_action(state, 'home.classifier'),
+        lambda state: perform_action(state, 'home.nimbus'),
         lambda state: perform_action(state, 'home.stain_correction'),
         lambda state: perform_action(state, 'home.feature_extraction'),
     ]
@@ -1551,6 +1552,7 @@ def startup_prepare_data(state: SessionState) -> None:
         "high-plex feature reduction (RNA path)",
         "Spectral deconvolution (Spectral flow path)",
         "CNN cell classification",
+        "Nimbus marker positivity (external model; recipes)",
         "stain correction (AF subtraction; recipes)",
         "feature extraction from corrected/raw images (recipes)",
     ]
@@ -1562,6 +1564,7 @@ def startup_prepare_data(state: SessionState) -> None:
         "Run the RNA / high-plex reduction path.",
         "Run the spectral flow import and deconvolution path.",
         "Run the central classifier with project paths and an explicit experiment mode.",
+        "Run Nimbus marker-expression inference from explicit image/mask scenes without changing CNN models or the live triplet.",
         "Preview explicit stain/AF pairs or subtract AF using shared recursive source discovery.",
         "Measure named corrected/raw stains using existing cell and nuclear segmentation masks.",
     ]
@@ -1847,6 +1850,75 @@ def startup_cell_classifier(state: SessionState, mode=None, sources=None, checkp
         write_json(product,result)
     io.iprint('Classifier result:', product)
     return out
+
+
+def startup_nimbus(state: SessionState, source_manifest=None, markers=None, mask_role=None,
+                  nimbus_python=None, output_root=None, settings=None, preview_only=None):
+    """Recipe-aware wrapper for the separate Nimbus marker-expression runtime."""
+    from support.project_config import load_project_settings, save_project_settings
+    from support.shared_utils import flexMenu
+
+    values, _ = load_project_settings(state.data_folder)
+
+    def pick_source_manifest():
+        return checkChange(values.get("nimbus_source_manifest", ""),
+                           "Nimbus source JSON or feature-extraction result.json", input_fn=io.iget)
+
+    def pick_markers():
+        return flexMenu("Nimbus marker name (blank uses all manifest markers)", input_fn=io.iget)
+
+    def pick_mask_role():
+        choices = ["cell", "nucleus"]
+        current = str(values.get("nimbus_mask_role", "cell")).strip().lower()
+        if current not in choices:
+            current = "cell"
+        selected = menu_index("Nimbus segmentation mask role", choices,
+                              option_descriptions=["Use the whole-cell mask and matching seg_label namespace.",
+                                                   "Use a nuclear mask only when its labels match downstream objects."])
+        return choices[selected] if selected is not None else current
+
+    def pick_python():
+        return checkChange(values.get("nimbus_python", ""), "Nimbus Python interpreter", input_fn=io.iget)
+
+    def pick_output():
+        return checkChange(values.get("nimbus_output_root", str(state.data_folder / "nimbus")),
+                           "Nimbus output root", input_fn=io.iget)
+
+    def pick_settings():
+        default = {"checkpoint": "latest", "device": "auto", "batch_size": 1,
+                   "test_time_aug": False, "input_shape": [1024, 1024],
+                   "magnification": 20, "normalization_quantile": 0.999,
+                   "normalization_subset": 50, "save_predictions": False}
+        raw = checkChange(json.dumps(default), "Nimbus settings JSON", input_fn=io.iget)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise recipe.RecipeError(f"Nimbus settings must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise recipe.RecipeError("Nimbus settings must be a JSON object")
+        return parsed
+
+    source_manifest = recipe.ask("source_manifest", source_manifest, pick_source_manifest)
+    markers = recipe.ask("markers", markers, pick_markers)
+    mask_role = recipe.ask("mask_role", mask_role, pick_mask_role)
+    nimbus_python = recipe.ask("nimbus_python", nimbus_python, pick_python)
+    output_root = recipe.ask("output_root", output_root, pick_output)
+    settings = recipe.ask("settings", settings, pick_settings)
+    preview_only = recipe.ask("preview_only", "n" if preview_only is None else preview_only)
+    if recipe.collecting():
+        return state
+    module = importlib.import_module("data_extraction.nimbus_bridge")
+    owner = recipe.current_step()
+    product = module.run(source_manifest=source_manifest, markers=markers, mask_role=mask_role,
+        nimbus_python=nimbus_python, output_root=output_root, settings=settings, preview_only=preview_only,
+        base_dir=state.data_folder, recipe_reference=recipe.run_reference(),
+        output_callback=owner.outputs.append if owner is not None else None, print_fn=io.iprint)
+    if preview_only == "n":
+        save_project_settings(state.data_folder, {"nimbus_source_manifest": str(source_manifest),
+            "nimbus_python": str(nimbus_python), "nimbus_output_root": str(Path(output_root)),
+            "nimbus_mask_role": str(mask_role)}, on_update=invalidate_project_config)
+    io.iprint("Nimbus result:", product)
+    return product
 
 
 def _default_stardist_input_folder(state: SessionState) -> Path:

@@ -66,6 +66,16 @@ MENUS = {
                    'training': ('mapping', 'epochs (null selects steps), steps, lr, batch_size, device, threads, seed, class_weighting/cap, marker_drop, gain_jitter, replay_fraction, log_every, validate_every. {} uses launcher defaults.'),
                    'inference': ('mapping', 'prediction_split=train/val/test/all; predict_all_after_training=true optionally predicts all configured ROIs using best.pt; export_triplet=true saves new DAS triplets for das_triplet sources; deployment_reports=true adds deployment PNGs (default false for all-ROI output). Also inference_tile_px/overlap, target_um_per_px, preview_max_px, error_gallery_limit, debug_scenes, report_classes. {} retains existing behavior.')
                }),
+        Action('home.nimbus', 'Nimbus marker positivity', 'controler:startup_nimbus',
+               'Run the external Nimbus image model on explicit TIFF/mask scene mappings; it writes additive marker scores and does not alter the live triplet.', {
+                   'source_manifest': ('path', 'Nimbus scene JSON or completed feature-extraction result.json. Relative paths use the active project.'),
+                   'markers': ('list', 'Marker names to score; [] uses every marker declared by the source manifest.'),
+                   'mask_role': ('text', 'cell or nucleus; must match the declared source mask and downstream seg_label namespace.'),
+                   'nimbus_python': ('path', 'Python interpreter in the separate Nimbus environment.'),
+                   'output_root': ('path', 'Parent for a new Nimbus run folder. Relative paths use the active project.'),
+                   'settings?': ('mapping', 'Optional checkpoint, device, batch_size, test_time_aug, input_shape, magnification, normalization_quantile, normalization_subset, save_predictions.'),
+                   'preview_only?': ('yes_no', 'y = resolve and validate sources only; n = run Nimbus in its separate environment.')
+               }),
         Action("home.stain_correction", "stain correction (AF subtraction)", "controler:startup_stain_correction",
                "Discover registered stains recursively, resolve explicit per-scene AF references, and preview or subtract.", {
                    "sources": ("list", "TIFF file/glob specifications. Use ** for recursion; relative paths use the active project."),

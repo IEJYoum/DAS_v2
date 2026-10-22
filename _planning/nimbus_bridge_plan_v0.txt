@@ -1,0 +1,89 @@
+﻿Nimbus Bridge Plan v0
+=====================
+
+Goal
+----
+Add Nimbus as a separate, deterministic marker-score runner in DAS. Reuse
+DAS source/config/recipe infrastructure, but do not alter the existing CNN
+classifier or require its label/split/training contracts.
+
+Pass 0: pin the real Nimbus boundary
+------------------------------------
+1. Inspect the locally cloned Nimbus-Inference package/notebook and install it
+   only in a separate Nimbus environment.
+2. Write down the exact package version, model/weight acquisition behavior,
+   callable API, accepted TIFF layouts, required segmentation-mask role, and
+   actual output schema. Do not code against README guesses.
+3. Run one manually configured ROI outside DAS. Confirm which marker channels
+   are valid inputs, whether DAPI/AF/QC channels are excluded, and whether
+   output cell IDs are original mask labels.
+
+Pass 1: thin, label-free DAS adapter
+------------------------------------
+1. Add a small Nimbus-specific source adapter. It receives explicit source
+   scenes: slide_scene, ChannelSource records, chosen mask path and declared
+   mask role. It uses existing support.path_compat, ingest_sources,
+   image_sources, image_conventions, project_config, io_adapter and filesystem
+   helpers; it does not import CLASSIFIER adapters/staging.
+2. Resolve and preflight all sources in DAS before launching Nimbus:
+   unique scene/marker names, readable images, 2D positive-label masks, exact
+   image/mask grids, explicit selected/excluded channels, and stable source
+   signatures. No first-match fallback.
+3. Serialize a self-contained request JSON. Launch a configurable Nimbus Python
+   interpreter with argument-array subprocess invocation. The child has no DAS
+   session/UI globals.
+4. Require a worker result JSON plus long-form output keyed by
+   (slide_scene, mask_label, marker). Record model/package/version, settings,
+   selected sources and durable logs in a new project/nimbus/run_<stamp> folder.
+5. Fail on child error, missing/invalid output, duplicate keys, or unexpected
+   key coverage. Preserve inputs and earlier runs.
+
+Pass 2: strict DAS publication
+------------------------------
+1. Build a narrow validated join: DAS object-table key is explicit
+   slide_scene + numeric segmentation-label column (normally seg_label), not
+   dataframe index and not parsed cellid.
+2. Pivot verified long results into additive outputs. Keep raw image-derived
+   features unchanged. Proposed names: numeric nimbus_score_<marker> in df and
+   optional categorical nimbus_call_<marker> in obs.
+3. Default policy for partial ROI selection: unselected rows remain missing;
+   selected scenes must meet the declared exact-coverage policy. Never silently
+   intersect or zero-fill.
+4. First artifact is an annotation CSV plus coverage/QC report. Adding a new
+   saved triplet or mutating the live session is optional and only after strict
+   join tests succeed.
+
+Pass 3: one action, same recipes
+--------------------------------
+1. Add one registered controller action: home.nimbus (or
+   home.marker_positivity), adjacent to but independent from home.classifier.
+2. Bind all action answers with literal recipe.ask calls, then return during
+   collection before source resolution, output creation, config saves or worker
+   launch.
+3. Add the action to the visible controller menu through perform_action; do not
+   add another direct menu/runtime route. Confirm the actual checkout's
+   classifier menu dispatch before changing it.
+4. Persist only path defaults (e.g. nimbus_python, nimbus_output_root) via
+   project_config; model/runtime science choices live in the recipe/request.
+5. Add a small prefab one-ROI recipe only after it runs interactively.
+
+Tests before broad use
+----------------------
+1. Two tiny scenes with repeated local IDs, shuffled result rows and shuffled
+   triplet index: prove joins are scene-qualified and preserve original order.
+2. Preflight failures: bad grids, duplicate marker names, missing markers,
+   wrong mask shape/role.
+3. Worker failures: nonzero exit, no result JSON, invalid output, interruption,
+   and paths with spaces.
+4. Publication failures: duplicate/missing/extra `(scene, label, marker)` rows,
+   absent seg_label, unmatched IDs, output-name collisions.
+5. One known real ROI: inspect output IDs and marker QC against current calls
+   before testing batches.
+
+Deliberate non-goals
+--------------------
+- No changes to CNN training, checkpoint schema, superclass normalization or
+  CLASSIFIER's labels/splits/caches.
+- No global generic manifest refactor until a second consumer proves the same
+  source semantics.
+- No source copying/renaming, LLM layer, or automatic biological cell typing.
