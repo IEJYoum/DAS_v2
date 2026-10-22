@@ -1,5 +1,7 @@
 """Recipe contracts shared by menus and inspection; action imports remain lazy."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from importlib import import_module
 import sys
