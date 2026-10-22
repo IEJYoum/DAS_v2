@@ -1,0 +1,149 @@
+Classifier recipe experiments and input reuse -- 2026-10-19
+=========================================================
+
+User intent
+-----------
+Follow-up: use convenient hardcoded preprocessing/label defaults, with deliberate
+editing available through ordinary DAS menus. Shared label shortcuts and an
+explicit alias registry are now implemented; avoid adding an elaborate new
+per-run preprocessing questionnaire. Record any fixed intensity-policy version
+and its actual parameters with checkpoints/experiments.
+
+Immediate focus: cheap operation through the existing DAS recipe/GUI action,
+without editing Python per experiment or duplicating large input/cache files.
+Compare normalization policies through new training, not only by changing the
+input distribution presented to an old checkpoint. Preserve informative relative
+intensity while suppressing unhelpful extreme low/high signals.
+
+Confirmed experiment directions:
+  A. Fresh AH08 mIHC training -> CycIF evaluation.
+  B. Fresh AH08 + CycIF training -> BCC evaluation.
+The user explicitly selected BCC, rather than another AH08 ROI, for experiment B.
+Keep BCC out of training, normalization-policy selection, and validation-based
+checkpoint selection. Do not initialize these comparisons from BCC-tuned weights.
+Use source-ROI splits; tiles inherit their ROI's split.
+
+Status: planning/source audit only for this follow-up. No new normalization
+training runs have been launched and no historical artifacts have been deleted.
+The original forward pilot remains the unchanged baseline.
+
+Existing architecture and missing controls
+-----------------------------------------
+home.classifier is a replayable action and GUI entry, with named mode, sources,
+checkpoint, output_root, training and inference answers. Both routes call the
+same run_project.main/engine. Sources are a list, allowing mixed triplet/CSV and
+manifest data with the existing three semantic channels and four output classes.
+train_test starts fresh; tune_test loads parent weights with a fresh optimizer;
+predict never trains. Each run produces a unique output folder and recipe record.
+
+Current exposed recipe controls do NOT yet include lower percentile, configurable
+normalization policy, persistent shared cache reuse, or report verbosity. Setting
+error_gallery_limit changes cells per page, not the number of errors exported.
+Parent predict/tune paths inherit preprocessing from the checkpoint; a changed
+policy must be explicit and saved with each freshly trained model/checkpoint.
+
+Avoid advertising proposed fields as runnable recipe syntax before implementing
+the action, pure validation, engine propagation and save/reload handling.
+
+Local staged images vs normalized arrays
+---------------------------------------
+Staging holds resampled but unnormalized marker TIFFs, integer masks, labels,
+scene metadata and ingest provenance. These can be reused across normalization
+experiments at the SAME working resolution. Changing pixel size/channel source
+requires a separate staging identity. Re-reading originals may be needed for a
+different resampling grid; repeatedly resampling a lossy working image is not an
+equivalent replacement for going back to its source.
+
+normalized_cache holds already transformed marker arrays, masks and an index.
+These arrays are not generally reusable under changed normalization: clipping
+loses information. Recompute normalized values from the unnormalized staged TIFFs.
+No network re-download or new copy of staged TIFFs is inherently necessary.
+The manifest adapter already bypasses restaging, but the ordinary launcher still
+creates a new per-run normalized cache. streaming.open_cache can read an existing
+index; automatic validated cache selection is not exposed through the recipe yet.
+
+Measured CycIF pilot disk allocation (MiB):
+  dataset (unnormalized staged inputs): 155.2
+  normalized_cache:                    155.0
+  test (PNGs, tables, galleries):        97.1
+  root run records:                      1.6
+
+Recommended extension: shared immutable staged sources, normalized caches keyed
+by source identity/resampling/channel selection/normalization policy, and unique
+run folders containing references, models, metrics, tables and requested previews.
+Masks need not be copied for each intensity policy. Short experiments may compute
+normalized arrays in memory from local staged images rather than persist a new
+full normalized cache. Training can reuse a policy-specific cache over epochs.
+Never reuse a clipped array for a different policy or change a historical cache
+in place. Cache lifetime/dependencies must be tracked before deleting run folders
+currently hosting inputs used by later manifests.
+
+Separate split/label metadata from reusable image arrays. In particular, the
+CycIF pilot scene is currently test; using its same images for development/train
+requires a new lightweight scene/split record and training coverage windows,
+without editing the old scene or copying all its TIFFs again.
+
+Source inventory and provenance locations
+----------------------------------------
+AH08 mIHC:
+  Cached whole-ROI manifest:
+    D:/CLASSIFIER_OUTPUT/AH08_real_inputs/dataset_full_roi/manifest.csv
+  Scenes: BTK153ROI01 train; BTK162ROI01 val; BTK172ROI01 test.
+  Original roots/column/patterns also remain in run_project.DATASETS['ah08'].
+  Frozen original checkpoint:
+    D:/CLASSIFIER_OUTPUT/baseline_AH08_only_20261013_174917_436166/best.pt
+  Original training run/provenance:
+    D:/CLASSIFIER_OUTPUT/20261013_141553_804757
+
+BCC mIHC:
+  Existing prepared data and original source settings:
+    D:/CLASSIFIER_OUTPUT/bcc_tune_test_20261014_125509_027412/
+      input_settings.json, source_inventory.csv, roi_splits.csv,
+      combined_manifest.csv, dataset/<ROI>/scene.json
+  combined_manifest has 99 rows: 53 train, 13 val, 33 test. It includes the old
+  AH08 training replay source; do not blindly reuse it as a BCC-only dataset.
+  A small selected manifest can reference existing BCC scene JSONs without copying
+  images; use only BCC ROIs and explicitly chosen splits. A prepared manifest's
+  embedded split metadata is authoritative under today's adapter.
+  Original roots/labels/patterns also remain in run_project.DATASETS['bcc'].
+
+CycIF BE-TMA:
+  Runnable baseline recipe:
+    prefab_recipes/classifier_be_tma_sceneA1_predict.json
+  Local staged manifest:
+    D:/CLASSIFIER_OUTPUT/be_tma_predict_20261019_135756_161255/dataset/manifest.csv
+  Run records:
+    D:/CLASSIFIER_OUTPUT/be_tma_predict_20261019_135756_161255/
+      source_settings.json, source_inventory.csv, roi_splits.csv,
+      dataset/<scene>/ingest_report.json, pilot_input_checks.json
+  Dataset UNC root:
+    //fortera-smb.ohsu.edu/EmiliLab/ChinData/Cyclic_Workflow/cmIF_2026-05-15_BE-TMA
+  Triplet: IY_Prepared/04_neigh_clustered_{df,obs,dfxy}.csv
+  Truth: obs['Primary Celltype: Matrix']; mask key: obs.cellid.
+  RegisteredImages/<slide_scene>; exact Segmentation/<slide>_CellposeSegmentation.
+  Shared registered_cellpose resolver; R3 DAPI/CD45/Ecad and nuc30 nucleus basins.
+  Original spacing 0.325 um/pixel; current staged working grid 0.5 um/pixel.
+  sceneA1 is already inspected: appropriate development/training material, not a
+  newly untouched final holdout. Stage additional CycIF ROIs only when needed.
+
+General provenance: new runs record source_settings.json, source_inventory.csv,
+per-scene ingest_report.json and scene.json, plus copied recipe/config and original
+source paths. Historical runs differ in filenames; the locations above were
+checked on this workstation. debug_summary.txt is an overview, not the complete
+source description. New shared-cache records should also identify local cache
+locations, cache keys and original files so agents can draft recipes cheaply.
+
+Normalization experiment controls to add before heavy execution
+--------------------------------------------------------------
+Expose explicit lower/upper percentile policy and reference pixel population
+through the recipe; preserve the current zero-background/99.5-positive-percentile
+default for old checkpoints. Candidate comparisons: current policy, P50-P99.5,
+and P50-P95, with identical training ROIs, seed, epoch budget and class handling.
+Decide/reference tissue pixels consistently; no per-cell or per-tile stretching.
+The learned model must see the same policy during training and inference.
+
+Expose lightweight reports: metrics/all-cell CSV + bounded previews by default
+for experiments; exhaustive galleries opt-in. Keep enough configuration/source
+provenance and fitted normalization statistics for exact interpretation.
+Keep GUI and recipes on the same action; do not introduce another experiment
+runner or a classifier-specific config/path persistence system.

@@ -1,0 +1,133 @@
+{
+  "ah08": {
+    "source": "Z:\\Multiplex_IHC_studies\\AlexGuimaraes\\D10\\Analysis\\IY\\DAS\\subset_001\\AH_08.1_obs - Copy.csv",
+    "policy": "intersection",
+    "selected_columns": [
+      "Primary Celltype: Matrix",
+      "Celltype: Gating",
+      "Subtype: Gating"
+    ],
+    "artifact_columns": [
+      "Primary Celltype: Matrix",
+      "Celltype: Gating",
+      "Subtype: Gating",
+      "Celltype: CLASSIFIER"
+    ],
+    "agreement_space": "IMMUNE/EPI/UNCLASSIFIED/ARTIFACT",
+    "agreement_threshold": 1.0,
+    "total_rows": 30806,
+    "supervised_rows": 22109,
+    "ignored_rows": 8697,
+    "disagreements": 8697,
+    "missing_source_labels": 0,
+    "artifact_rows": 14,
+    "changed_by_artifact_override": 14,
+    "class_counts": {
+      "EPI": 12787,
+      "UNCLASSIFIED": 5800,
+      "IMMUNE": 3508,
+      "ARTIFACT": 14
+    },
+    "registry": "support/label_conventions.py",
+    "resolved_mapping": {
+      "2: immune": "IMMUNE",
+      "3: epithelial": "EPI",
+      "1: endothelial": "UNCLASSIFIED",
+      "5: stromal": "UNCLASSIFIED",
+      "Other Cells": "UNCLASSIFIED",
+      "Immune other": "IMMUNE",
+      "T cells": "IMMUNE",
+      "Epithelial": "EPI",
+      "Endothelial": "UNCLASSIFIED",
+      "Myeloid": "IMMUNE",
+      "other non-immune": "UNCLASSIFIED",
+      "Other leukocyte": "IMMUNE",
+      "T cell": "IMMUNE",
+      "Tumor  epithelial": "EPI",
+      "Macrophage": "IMMUNE",
+      "APC": "IMMUNE",
+      "M2-like macrophage": "IMMUNE",
+      "Monocyte-like (CSF1R+)": "IMMUNE",
+      "M1-like macrophage": "IMMUNE",
+      "Artifact": "ARTIFACT",
+      "Hybrid macrophage": "IMMUNE",
+      "IMMUNE": "IMMUNE",
+      "EPI": "EPI",
+      "UNCLASSIFIED": "UNCLASSIFIED",
+      "ARTIFACT": "ARTIFACT"
+    },
+    "matching_previous_curated_cells": 30806
+  },
+  "cycif": {
+    "source": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\IY_Prepared\\04_neigh_clustered_obs.csv",
+    "policy": "single_convention",
+    "selected_columns": [
+      "Primary Celltype: Matrix"
+    ],
+    "artifact_columns": [
+      "Primary Celltype: Matrix"
+    ],
+    "agreement_space": "IMMUNE/EPI/UNCLASSIFIED/ARTIFACT",
+    "agreement_threshold": 1.0,
+    "total_rows": 160909,
+    "supervised_rows": 160909,
+    "ignored_rows": 0,
+    "disagreements": 0,
+    "missing_source_labels": 0,
+    "artifact_rows": 0,
+    "changed_by_artifact_override": 0,
+    "class_counts": {
+      "EPI": 77567,
+      "UNCLASSIFIED": 70514,
+      "IMMUNE": 12828
+    },
+    "registry": "support/label_conventions.py",
+    "resolved_mapping": {
+      "3: epithelial": "EPI",
+      "4: active fibroblast": "UNCLASSIFIED",
+      "2: immune": "IMMUNE",
+      "1: endothelial": "UNCLASSIFIED",
+      "5: stromal": "UNCLASSIFIED"
+    }
+  },
+  "bcc": {
+    "source": "Z:\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Liver_Lung_Project\\Analysis\\LiverLung_DBT_analysis\\LiverLLung_DBT_CSV\\Classified_CSV\\LiverLungBCCNuclei_001127ROI01.csv",
+    "policy": "single_convention",
+    "selected_columns": [
+      "class"
+    ],
+    "artifact_columns": [
+      "class"
+    ],
+    "agreement_space": "IMMUNE/EPI/UNCLASSIFIED/ARTIFACT",
+    "agreement_threshold": 1.0,
+    "total_rows": 13384,
+    "supervised_rows": 13384,
+    "ignored_rows": 0,
+    "disagreements": 0,
+    "missing_source_labels": 0,
+    "artifact_rows": 0,
+    "changed_by_artifact_override": 0,
+    "class_counts": {
+      "IMMUNE": 7080,
+      "UNCLASSIFIED": 5131,
+      "EPI": 1173
+    },
+    "registry": "support/label_conventions.py",
+    "resolved_mapping": {
+      "CD8 T cells": "IMMUNE",
+      "T-regulatory CD4 cells": "IMMUNE",
+      "CD4 T helper cells": "IMMUNE",
+      "B cells": "IMMUNE",
+      "Granulocytes": "IMMUNE",
+      "Monocyte": "IMMUNE",
+      "Macrophage": "IMMUNE",
+      "Mature DC": "IMMUNE",
+      "Immature DC": "IMMUNE",
+      "Immune Other": "IMMUNE",
+      "PanCK+": "EPI",
+      "aSMA+": "UNCLASSIFIED",
+      "Other Cells": "UNCLASSIFIED"
+    }
+  }
+}

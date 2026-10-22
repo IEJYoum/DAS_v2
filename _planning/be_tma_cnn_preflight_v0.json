@@ -1,0 +1,89 @@
+{
+  "scene_id": "hBE-TMA1-1_sceneA1",
+  "labelled_cells": 7687,
+  "total_cells": 160909,
+  "total_scenes": 20,
+  "duplicate_scene_cell_ids": 0,
+  "source_mask": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_nuc30_NucleiSegmentationBasins.tif",
+  "source_markers": {
+    "DAPI": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c1_ORG.tif",
+    "CD45": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c4_ORG.tif",
+    "Ecad": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c5_ORG.tif"
+  },
+  "source_shape": [
+    6111,
+    4491
+  ],
+  "mask_cell_ids": 8164,
+  "csv_ids_missing_from_mask": [],
+  "centroid_matching_cells": 7687,
+  "centroid_checked_cells": 7687,
+  "centroid_rounding": "nearest integer",
+  "source_truth_counts": {
+    "3: epithelial": 4224,
+    "4: active fibroblast": 1800,
+    "1: endothelial": 1177,
+    "2: immune": 436,
+    "5: stromal": 50
+  },
+  "source_um_per_px": 0.325,
+  "scale_provenance": "User supplied original OME metadata; registered TIFF does not retain OME metadata",
+  "checkpoint": "D:\\CLASSIFIER_OUTPUT\\baseline_AH08_only_20261013_174917_436166\\best.pt",
+  "checkpoint_sha256": "3ef8f47d56ae66a11f22ccaf4192da4e3aa3c70b163c8bc2d7c7fdba39e44ad0",
+  "image_shapes": {
+    "DAPI": [
+      6111,
+      4491
+    ],
+    "CD45": [
+      6111,
+      4491
+    ],
+    "Ecad": [
+      6111,
+      4491
+    ]
+  },
+  "target_um_per_px": 0.5,
+  "working_shape": [
+    3972,
+    2919
+  ],
+  "mask_ids_lost_in_resampling": [],
+  "channel_sanity_check": {
+    "CD45": {
+      "spearman_nuclear_mean_vs_prepared_feature": 0.9151163859656897,
+      "median_nuclear_intensity_by_truth": {
+        "1: endothelial": 5249.559099437148,
+        "2: immune": 11810.11372227316,
+        "3: epithelial": 6750.722951841759,
+        "4: active fibroblast": 5979.618744473917,
+        "5: stromal": 4642.268865107018
+      },
+      "median_prepared_feature_by_truth": {
+        "1: endothelial": 4630.325203252032,
+        "2: immune": 12684.919047767184,
+        "3: epithelial": 7180.748778887511,
+        "4: active fibroblast": 5649.251506750241,
+        "5: stromal": 3583.221435923829
+      }
+    },
+    "Ecad": {
+      "spearman_nuclear_mean_vs_prepared_feature": 0.9401432894567421,
+      "median_nuclear_intensity_by_truth": {
+        "1: endothelial": 457.0090909090909,
+        "2: immune": 467.6121986108561,
+        "3: epithelial": 2299.7105083705546,
+        "4: active fibroblast": 447.0699481865285,
+        "5: stromal": 391.2338407494145
+      },
+      "median_prepared_feature_by_truth": {
+        "1: endothelial": 450.73943661971833,
+        "2: immune": 479.9878680753626,
+        "3: epithelial": 3154.18802480916,
+        "4: active fibroblast": 435.98117093089127,
+        "5: stromal": 371.53145637018315
+      }
+    }
+  }
+}
