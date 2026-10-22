@@ -1,0 +1,814 @@
+{
+  "data_root": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA",
+  "csv_stem": "04_neigh_clustered",
+  "truth_column": "Primary Celltype: Matrix",
+  "rows": 160909,
+  "scene_count": 20,
+  "scenes": [
+    "hBE-TMA1-1_sceneA1",
+    "hBE-TMA1-1_sceneA2",
+    "hBE-TMA1-1_sceneA3",
+    "hBE-TMA1-1_sceneB1",
+    "hBE-TMA1-1_sceneB2",
+    "hBE-TMA1-1_sceneB3",
+    "hBE-TMA1-1_sceneC1",
+    "hBE-TMA1-1_sceneC2",
+    "hBE-TMA1-1_sceneC3",
+    "hBE-TMA1-1_sceneC4",
+    "hBE-TMA2-1_sceneA1",
+    "hBE-TMA2-1_sceneA2",
+    "hBE-TMA2-1_sceneA3",
+    "hBE-TMA2-1_sceneB1",
+    "hBE-TMA2-1_sceneB2",
+    "hBE-TMA2-1_sceneB3",
+    "hBE-TMA2-1_sceneC1",
+    "hBE-TMA2-1_sceneC2",
+    "hBE-TMA2-1_sceneC3",
+    "hBE-TMA2-1_sceneC4"
+  ],
+  "slide_counts": {
+    "hBE-TMA1-1": 82520,
+    "hBE-TMA2-1": 78389
+  },
+  "label_counts": {
+    "3: epithelial": 77567,
+    "4: active fibroblast": 39176,
+    "1: endothelial": 28917,
+    "2: immune": 12828,
+    "5: stromal": 2421
+  },
+  "duplicate_scene_cell_ids": 0,
+  "duplicate_row_keys": 0,
+  "xy_columns": [
+    "DAPI_X",
+    "DAPI_Y"
+  ],
+  "feature_columns": [
+    "registeredimages",
+    "Ki67_",
+    "PCNA_",
+    "ZEB1_",
+    "p53_",
+    "CD11c_",
+    "CD31_",
+    "CD45_",
+    "IBA1_",
+    "CAV1_",
+    "CD44_",
+    "CK19_",
+    "CK5_",
+    "Ecad_",
+    "HLA-DR_",
+    "MUC1_",
+    "MUC2_",
+    "MUC5AC_",
+    "MUC6_",
+    "Vim_",
+    "aSMA_",
+    "nuclei_area",
+    "nuclei_eccentricity",
+    "3: epithelial_Primary Celltype: Matrix_neighbors_50.0",
+    "4: active fibroblast_Primary Celltype: Matrix_neighbors_50.0",
+    "2: immune_Primary Celltype: Matrix_neighbors_50.0",
+    "1: endothelial_Primary Celltype: Matrix_neighbors_50.0",
+    "5: stromal_Primary Celltype: Matrix_neighbors_50.0"
+  ],
+  "sample_scene": "hBE-TMA1-1_sceneA1",
+  "sample_cells": 200,
+  "sample_xy_missing": 0,
+  "image_folder_missing_for_scenes": [],
+  "sample_image_headers": [
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R1_MUC1.MUC5AC.MUC2.MUC6_hBE-TMA1-1_sceneA1_c1_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R1_MUC1.MUC5AC.MUC2.MUC6_hBE-TMA1-1_sceneA1_c2_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R1_MUC1.MUC5AC.MUC2.MUC6_hBE-TMA1-1_sceneA1_c3_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R1_MUC1.MUC5AC.MUC2.MUC6_hBE-TMA1-1_sceneA1_c4_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R1_MUC1.MUC5AC.MUC2.MUC6_hBE-TMA1-1_sceneA1_c5_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R2_CK5.aSMA.Ki67.CK19_hBE-TMA1-1_sceneA1_c1_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R2_CK5.aSMA.Ki67.CK19_hBE-TMA1-1_sceneA1_c2_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R2_CK5.aSMA.Ki67.CK19_hBE-TMA1-1_sceneA1_c3_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R2_CK5.aSMA.Ki67.CK19_hBE-TMA1-1_sceneA1_c4_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R2_CK5.aSMA.Ki67.CK19_hBE-TMA1-1_sceneA1_c5_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c1_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c2_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c3_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c4_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R3_Vim.CD11c.CD45.Ecad_hBE-TMA1-1_sceneA1_c5_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R4_PCNA.p53.CD31.CD44_hBE-TMA1-1_sceneA1_c1_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R4_PCNA.p53.CD31.CD44_hBE-TMA1-1_sceneA1_c2_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R4_PCNA.p53.CD31.CD44_hBE-TMA1-1_sceneA1_c3_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R4_PCNA.p53.CD31.CD44_hBE-TMA1-1_sceneA1_c4_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R4_PCNA.p53.CD31.CD44_hBE-TMA1-1_sceneA1_c5_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5_CAV1.HLA-DR.IBA1.ZEB1_hBE-TMA1-1_sceneA1_c1_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5_CAV1.HLA-DR.IBA1.ZEB1_hBE-TMA1-1_sceneA1_c2_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5_CAV1.HLA-DR.IBA1.ZEB1_hBE-TMA1-1_sceneA1_c3_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5_CAV1.HLA-DR.IBA1.ZEB1_hBE-TMA1-1_sceneA1_c4_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5_CAV1.HLA-DR.IBA1.ZEB1_hBE-TMA1-1_sceneA1_c5_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5Q_R5Qc2.R5Qc3.R5Qc4.R5Qc5_hBE-TMA1-1_sceneA1_c1_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5Q_R5Qc2.R5Qc3.R5Qc4.R5Qc5_hBE-TMA1-1_sceneA1_c2_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5Q_R5Qc2.R5Qc3.R5Qc4.R5Qc5_hBE-TMA1-1_sceneA1_c3_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5Q_R5Qc2.R5Qc3.R5Qc4.R5Qc5_hBE-TMA1-1_sceneA1_c4_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\Registered-R5Q_R5Qc2.R5Qc3.R5Qc4.R5Qc5_hBE-TMA1-1_sceneA1_c5_ORG.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "PACKBITS",
+      "resolution_tags": {
+        "XResolution": "(72, 1)",
+        "YResolution": "(72, 1)",
+        "ResolutionUnit": "2"
+      },
+      "description": "",
+      "imagej_metadata": null,
+      "ome_metadata": null
+    }
+  ],
+  "sample_mask_checks": [
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_Ecad_cell30_CellSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "int16",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 4803,
+      "mask_instances": 4803,
+      "sample_ids_absent": 80,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 0.0
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_Ecad_nuc30_cell30_matched_CellSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "int16",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 8151,
+      "mask_instances": 3121,
+      "sample_ids_absent": 115,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 0.415
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_Ecad_nuc30_cell30_matched_exp5_CellSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "int32",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 8164,
+      "mask_instances": 8075,
+      "sample_ids_absent": 4,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 0.96
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_nuc30_NucleiSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 8164,
+      "mask_instances": 8164,
+      "sample_ids_absent": 0,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 1.0
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\R1-Segmentation_hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_Ecad_cell30_CellSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "int16",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 3770,
+      "mask_instances": 3770,
+      "sample_ids_absent": 106,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 0.0
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\R1-Segmentation_hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_Ecad_nuc30_cell30_matched_CellSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "int16",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 6642,
+      "mask_instances": 1932,
+      "sample_ids_absent": 145,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 0.005
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\R1-Segmentation_hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_Ecad_nuc30_cell30_matched_exp5_CellSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "int32",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 6683,
+      "mask_instances": 6621,
+      "sample_ids_absent": 37,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 0.01
+    },
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\Segmentation\\R1-Segmentation_hBE-TMA1-1_CellposeSegmentation\\hBE-TMA1-1_sceneA1_nuc30_NucleiSegmentationBasins.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "NONE",
+      "resolution_tags": {
+        "XResolution": "(1, 1)",
+        "YResolution": "(1, 1)",
+        "ResolutionUnit": "1"
+      },
+      "description": "{\"shape\": [6111, 4491]}",
+      "imagej_metadata": null,
+      "ome_metadata": null,
+      "min_id": 0,
+      "max_id": 6683,
+      "mask_instances": 6683,
+      "sample_ids_absent": 35,
+      "sampled_centroids_outside": 0,
+      "centroid_id_match_fraction": 0.01
+    }
+  ],
+  "sample_ome_headers": [
+    {
+      "path": "\\\\fortera-smb.ohsu.edu\\EmiliLab\\ChinData\\Cyclic_Workflow\\cmIF_2026-05-15_BE-TMA\\RegisteredImages\\hBE-TMA1-1_sceneA1\\OMETIFF_hBE-TMA1-1_sceneA1\\hBE-TMA1-1_sceneA1.ome.tif",
+      "shape": [
+        6111,
+        4491
+      ],
+      "dtype": "uint16",
+      "compression": "LZW",
+      "resolution_tags": {
+        "XResolution": "(28346, 1000)",
+        "YResolution": "(28346, 1000)",
+        "ResolutionUnit": "3"
+      },
+      "description": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Warning: this comment is an OME-XML metadata block, which contains crucial dimensional parameters and other important metadata. Please edit cautiously (if at all), and back up the original data before doing so. For more information, see the OME-TIFF web site: https://docs.openmicroscopy.org/latest/ome-model/ome-tiff/. -->\n<OME xmlns=\"http://www.openmicroscopy.org/Schemas/OME/2016-06\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" Creator=\"OME Bio-Formats 6.2.1\" UUID=\"urn:uuid:f44e8e82-3f44-4733-b6a3-43ac52b810e3\" xsi:schemaLocation=\"http://www.openmicroscopy.org/Schemas/OME/2016-06 http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd\">\n   <Instrument ID=\"Instrument:0\">\n      <Microscope Type=\"Upright\" Model=\"Axio Scan.Z1\" Manufacturer=\"Carl Zeiss\"/>\n      <Detector ID=\"Detector:0\" Type=\"CMOS\" Model=\"HDCamC11440-22C\" Manufacturer=\"Hamamatsu\"/>\n      <Objective ID=\"Objective:1\" Model=\"Plan-Apochromat 20x/0.8 M27\" Immersion=\"Air\" LensNA=\"0.8\" NominalMagnification=\"20.0\" WorkingDistance=\"610.0\"/>\n   </Instrument>\n   <Image ID=\"Image:0\" Name=\"hBE-TMA1-1_sceneA1\">\n      <Description/>\n      <InstrumentRef ID=\"Instrument:0\"/>\n      <",
+      "imagej_metadata": null,
+      "ome_metadata": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Warning: this comment is an OME-XML metadata block, which contains crucial dimensional parameters and other important metadata. Please edit cautiously (if at all), and back up the original data before doing so. For more information, see the OME-TIFF web site: https://docs.openmicroscopy.org/latest/ome-model/ome-tiff/. -->\n<OME xmlns=\"http://www.openmicroscopy.org/Schemas/OME/2016-06\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" Creator=\"OME Bio-Formats 6.2.1\" UUID=\"urn:uuid:f44e8e82-3f44-4733-b6a3-43ac52b810e3\" xsi:schemaLocation=\"http://www.openmicroscopy.org/Schemas/OME/2016-06 http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd\">\n   <Instrument ID=\"Instrument:0\">\n      <Microscope Type=\"Upright\" Model=\"Axio Scan.Z1\" Manufacturer=\"Carl Zeiss\"/>\n      <Detector ID=\"Detector:0\" Type=\"CMOS\" Model=\"HDCamC11440-22C\" Manufacturer=\"Hamamatsu\"/>\n      <Objective ID=\"Objective:1\" Model=\"Plan-Apochromat 20x/0.8 M27\" Immersion=\"Air\" LensNA=\"0.8\" NominalMagnification=\"20.0\" WorkingDistance=\"610.0\"/>\n   </Instrument>\n   <Image ID=\"Image:0\" Name=\"hBE-TMA1-1_sceneA1\">\n      <Description/>\n      <InstrumentRef ID=\"Instrument:0\"/>\n      <ObjectiveSettings ID=\"Objective:1\"/>\n      <Pixels BigEndian=\"true\" DimensionOrder=\"XYCZT\" ID=\"Pixels:0\" PhysicalSizeX=\"0.325\" PhysicalSizeXUnit=\"\u00b5m\" PhysicalSizeY=\"0.325\" PhysicalSizeYUnit=\"\u00b5m\" Interleaved=\"false\" SignificantBits=\"16\" SizeC=\"25\" SizeT=\"1\" SizeX=\"4491\" SizeY=\"6111\" SizeZ=\"1\" Type=\"uint16\">\n         <Channel ID=\"Channel:0:0\" Name=\"DAPI1\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:1\" Name=\"MUC1\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:2\" Name=\"MUC5AC\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:3\" Name=\"MUC2\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:4\" Name=\"MUC6\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:5\" Name=\"DAPI2\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:6\" Name=\"CK5\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:7\" Name=\"aSMA\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:8\" Name=\"Ki67\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:9\" Name=\"CK19\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:10\" Name=\"DAPI3\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:11\" Name=\"Vim\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:12\" Name=\"CD11c\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:13\" Name=\"CD45\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:14\" Name=\"Ecad\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:15\" Name=\"DAPI4\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:16\" Name=\"PCNA\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:17\" Name=\"p53\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:18\" Name=\"CD31\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:19\" Name=\"CD44\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:20\" Name=\"DAPI5\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:21\" Name=\"CAV1\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:22\" Name=\"HLA-DR\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:23\" Name=\"IBA1\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <Channel ID=\"Channel:0:24\" Name=\"ZEB1\" SamplesPerPixel=\"1\">\n            <LightPath/>\n         </Channel>\n         <TiffData FirstC=\"0\" FirstT=\"0\" FirstZ=\"0\" IFD=\"0\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"1\" FirstT=\"0\" FirstZ=\"0\" IFD=\"1\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"2\" FirstT=\"0\" FirstZ=\"0\" IFD=\"2\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"3\" FirstT=\"0\" FirstZ=\"0\" IFD=\"3\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"4\" FirstT=\"0\" FirstZ=\"0\" IFD=\"4\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"5\" FirstT=\"0\" FirstZ=\"0\" IFD=\"5\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"6\" FirstT=\"0\" FirstZ=\"0\" IFD=\"6\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"7\" FirstT=\"0\" FirstZ=\"0\" IFD=\"7\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"8\" FirstT=\"0\" FirstZ=\"0\" IFD=\"8\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"9\" FirstT=\"0\" FirstZ=\"0\" IFD=\"9\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"10\" FirstT=\"0\" FirstZ=\"0\" IFD=\"10\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"11\" FirstT=\"0\" FirstZ=\"0\" IFD=\"11\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"12\" FirstT=\"0\" FirstZ=\"0\" IFD=\"12\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"13\" FirstT=\"0\" FirstZ=\"0\" IFD=\"13\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"14\" FirstT=\"0\" FirstZ=\"0\" IFD=\"14\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"15\" FirstT=\"0\" FirstZ=\"0\" IFD=\"15\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"16\" FirstT=\"0\" FirstZ=\"0\" IFD=\"16\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"17\" FirstT=\"0\" FirstZ=\"0\" IFD=\"17\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"18\" FirstT=\"0\" FirstZ=\"0\" IFD=\"18\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"19\" FirstT=\"0\" FirstZ=\"0\" IFD=\"19\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"20\" FirstT=\"0\" FirstZ=\"0\" IFD=\"20\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"21\" FirstT=\"0\" FirstZ=\"0\" IFD=\"21\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"22\" FirstT=\"0\" FirstZ=\"0\" IFD=\"22\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"23\" FirstT=\"0\" FirstZ=\"0\" IFD=\"23\" PlaneCount=\"1\"/>\n         <TiffData FirstC=\"24\" FirstT=\"0\" FirstZ=\"0\" IFD=\"24\" PlaneCount=\"1\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"0\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"1\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"2\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"3\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"4\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"5\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"6\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"7\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"8\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"9\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"10\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"11\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"12\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"13\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"14\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"15\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"16\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"17\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"18\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"19\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"20\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"21\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"22\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"23\" TheT=\"0\" TheZ=\"0\"/>\n         <Plane ExposureTime=\"0.0\" ExposureTimeUnit=\"ms\" PositionX=\"1.0\" PositionY=\"1.0\" TheC=\"24\" TheT=\"0\" TheZ=\"0\"/>\n      </Pixels>\n   </Image>\n</OME>",
+      "ome_pixel_attributes": {
+        "BigEndian": "true",
+        "DimensionOrder": "XYCZT",
+        "ID": "Pixels:0",
+        "PhysicalSizeX": "0.325",
+        "PhysicalSizeXUnit": "\u00b5m",
+        "PhysicalSizeY": "0.325",
+        "PhysicalSizeYUnit": "\u00b5m",
+        "Interleaved": "false",
+        "SignificantBits": "16",
+        "SizeC": "25",
+        "SizeT": "1",
+        "SizeX": "4491",
+        "SizeY": "6111",
+        "SizeZ": "1",
+        "Type": "uint16"
+      }
+    }
+  ]
+}

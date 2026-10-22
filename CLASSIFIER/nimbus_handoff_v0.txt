@@ -1,0 +1,114 @@
+﻿Nimbus / DAS CLASSIFIER handoff v0
+==================================
+
+Purpose
+-------
+Assess and propose the smallest safe Nimbus integration that reuses the
+CLASSIFIER's image-plus-mask input mechanics without making Nimbus pretend to
+be the existing lineage CNN.
+
+Current orientation
+-------------------
+The CLASSIFIER and Nimbus need the same physical inputs per ROI:
+
+  * named multiplex image planes;
+  * one 2D integer whole-cell segmentation mask on the same pixel grid;
+  * a stable ROI identity (DAS: slide_scene);
+  * cell identity equal to the mask label within that ROI.
+
+The existing CLASSIFIER scene contract already records most of this in
+scene.json: scene_id, markers, mask, pixel scale, and source metadata. It is
+strong evidence that a shared scene-inventory layer is worthwhile.
+
+However, do NOT put Nimbus inside the existing CNN's train/predict modes.
+Those modes assume three ordered superstain groups, four fixed lineage
+classes, CNN checkpoint schema, and cells.csv labels. Nimbus has a different
+model/checkpoint and needs no training labels for inference. Reusing
+CLASSIFIER.adapters.stage unchanged would therefore force fake labels and
+create brittle coupling.
+
+Requested design
+----------------
+Propose a minimal, additive Nimbus branch that rhymes with the CLASSIFIER
+rather than forks DAS infrastructure.
+
+1. Reuse now
+   * support.image_sources for TIFF/OME channel inspection and channel specs.
+   * support.ingest_sources, support.path_compat, project-config path prompts,
+     controller io/recipe plumbing, and output-folder/provenance conventions.
+   * the established identity rule: join returned per-cell results on
+     (slide_scene, mask_label/cell_id), never dataframe row order or cell ID
+     alone.
+
+2. Extract only a small generic seam if it demonstrably removes duplication
+   * Candidate: a label-free source-scene inventory/manifest containing
+     scene_id/slide_scene, explicit marker paths or ChannelSource specs, mask
+     path, pixel scale, and source signatures.
+   * Keep CLASSIFIER's cells.csv, split allocation, label mapping, superstain
+     construction, tile supervision, and CNN checkpoint code classifier-only.
+   * Existing classifier scene.json can be an accepted input format, but Nimbus
+     must not require cells.csv or train/val/test splits.
+   * Do not perform a broad manifest redesign before one real Nimbus proof run.
+
+3. Nimbus runner contract
+   * Implement as a separate Nimbus environment/runner called from DAS with
+     explicit JSON settings, not an import that contaminates the DAS env.
+   * One output run folder per invocation, e.g. project/nimbus/run_<stamp>/.
+   * Record resolved image/mask mapping, requested channels, resolved channel
+     names, model/checkpoint version, package version, normalization settings,
+     device, and exact output paths.
+   * Run preflight before the expensive call: readable files, unique scene IDs,
+     2D integer masks, matching image/mask dimensions, no duplicate marker
+     names, and output cell identity coverage.
+   * Initial import should be additive: retain raw DAS intensity df unchanged;
+     import Nimbus values under explicit nimbus_ prefixes after coverage checks.
+
+4. Menu/recipes
+   * Add a separate action such as home.nimbus or home.marker_positivity; do
+     not add it as another CLASSIFIER mode.
+   * It should use the same recipe mechanism as home.classifier: named answers,
+     GUI/CLI/headless parity, and one controller call.
+   * Recipe fields should remain operational rather than aspirational: source
+     scenes/paths, mask mapping, selected marker channels, output root, device,
+     and a pinned model/version choice. Do not expose every Nimbus tuning knob
+     on the first pass.
+
+5. Validation gates
+   * First run on one known ROI only.
+   * Verify that every Nimbus output cell has exactly one DAS counterpart by
+     (slide_scene, mask label), and fail rather than silently dropping cells.
+   * Inspect marker-level agreement/QC against current threshold calls before
+     exposing batch operation.
+   * Decide explicitly whether DAPI, autofluorescence, QC, and morphology
+     channels are inputs, excluded channels, or marker context. Never silently
+     pass every TIFF in a folder.
+
+Questions for the CLASSIFIER agent
+----------------------------------
+A. Is there an existing reusable, label-free scene inventory seam hidden in
+   CLASSIFIER/adapters.py or prepare_* that can be promoted with <~100 lines,
+   without perturbing current CNN training/inference?
+
+B. If not, should Nimbus initially own a tiny adapter that writes/reads an
+   explicit Nimbus scene mapping and only later extract a shared helper after
+   its real-data proof? Prefer this if it avoids touching validated CNN code.
+
+C. What exact current controller/recipe changes are needed to add a standalone
+   action without destabilizing the existing classifier action? Note:
+   startup_prepare_data currently displays "CNN cell classification" but its
+   functions list shown in controler.py does not include startup_cell_classifier.
+   Confirm whether this is a live dispatch bug before attaching Nimbus nearby.
+
+D. Define the narrowest test fixture: two small image planes + integer mask,
+   no cells.csv, then mocked Nimbus output with repeated local IDs across two
+   scenes. It must prove scene-qualified joins and failure on missing/duplicate
+   output IDs.
+
+Non-goals
+---------
+* No replacement of the existing CNN.
+* No LLM/agent decision layer.
+* No forced conversion/copying/renaming of source images.
+* No broad recipe-framework work.
+* No final biological cell-type claims from Nimbus alone: Nimbus is expected to
+  supply image-aware marker calls/scores for later DAS phenotyping/clustering.
