@@ -1,0 +1,35 @@
+{
+  "name": "classifier_predict_template",
+  "description": "EDIT paths/columns/patterns/MPP before use. Forward-test an existing model on one ROI; no training.",
+  "steps": [{
+    "do": "home.classifier",
+    "with": {
+      "mode": "predict",
+      "sources": [{
+        "id": "cycif",
+        "adapter": "classified_csv",
+        "image_root": "D:/EDIT_CYCIF/images",
+        "mask_root": "D:/EDIT_CYCIF/masks",
+        "csv_root": "D:/EDIT_CYCIF/labels",
+        "marker_patterns": {
+          "DAPI": "{scene_id}/*DAPI*.tif*",
+          "CD45": "{scene_id}/*CD45*.tif*",
+          "PanCK": "{scene_id}/*PanCK*.tif*"
+        },
+        "marker_groups": {"NUC": ["DAPI"], "IMMUNE": ["CD45"], "EPI": ["PanCK"]},
+        "mask_pattern": "{scene_id}/*label*.tif*",
+        "csv_pattern": "{scene_id}.csv",
+        "object_column": "ObjectNumber",
+        "label_column": "class",
+        "label_mapping": {"Immune": "IMMUNE", "Tumor": "EPI", "Other Cells": "UNCLASSIFIED", "Artifact": "ARTIFACT"},
+        "source_um_per_px": 0.5,
+        "resolution_note": "EDIT: replace the example MPP with the actual acquisition/export spacing",
+        "scenes": [{"scene_id": "EDIT_FIRST_ROI", "split": "test"}]
+      }],
+      "checkpoint": "D:/CLASSIFIER_OUTPUT/EDIT_PARENT/results/best.pt",
+      "output_root": "D:/CLASSIFIER_OUTPUT",
+      "training": {"device": "cpu", "threads": 2},
+      "inference": {"prediction_split": "test", "inference_tile_px": 256, "inference_overlap": 64, "preview_max_px": 1024}
+    }
+  }]
+}

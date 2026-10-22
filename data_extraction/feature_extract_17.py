@@ -364,12 +364,24 @@ def _build_morphology_df(nucim, cellim, nucleus_only, flair, min_cyto_pixels):
 # -----------------------
 def _build_fallback_bands(nucim, fallback_ids, n_in, n_out):
     fallback_band_inds = {}
+    if len(fallback_ids) == 0:
+        return fallback_band_inds
+    boxes = ndimage.find_objects(nucim)
+    height, width = nucim.shape
+    pad = max(0, int(n_out))
     for cid in fallback_ids:
-        nuc_mask = (nucim == int(cid))
-        if not np.any(nuc_mask):
+        label = int(cid)
+        if label <= 0 or label > len(boxes) or boxes[label - 1] is None:
             continue
+        ys, xs = boxes[label - 1]
+        y0, y1 = max(0, ys.start-pad), min(height, ys.stop+pad)
+        x0, x1 = max(0, xs.start-pad), min(width, xs.stop+pad)
+        nuc_mask = (nucim[y0:y1, x0:x1] == label)
         band = nuclear_band_mask(nuc_mask, n_in=n_in, n_out=n_out)
-        fallback_band_inds[int(cid)] = np.flatnonzero(band.ravel()).astype(np.int64)
+        y, x = np.nonzero(band)
+        # Preserve exactly the original full-image flat index order, including
+        # nuclei touching image borders, without scanning the image per cell.
+        fallback_band_inds[label] = ((y+y0)*width + x+x0).astype(np.int64)
     return fallback_band_inds
 
 
@@ -505,7 +517,17 @@ def extract_core_features(
     result = _build_morphology_df(nucim, cellim, nucleus_only, flair, min_cyto_pixels)
     df, seg_ids, cyto_labels, cy_cnt, fallback_ids, max_id, H, W = result
     if df is None:
-        return pd.DataFrame()
+        # Preserve the ordinary output schema for legitimately empty masks.
+        # Batch callers can retain a zero-object scene without inventing cells.
+        columns = ["DAPI_X", "DAPI_Y", "Ecc_nuc", "Ecc_cell", "cyto_fallback_used",
+                   "cyto_pixels_measured", "Area_nuc", "Area_cell", "Area_cyto"]
+        for marker in marker_paths:
+            _, name = _marker_path_and_name(marker)
+            columns.extend(name + suffix for suffix in ("_nuc", "_cell", "_cyto"))
+        columns.extend(["seg_label", "slide", "scene", "cellid", "slide_scene"])
+        empty = pd.DataFrame(columns=columns)
+        empty.index.name = "slide_scene_cellid"
+        return empty
     tick("morphology", f"cells={len(seg_ids)} max_label={max_id} fallback={len(fallback_ids)}")
 
     # Phase 3: fallback band precomputation (skipped when nucleus_only)

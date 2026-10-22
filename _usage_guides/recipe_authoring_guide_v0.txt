@@ -1,6 +1,15 @@
 Named recipes: controller proof
 ===============================
 
+Project recipe handoff
+----------------------
+Keep real recipes in PROJECT/recipes and copy them unchanged to
+prefab_recipes/misc recipes so they ship as concrete worked examples, without
+promoting them to generic prefabs. Refresh both copies after edits. Include
+descriptive name/description headers for cheap discovery and reuse.
+For long jobs, launch with persistent logs, verify startup, then return without
+watching completion unless asked. Report recipe and output locations.
+
 Current status (2026-10-19)
 --------------------------
 The controller has a recipes entry at startup and in the loaded-data menu:
@@ -16,6 +25,25 @@ current authoritative answer contracts.
 Unported controller entries are marked replayable:false and are not recorded.
 Their ordinary interactive behavior remains available.
 
+Classifier is now a named home.classifier action, available before or after
+loading a triplet. Its sources list supports CSV, saved-triplet, image-only and
+prepared-manifest inputs; training/inference settings are explicit JSON objects.
+See classifier_recipes_v0.md and prefab_recipes/classifier_*_template.json.
+Templates contain example paths/MPP that must be replaced. Classifier-only
+headless runs use their source pixel spacing rather than a machine preference.
+
+AF subtraction is now home.stain_correction, also exposed under Prepare Data.
+It uses shared recursive source discovery and explicit marker-to-AF associations,
+with preview_only=y for a resolved pairing plan. It does not require a loaded
+triplet, segmentation or machine pixel-size preference. The older combined TMA
+correction/extraction workflow remains unported. See stain_correction_recipes_v0.md
+and prefab_recipes/stain_af_template.json; example rounds are not input defaults.
+
+Image feature extraction is home.feature_extraction. A completed AF result.json
+supplies corrected images; raw_sources adds named uncorrected channels. Existing
+nuclear/cell masks suffice without a DAPI intensity image. See
+feature_extraction_recipes_v0.md for the two-pass pattern and output triplet.
+
 From DAS_v2:
 
     python run_recipe.py --actions
@@ -27,8 +55,9 @@ From DAS_v2:
 --action includes named answers, their kinds/help, parent/child menus, and rows
 from existing prefab/project recipes. These commands need only the Python
 standard library for inspection/checking; --run imports the DAS execution stack.
-Run it in the DAS conda environment. Headless execution requires the existing
-machine-local pixel-size preference; set it once through DAS if it is absent.
+Run it in the DAS conda environment. Analysis/plotting headless execution requires
+the existing machine-local pixel-size preference; set it once through DAS if it
+is absent. Recipes consisting only of classifier/AF actions do not require it.
 It does not open startup prompts or replace project/machine defaults.
 
 Draft format

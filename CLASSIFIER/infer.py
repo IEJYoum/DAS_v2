@@ -86,6 +86,10 @@ def evaluate_scenes(model, scenes, cfg):
         table["prediction_scope"] = "tile" if "parent_scene_id" in scene["metadata"] else "whole_source"
         table.insert(0, "scene_id", scene_id)
         table.insert(1, "split", scene["metadata"]["split"])
+        # Keep source identity explicit: mask IDs repeat across ROIs, and staged
+        # names may be namespaced. Never recover identities by splitting a name.
+        table['dataset_id'] = scene['metadata'].get('dataset_id')
+        table['original_scene_id'] = scene['metadata'].get('original_scene_id', scene_id)
         if "parent_scene_id" in scene["metadata"]:
             table.insert(1, "source_scene_id", scene["metadata"]["parent_scene_id"])
         rows.append(table)

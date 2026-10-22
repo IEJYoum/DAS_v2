@@ -16,17 +16,6 @@ from support import io_adapter as io
 
 from CLASSIFIER import data, prepare_classified, prepare_real
 
-BCC_MAPPING = {name: 'IMMUNE' for name in [
-    'Granulocytes', 'Immune Other', 'CD8 T cells', 'CD4 T helper cells',
-    'Immature DC', 'Macrophage', 'B cells', 'Monocyte',
-    'T-regulatory CD4 cells', 'Mature DC']}
-# Keep the checkpoint's four output indices. UNCLASSIFIED is the affirmative
-# "other cell" class here, not the absence of a CSV label. Missing CSV rows stay
-# ignored because we cannot infer biological class from missing annotation.
-BCC_MAPPING.update({'PanCK+': 'EPI', 'Other Cells': 'UNCLASSIFIED',
-                    'aSMA+': 'UNCLASSIFIED'})
-
-
 def one_match(root, pattern, spec):
     """Patterns are relative to roots; ** enables recursion; ambiguity is an error."""
     root = resolve_native_path(root, must_exist=True, kind='directory')
@@ -37,6 +26,16 @@ def one_match(root, pattern, spec):
 
 
 def resolve_sources(settings, spec):
+    if settings.get('source_convention'):
+        from support.image_conventions import resolve_registered_cellpose_sources
+        convention = settings['source_convention']
+        if convention['name'] != 'registered_cellpose':
+            raise ValueError('Unknown shared source convention')
+        groups = settings['marker_groups']
+        markers = list(dict.fromkeys(name for names in groups.values() for name in names))
+        return resolve_registered_cellpose_sources(settings['image_root'], settings['mask_root'],
+            spec['scene_id'], markers, nuclear_marker=groups['NUC'][0],
+            nuclear_round=convention['nuclear_round'], mask_kind=convention['mask_kind'])
     mask = one_match(settings['mask_root'], settings['mask_pattern'], spec)
     if any('{nuclear_filename}' in p for p in settings['marker_patterns'].values()) and not mask.name.startswith('label_'):
         raise ValueError('Nuclear filename derivation requires a label_ prefixed mask')
@@ -74,8 +73,8 @@ def assign_splits(specs, seed=7, development_fraction=1/3, test_fraction=1/6,
     return sorted(result, key=lambda s: s['scene_id'])
 
 
-def discover_bcc(settings, output_dir, seed=7, log=print):
-    """Inventory explicit cycle patterns; never stage or train reserved ROIs."""
+def discover_bcc(settings, output_dir, seed=7, log=print, *, include_reserved=False):
+    """Inventory cycle patterns; optionally include reserved deployment inputs."""
     specs, scales, inventory = [], {}, []
     files = sorted(Path(settings['csv_root']).glob('LiverLungBCCNuclei_*ROI*.csv'))
     for ordinal, csv in enumerate(files):
@@ -120,8 +119,8 @@ def discover_bcc(settings, output_dir, seed=7, log=print):
     pd.DataFrame(assigned).to_csv(Path(output_dir) / 'roi_splits.csv', index=False)
     pd.DataFrame(inventory).to_csv(Path(output_dir) / 'source_inventory.csv', index=False)
     counts = pd.Series([s['split'] for s in assigned]).value_counts().to_dict()
-    log(f'Saved source-ROI splits (seed {seed}): {counts}; reserved sources will not be staged')
-    selected = [s for s in assigned if s['split'] != 'reserved']
+    log(f'Saved source-ROI splits (seed {seed}): {counts}; stage reserved={include_reserved}')
+    selected = [s for s in assigned if include_reserved or s['split'] != 'reserved']
     estimated = sum(int(np.prod([round(n*s['source_um_per_px']/settings.get('target_um_per_px', .5))
                                   for n in s['source_shape']])) * s['estimated_cache_bytes_per_pixel'] for s in selected)
     import shutil
@@ -136,14 +135,22 @@ def discover_bcc(settings, output_dir, seed=7, log=print):
     return selected
 
 
-def stage(settings, output_dir, target_um_per_px, training=False, tile_px=256, overlap=64, print_fn=None):
+def stage(settings, output_dir, target_um_per_px, training=False, tile_px=256, overlap=64, print_fn=None, namespace=None):
     print_fn = print_fn or io.iprint
     if settings['adapter'] == 'manifest':
         manifest = resolve_native_path(settings['manifest'], must_exist=True, kind='file')
         data.read_manifest(manifest)
+        print_fn(f'Labels: retaining prepared cells.csv labels from {manifest}; agreement is not recomputed.')
         return manifest
-    if settings['adapter'] not in {'bcc', 'ah08'}:
-        raise ValueError('Adapter must be bcc, ah08, or manifest')
+    if settings['adapter'] not in {'bcc','ah08','classified_csv','das_triplet','images'}:
+        raise ValueError('Unsupported source adapter')
+    from CLASSIFIER.source_inputs import LabelTable
+    # Legacy layouts keep their path discovery but share label policy with the
+    # generic adapters; no separate BCC/AH08 vocabulary or agreement machinery.
+    label_settings = dict(settings)
+    if settings['adapter']=='ah08':
+        label_settings.setdefault('scene_column','slide_scene')
+    reader = LabelTable(label_settings)
     specs = settings['scenes']
     if len({s['scene_id'] for s in specs}) != len(specs):
         raise ValueError('Each source ROI must occur exactly once')
@@ -158,34 +165,40 @@ def stage(settings, output_dir, target_um_per_px, training=False, tile_px=256, o
         if mask in sources:
             raise ValueError('Same source mask selected more than once')
         sources.add(mask)
-        csv = one_match(settings['csv_root'], settings['csv_pattern'], spec)
-        table = pd.read_csv(csv)
-        if settings['adapter'] == 'ah08':
-            table = table.loc[table.slide_scene.eq(spec['scene_id'])].copy()
-            if table.empty:
-                raise ValueError(f"No observation rows for {spec['scene_id']}")
-            table = table.rename(columns={settings['label_column']: 'class'})
-            # Blank source labels are ignored, but their IDs still get checked.
-            table['class'] = table['class'].fillna('__NO_LABEL__')
-            mapping = {c: c for c in ['IMMUNE', 'EPI', 'UNCLASSIFIED', 'ARTIFACT']}
-            mapping['__NO_LABEL__'] = None
-        else:
-            mapping = BCC_MAPPING
+        # Reserved ROIs are deployment inputs only. Their labels are not needed
+        # for training or checkpoint selection, even when a triplet has columns.
+        active_reader = LabelTable({**label_settings, 'adapter':'images'}) if spec['split']=='reserved' else reader
+        table, mapping, csv = active_reader.read(spec)
+        if spec['split']=='reserved':
+            print_fn(f'Labels {spec["scene_id"]}: reserved deployment ROI; no truth labels consumed or scored')
+        if active_reader.label_resolution is not None:
+            policy = active_reader.label_resolution
+            print_fn(f"Labels {spec['scene_id']}: {policy['policy']} | columns={policy['selected_columns']} | "
+                     f"supervised={policy['supervised_rows']} ignored={policy['ignored_rows']} "
+                     f"disagreements={policy['disagreements']} artifacts={policy['artifact_rows']}")
+            print_fn(f"  Artifact checks: {policy['artifact_columns']} | registry={policy['registry']}")
+        staged_id = f'{namespace}__{spec["scene_id"]}' if namespace else spec['scene_id']
         scene_path, _ = prepare_classified.prepare(
-            folder / spec['scene_id'], spec['scene_id'], markers, mask, csv, mapping,
+            folder / staged_id, staged_id, markers, mask, csv, mapping,
             spec.get('source_um_per_px', settings['source_um_per_px']), target_um_per_px,
             spec.get('resolution_note', settings['resolution_note']),
-            split=spec['split'], table=table)
+            split=spec['split'], table=table,
+            label_resolution=active_reader.label_resolution, label_audit=active_reader.label_audit)
         meta = json.loads(scene_path.read_text(encoding='utf-8'))
         meta['dataset_role'] = spec.get('dataset_role', 'primary')
+        meta.update(dataset_id=namespace or settings.get('id'), original_scene_id=spec['scene_id'],
+                    source_uid=spec.get('source_uid',str(mask.resolve())))
+        if spec['split']=='reserved':
+            meta['label_provenance'] = 'Reserved deployment ROI; truth labels intentionally not consumed or scored.'
+        if reader.paths:
+            meta['label_sources'] = reader.paths
         if training and spec['split'] == 'train':
             staged_mask = data.read_plane(scene_path.parent / meta['mask'])
             labels = pd.read_csv(scene_path.parent / meta['cells'])
             meta['windows'] = prepare_real.sample_windows(staged_mask, labels, tile_px, None,
                                                           np.random.default_rng(7), overlap)
         scene_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
-        rows.append(dict(scene_id=spec['scene_id'], split=spec['split'],
-                         scene_json=f"{spec['scene_id']}/scene.json"))
+        rows.append(dict(scene_id=staged_id, split=spec['split'], scene_json=f"{staged_id}/scene.json"))
     manifest = folder / 'manifest.csv'
     pd.DataFrame(rows).to_csv(manifest, index=False)
     data.read_manifest(manifest)

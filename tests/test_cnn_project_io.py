@@ -95,9 +95,13 @@ class ProjectIOTests(unittest.TestCase):
             self.assertNotIn(str(root), controler._PROJECT_CONFIG_CACHE)
             state = controler.SessionState()
             state.data_folder = root
-            with patch.object(controler, 'menu_index', side_effect=[0, 0]), patch.object(run_project, 'main') as launch:
-                controler.startup_cell_classifier(state)
-            self.assertEqual(launch.call_args.args, ('predict', 'bcc'))
+            output = root/'run'
+            output.mkdir()
+            (output/'result.json').write_text('{"status":"complete"}')
+            with patch.object(run_project, 'main', return_value=output) as launch:
+                controler.startup_cell_classifier(state, mode='predict', sources=[{'id':'fixture'}],
+                    checkpoint='parent.pt', output_root=str(root), training={}, inference={})
+            self.assertEqual(launch.call_args.kwargs['mode'], 'predict')
             self.assertIs(launch.call_args.kwargs['input_fn'], io.iget)
             self.assertIs(launch.call_args.kwargs['config_changed'], controler.invalidate_project_config)
 

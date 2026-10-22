@@ -7,11 +7,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from support import io_adapter as io
+print = io.legacy_print
 from PIL import Image, ImageDraw, ImageFont
 
 # Indices follow config.CLASS_NAMES: IMMUNE magenta, EPI green, UNCLASSIFIED
 # orange, ARTIFACT red. This palette colors class maps/outlines, not the RGB input.
 COLORS = np.array([[255, 0, 255], [0, 255, 0], [255, 165, 0], [255, 0, 0]], np.uint8)
+# Deferred lineage expansion: make this palette/legends input/class-schema driven
+# together with the model/checkpoint migration, rather than appending a head alone.
 
 
 def score_cells(predictions, labels, class_names):
@@ -55,6 +59,31 @@ def metrics_from_confusion(confusion, class_names, predicted_cells):
                "accuracy": float(np.trace(confusion) / confusion.sum()) if confusion.sum() else 0.0,
                "labelled_cells": int(confusion.sum()), "predicted_cells": int(predicted_cells)}
     return metrics
+
+
+def reporting_metrics(metrics, class_names):
+    """Average specified class F1s without dropping/relabeling any model calls.
+
+    Accuracy and each selected class's precision/recall still use every supplied
+    truth row and the full output confusion matrix. Excluded outputs remain errors
+    whenever they disagree with truth. In particular ARTIFACT is never folded into
+    Other cells or replaced with the largest nonartifact probability.
+    """
+    order = metrics['class_order']
+    if not class_names or len(set(class_names)) != len(class_names) or set(class_names)-set(order):
+        raise ValueError('Reporting classes must be distinct model classes')
+    count = metrics['labelled_cells']
+    confusion = np.asarray(metrics['confusion_matrix'],dtype=np.int64)
+    artifact_calls = int(confusion[:,order.index('ARTIFACT')].sum()) if 'ARTIFACT' in order else 0
+    return dict(class_order=class_names, prediction_class_order=order,
+        macro_f1=float(np.mean([metrics['per_class'][name]['f1'] for name in class_names])) if count else None,
+        accuracy=metrics['accuracy'] if count else None,
+        labelled_cells=count, per_class={name:metrics['per_class'][name] for name in class_names},
+        artifact_calls_on_labelled_cells=artifact_calls,
+        artifact_call_rate_on_labelled_cells=artifact_calls/count if count else None,
+        interpretation='F1 averaged over reporting classes; accuracy uses all supplied truth rows. '
+                       'Raw four-class calls/probabilities are preserved. ARTIFACT predictions count '
+                       'as errors against nonartifact truth; no rows are discarded or reassigned.')
 
 
 def class_rgb(targets):

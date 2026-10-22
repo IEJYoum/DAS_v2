@@ -51,4 +51,6 @@ class PixelUNet(nn.Module):
 
 
 def build_model(model_cfg):
+    # Deferred: reconstructible MLP/CoE heads and expanded lineage inputs/classes.
+    # Keep factories checkpoint-driven; see classifier_recipe_control_surface_audit_v0.txt.
     return PixelUNet(**model_cfg)

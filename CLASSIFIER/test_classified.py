@@ -14,6 +14,17 @@ from copy import deepcopy
 
 
 class ClassifiedAdapterTests(unittest.TestCase):
+    @staticmethod
+    def fake_training(*, cfg, **kwargs):
+        """Routing fixture: publish the products that the real engine guarantees."""
+        folder = Path(cfg['output_dir'])
+        (folder/'test').mkdir(parents=True)
+        (folder/'best.pt').touch()
+        (folder/'test'/'predictions.csv').write_text('cell_id,predicted_class\n')
+        (folder/'test_metrics.json').write_text('{}')
+        (folder/'verification.json').write_text('{"passed":true}')
+        return folder
+
     def test_mapping_ignores_and_rejects_bad_ids_and_categories(self):
         mask = np.array([[0, 1, 2, 3]], dtype=np.uint16)
         table = pd.DataFrame({'ObjectNumber': [1, 2], 'class': ['PanCK+', 'Other Cells']})
@@ -70,7 +81,8 @@ class ClassifiedAdapterTests(unittest.TestCase):
         return dict(adapter=adapter, image_root=str(root), mask_root=str(root), csv_root=str(root),
                     marker_patterns={name: '**/{scene_id}/marker.tif' for name in ['NUC_MARKER', 'IMM_MARKER', 'EPI_MARKER']},
                     mask_pattern='**/{scene_id}/mask.tif',
-                    csv_pattern='{scene_id}/labels.csv' if adapter == 'bcc' else 'obs.csv', label_column='truth',
+                    csv_pattern='{scene_id}/labels.csv' if adapter == 'bcc' else 'obs.csv',
+                    label_column='auto' if adapter=='bcc' else 'truth',
                     source_um_per_px=.5, resolution_note='fixture', scenes=scenes,
                     marker_groups={'NUC': ['NUC_MARKER'], 'IMMUNE': ['IMM_MARKER'], 'EPI': ['EPI_MARKER']})
 
@@ -83,6 +95,7 @@ class ClassifiedAdapterTests(unittest.TestCase):
             for adapter in ['bcc', 'ah08']:
                 settings['adapter'] = adapter
                 settings['csv_pattern'] = '{scene_id}/labels.csv' if adapter == 'bcc' else 'obs.csv'
+                settings['label_column'] = 'auto' if adapter=='bcc' else 'truth'
                 manifest = adapters.stage(settings, root / ('staged_' + adapter), .5)
                 _, mask, labels, _ = data.read_scene(manifest.parent / settings['scenes'][0]['scene_id'] / 'scene.json')
                 expected = [{'cell_id': 1, 'class': 'EPI'}]
@@ -130,7 +143,7 @@ class ClassifiedAdapterTests(unittest.TestCase):
             with patch.dict(run_project.DATASETS, {'fixture': settings}), \
                     patch.object(run_project, 'OUTPUT_ROOT', str(root / 'outputs')), \
                     patch.object(run_project, 'TRAIN_SETTINGS', overrides), \
-                    patch.object(run_project.run, 'main') as training:
+                    patch.object(run_project.run, 'main', side_effect=self.fake_training) as training:
                 out = run_project.main('train_test', 'fixture')
                 training.assert_called_once()
                 self.assertEqual(training.call_args.kwargs['cfg']['output_dir'], str(out / 'results'))

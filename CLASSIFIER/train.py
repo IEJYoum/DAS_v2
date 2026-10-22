@@ -15,6 +15,8 @@ from CLASSIFIER.model import build_model
 
 def initialize_model(cfg):
     """Fresh model or explicit parent weights; never restore optimizer state."""
+    # Deferred: expanded lineage inputs/classes and MLP/CoE experiments need an
+    # explicit, reported feature-transfer path. Keep this exact warm-start guard.
     model = build_model(cfg['model']).to(cfg['device'])
     if cfg.get('initial_checkpoint'):
         from support.path_compat import resolve_native_path

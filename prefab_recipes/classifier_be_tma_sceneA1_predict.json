@@ -1,0 +1,45 @@
+{
+  "name": "classifier_be_tma_sceneA1_predict",
+  "description": "Forward inference only on the complete BE-TMA sceneA1 ROI. Original AH08-only checkpoint; R3 DAPI/CD45/Ecad; exact nuc30 basins. Four raw outputs retained; three-class macro-F1 with artifact calls counted as errors.",
+  "steps": [{
+    "do": "home.classifier",
+    "with": {
+      "mode": "predict",
+      "sources": [{
+        "id": "be_tma",
+        "adapter": "das_triplet",
+        "triplet_folder": "//fortera-smb.ohsu.edu/EmiliLab/ChinData/Cyclic_Workflow/cmIF_2026-05-15_BE-TMA/IY_Prepared",
+        "triplet_stem": "04_neigh_clustered",
+        "scene_column": "slide_scene",
+        "object_column": "cellid",
+        "object_table": "obs",
+        "label_column": "Primary Celltype: Matrix",
+        "label_mapping": {
+          "2: immune": "IMMUNE",
+          "3: epithelial": "EPI",
+          "1: endothelial": "UNCLASSIFIED",
+          "4: active fibroblast": "UNCLASSIFIED",
+          "5: stromal": "UNCLASSIFIED"
+        },
+        "image_root": "//fortera-smb.ohsu.edu/EmiliLab/ChinData/Cyclic_Workflow/cmIF_2026-05-15_BE-TMA/RegisteredImages",
+        "mask_root": "//fortera-smb.ohsu.edu/EmiliLab/ChinData/Cyclic_Workflow/cmIF_2026-05-15_BE-TMA/Segmentation",
+        "source_convention": {"name": "registered_cellpose", "nuclear_round": "R3", "mask_kind": "nucleus"},
+        "marker_groups": {"NUC": ["DAPI"], "IMMUNE": ["CD45"], "EPI": ["Ecad"]},
+        "source_um_per_px": 0.325,
+        "resolution_note": "User-verified acquisition OME metadata: 0.325 um/pixel. Registered single-plane exports assumed to retain the original grid; resampled to the checkpoint's fixed working scale.",
+        "scenes": [{"scene_id": "hBE-TMA1-1_sceneA1", "split": "test"}]
+      }],
+      "checkpoint": "D:/CLASSIFIER_OUTPUT/baseline_AH08_only_20261013_174917_436166/best.pt",
+      "output_root": "D:/CLASSIFIER_OUTPUT",
+      "training": {"device": "cpu", "threads": 2},
+      "inference": {
+        "prediction_split": "test",
+        "inference_tile_px": 256,
+        "inference_overlap": 64,
+        "preview_max_px": 1600,
+        "error_gallery_limit": 12,
+        "report_classes": ["IMMUNE", "EPI", "UNCLASSIFIED"]
+      }
+    }
+  }]
+}

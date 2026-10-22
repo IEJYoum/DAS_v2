@@ -68,7 +68,9 @@ def main(argv=None):
                 from support import io_adapter as io
                 io.init_headless()
                 io.clear_log()
-                state = controler.headless_state(args.project)
+                independent_spacing = all(row['do'] in {'home.classifier', 'home.stain_correction', 'home.feature_extraction'}
+                                          for row in payload['steps'])
+                state = controler.headless_state(args.project, require_pixel_size=not independent_spacing)
                 result = controler.replay_recipe(state, payload, source=str(path))
                 return 0 if result.metadata["status"] == "ok" else 1
         return 0

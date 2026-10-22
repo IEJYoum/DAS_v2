@@ -717,86 +717,25 @@ def sumcols(df,obs,dfxy,method = 'max'):
 
 
 
-def agreeThresh(df, obs, dfxy):  # optimized, same behavior + returns
-    """Build consensus annotation labels from multiple obs columns using an agreement threshold."""
+def agreeThresh(df, obs, dfxy):
+    """Interactive wrapper over the shared, noninteractive agreement helper."""
+    from support.annotation_agreement import agree_annotations
     cols = cm.multiObMenu(obs, 'columns whose annotations will be searched for agreement agree')
     print('note: annotations must be identical to count as agreement')
     outn = logInput('resulting column name? ')
-
-    thresh = ''
-    while type(thresh) != float:
-        thresh = float(logInput('agreement threshold (0 combines all unique relevant annots, 1 = all columns must agree'))
-
-    # Work on a local string view (avoid converting whole obs repeatedly later)
-    X = obs.loc[:, cols].astype(str)
-
-    # Collect unique labels (uch) exactly like your logic, but faster
-    ignore = {'nan', 'no'}
-    yes_set = {'yes', 'Yes', 'YES', 'Y', 'y', '+'}
-
-    uch = []
-    seen = set()
-    for col in cols:
-        uc = pd.unique(X[col].values)
-        for u in uc:
-            if u in ignore:
-                continue
-            u2 = (col + '_' + u) if (u in yes_set) else u
-            if u2 not in seen:
-                seen.add(u2)
-                uch.append(u2)
-    uch = sorted(uch)
-
-    lcl = len(cols)
-
-    # Build output series
-    outS = pd.Series('', index=X.index, dtype=object)
-
-    # Fast path for thresh==0: assign all present labels (except ignored), with your yes->col_yes rule
-    # (Your original code would accept everything because score>=0 always.)
-    if thresh <= 0:
-        for col in cols:
-            v = X[col].values
-            m = ~np.isin(v, ['nan', 'no'])
-            # apply yes-prefixing
-            v2 = v.copy()
-            ymask = np.isin(v2, list(yes_set))
-            v2[ymask] = np.array([col + '_' + s for s in v2[ymask]], dtype=object)
-            # append
-            outS.iloc[m.nonzero()[0]] = outS.iloc[m.nonzero()[0]].values + (v2[m] + '_')
-        print(uch, 'uch')
-        obs[outn] = outS.astype(str)
-        return (df, obs.astype(str), dfxy)
-
-    # General case: for each candidate label, compute agreement score vectorized
-    # Note: yes-like labels in data do NOT equal "col_yes" strings; your original code also
-    # wouldn’t match them unless the data already contained "col_yes". So we preserve that:
-    # we only score against the uch strings exactly.
-    for uc in uch:
-        # (row == uc) across columns → count per row
-        counts = (X.values == uc).sum(axis=1)
-        scores = counts / lcl
-        good = scores >= thresh
-
-        if np.any(good):
-            # keep your debug print (but only print rows that pass)
-            idx = np.where(good)[0]
-            for j in idx:
-                row = X.iloc[j, :]
-                print(row, uc, scores[j])
-            # append label token
-            outS.iloc[idx] = outS.iloc[idx].values + (uc + '_')
-
-    print(uch, 'uch')
-    obs[outn] = outS
-    return (df, obs.astype(str), dfxy)
-
-
-
-
-
-
-
+    values = obs.loc[:, cols].copy()
+    # The named CNN shortcut canonicalizes lineage aliases first. Ordinary
+    # annotation agreement retains its existing literal-label semantics.
+    if str(outn).strip().casefold() == 'das_unet_labels':
+        from support.label_conventions import resolve_unet_labels
+        print('DAS_unet_labels: canonical lineage aliases, strict agreement (1.0), global artifact override')
+        selected = resolve_unet_labels(obs, selected_columns=cols)
+        obs[outn] = selected.labels.fillna('')
+        print('CNN label selection:', selected.summary)
+    else:
+        threshold = float(logInput('agreement threshold (0 combines all unique relevant annots, 1 = all columns must agree): '))
+        obs[outn] = agree_annotations(values, threshold)
+    return df, obs.astype(str), dfxy
 
 
 def scale(df,obs,dfxy):

@@ -1,9 +1,17 @@
 """The single output-folder rule: one new directory per invocation, never reuse."""
 from datetime import datetime
+import json
 from pathlib import Path
 
 from CLASSIFIER.config import ROOT
 from support.path_compat import resolve_native_path
+from support.filesystem_utils import atomic_write_with_retry
+
+
+def write_json(path, payload):
+    """Publish a small run/result record through DAS's existing atomic writer."""
+    text = json.dumps(payload, indent=2, allow_nan=False)
+    atomic_write_with_retry(path, lambda temporary: Path(temporary).write_text(text, encoding='utf-8'))
 
 
 def new_run_folder(output_root, output_dir=None, prefix=""):

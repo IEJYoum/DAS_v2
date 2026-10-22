@@ -16,6 +16,8 @@ def read_json(path):
 def score_lines(label, scores):
     if not scores:
         return [f"{label}: not available yet"]
+    if scores.get('labelled_cells') == 0:
+        return [f"{label}: unscored (no supplied truth); all predicted cells={scores.get('predicted_cells', '?')}"]
     lines = [f"{label}: accuracy={scores.get('accuracy', 0):.4f}; "
              f"macro-F1={scores.get('macro_f1', 0):.4f}; "
              f"labelled={scores.get('labelled_cells', '?')}; "
@@ -23,6 +25,13 @@ def score_lines(label, scores):
     for cls, values in scores.get("per_class", {}).items():
         lines.append(f"  {cls}: support={values['support']}; precision={values['precision']:.4f}; "
                      f"recall={values['recall']:.4f}; F1={values['f1']:.4f}")
+    reporting = scores.get('reporting')
+    if reporting and reporting['macro_f1'] is not None:
+        lines.extend([f"  Reporting classes: {', '.join(reporting['class_order'])}; "
+                      f"macro-F1={reporting['macro_f1']:.4f}; accuracy={reporting['accuracy']:.4f}",
+                      f"  ARTIFACT calls on labelled cells: {reporting['artifact_calls_on_labelled_cells']} "
+                      f"({reporting['artifact_call_rate_on_labelled_cells']:.2%})",
+                      f"  {reporting['interpretation']}"])
     return lines
 
 
@@ -56,13 +65,28 @@ def write_debug_summary(run_directory, status="complete", phase=None, error=None
                   f"Bounded image memory: {cfg.get('bounded_memory', False)}"])
     if (folder / 'results' / 'debug_summary.txt').is_file():
         lines.append(f"Detailed engine summary: {folder / 'results' / 'debug_summary.txt'}")
+    workflow = read_json(folder/'workflow_settings.json')
+    if workflow:
+        lines.append(f'Optional workflow controls: {workflow}')
+    result = read_json(folder/'result.json')
+    if result.get('deployment_predictions'):
+        lines.extend([f"All-ROI predictions: {result['deployment_predictions']}",
+                      f"Deployment metrics: {result['deployment_metrics']}",
+                      'All-ROI scores include training/validation cores; use results/test_metrics.json for held-out performance.',
+                      'Deployment reuses normalized training cache; each ROI is predicted whole, without training-window expansion.'])
+    for exported in result.get('triplet_exports', []):
+        lines.extend([f"DAS triplet: {exported['output_folder']} | stem={exported['stem']}",
+                      f"  matched={exported['matched_cells']}/{exported['rows']}; "
+                      f"mask calls without triplet row={exported['mask_calls_without_triplet_row']}",
+                      f"  Annotation import: {exported['annotations']}",
+                      '  Original truth columns retained; CNN_ columns contain model output.'])
     split_csv = folder / 'roi_splits.csv'
     if split_csv.is_file():
         import csv
         from collections import Counter
         with split_csv.open(encoding='utf-8-sig', newline='') as stream:
             counts = dict(Counter(row['split'] for row in csv.DictReader(stream)))
-        lines.append(f"BCC source-ROI allocation: {counts}; saved: {split_csv}")
+        lines.append(f"Source-ROI allocation: {counts}; saved: {split_csv}")
     if manifest_path.is_file():
         import csv
         with manifest_path.open(encoding="utf-8-sig", newline="") as stream:
@@ -73,6 +97,14 @@ def write_debug_summary(run_directory, status="complete", phase=None, error=None
                 else:
                     unit = "whole source image; tile predictions re-stitched before cell calls"
                 lines.append(f"  {row['split']}: {row['scene_id']} -> {unit}")
+                selection = meta.get('label_resolution')
+                if selection:
+                    lines.extend([f"    Labels: {selection['policy']}; columns={selection['selected_columns']}",
+                                  f"    supervised={selection['supervised_rows']}; ignored={selection['ignored_rows']}; "
+                                  f"disagreements={selection['disagreements']}; artifacts={selection['artifact_rows']}"])
+                else:
+                    lines.append(f"    Labels: existing prepared {meta.get('cells','cells.csv')}; "
+                                 f"provenance={meta.get('label_provenance','see source scene/ingest report')}")
     lines.extend(["", f"Training class counts (unique supervised cells): {weights.get('training_cell_counts', 'not available yet')}",
                   f"Loss mode/cap: {weights.get('mode', cfg.get('class_weighting', '?'))} / "
                   f"{weights.get('cap', cfg.get('class_weight_cap', '?'))}",

@@ -1,0 +1,31 @@
+{
+  "name": "02_vs_tma17_features_pin1_asma_cd45_ecad_v1",
+  "description": "DAS v1 | VS-TMA-17 ONLY | Pass 2/2 | Nuclear, whole-cell and cytoplasmic means for AF-corrected Pin1/aSMA/CD45 and raw Ecad R3 c5 | Existing nuc30 and Ecad nuc30_cell30_matched_exp5 masks | No DAPI intensity | Engine defaults n_in=0,n_out=2,min_cyto_pixels=10; four workers | Per-core/combined CSV and DAS triplet.",
+  "steps": [
+    {
+      "do": "home.feature_extraction",
+      "with": {
+        "corrected_result": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\IY_DAS_VS17_features\\af_outputs\\af_20261020T192143Z_c69a9d80ac34\\result.json",
+        "corrected_markers": [
+          "Pin1",
+          "aSMA",
+          "CD45"
+        ],
+        "raw_sources": {
+          "Ecad": {
+            "sources": [
+              "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/RegisteredImages/VS-TMA-17_scene*/Registered-R3_PCNA.CD8.CD4.Ecad_VS-TMA-17_scene*_c5_ORG.tif"
+            ],
+            "round": "R3",
+            "channel": 5
+          }
+        },
+        "segmentation_root": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\Segmentation\\VS-TMA-17_CellposeSegmentation",
+        "output_root": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\IY_DAS_VS17_features\\feature_outputs",
+        "settings": {
+          "workers": 4
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "name": "01_vs_tma17_af_pin1_asma_cd45_v1",
+  "description": "DAS v1 | VS-TMA-17 ONLY | Pass 1/2 | AF correction: Pin1 R7 c2, aSMA R4 c2, CD45 R6 c4 | max(R0,R6Q), same optical channel, curated quantile-softcap defaults, full image | Writes fresh float32 TIFFs; reprocesses pilot cores. Pass 2 extracts these corrected markers plus raw Ecad R3 c5. No DAPI intensity extraction.",
+  "steps": [
+    {
+      "do": "home.stain_correction",
+      "with": {
+        "sources": [
+          "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/RegisteredImages/VS-TMA-17_scene*/Registered-R7_Pin1.*_VS-TMA-17_scene*_c2_ORG.tif",
+          "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/RegisteredImages/VS-TMA-17_scene*/Registered-R4_aSMA.*_VS-TMA-17_scene*_c2_ORG.tif",
+          "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/RegisteredImages/VS-TMA-17_scene*/Registered-R6_CK17.PDL1.CD45.CD20_VS-TMA-17_scene*_c4_ORG.tif"
+        ],
+        "references": [
+          "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/RegisteredImages/VS-TMA-17_scene*/Registered-R0_*_VS-TMA-17_scene*_c[24]_ORG.tif",
+          "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/RegisteredImages/VS-TMA-17_scene*/Registered-R6Q_*_VS-TMA-17_scene*_c[24]_ORG.tif"
+        ],
+        "associations": {
+          "Pin1": {
+            "reference_rounds": [
+              "R0",
+              "R6Q"
+            ],
+            "stain_rounds": [
+              "R7"
+            ],
+            "stain_channel": 2
+          },
+          "aSMA": {
+            "reference_rounds": [
+              "R0",
+              "R6Q"
+            ],
+            "stain_rounds": [
+              "R4"
+            ],
+            "stain_channel": 2
+          },
+          "CD45": {
+            "reference_rounds": [
+              "R0",
+              "R6Q"
+            ],
+            "stain_rounds": [
+              "R6"
+            ],
+            "stain_channel": 4
+          }
+        },
+        "output_root": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\IY_DAS_VS17_features\\af_outputs",
+        "preview_only": "n",
+        "workers": 4
+      }
+    }
+  ]
+}

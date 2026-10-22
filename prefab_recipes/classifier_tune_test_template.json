@@ -1,0 +1,35 @@
+{
+  "name": "classifier_tune_test_template",
+  "description": "EDIT paths/columns/patterns/MPP before use. Tune parent weights with a fresh optimizer; validate and test separate whole ROIs.",
+  "steps": [{
+    "do": "home.classifier",
+    "with": {
+      "mode": "tune_test",
+      "sources": [{
+        "id": "cycif",
+        "adapter": "classified_csv",
+        "image_root": "D:/EDIT_CYCIF/images",
+        "mask_root": "D:/EDIT_CYCIF/masks",
+        "csv_root": "D:/EDIT_CYCIF/labels",
+        "marker_patterns": {
+          "DAPI": "{scene_id}/*DAPI*.tif*",
+          "CD45": "{scene_id}/*CD45*.tif*",
+          "PanCK": "{scene_id}/*PanCK*.tif*"
+        },
+        "marker_groups": {"NUC": ["DAPI"], "IMMUNE": ["CD45"], "EPI": ["PanCK"]},
+        "mask_pattern": "{scene_id}/*label*.tif*",
+        "csv_pattern": "{scene_id}.csv",
+        "object_column": "ObjectNumber",
+        "label_column": "class",
+        "label_mapping": {"Immune": "IMMUNE", "Tumor": "EPI", "Other Cells": "UNCLASSIFIED", "Artifact": "ARTIFACT"},
+        "source_um_per_px": 0.5,
+        "resolution_note": "EDIT: replace the example MPP with the actual acquisition/export spacing",
+        "scene_table": "D:/EDIT_CYCIF/roi_splits.csv"
+      }],
+      "checkpoint": "D:/CLASSIFIER_OUTPUT/EDIT_PARENT/results/best.pt",
+      "output_root": "D:/CLASSIFIER_OUTPUT",
+      "training": {"epochs": 10, "lr": 0.0001, "batch_size": 2, "threads": 2, "device": "cpu", "seed": 7, "class_weighting": "capped_inverse_frequency", "class_weight_cap": 5, "replay_fraction": 0},
+      "inference": {"inference_tile_px": 256, "inference_overlap": 64, "preview_max_px": 1024}
+    }
+  }]
+}

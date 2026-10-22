@@ -57,6 +57,36 @@ MENUS = {
                 "folder?": ("path", "Optional data folder; omitted means the active project.")}),
         Action("home.load_latest", "load most recent save", "controler:startup_load_last",
                "Load the latest complete saved triplet in this project.", {}),
+        Action('home.classifier', 'CNN cell classification', 'controler:startup_cell_classifier',
+               'Prepare, predict, train or tune the existing classifier using explicit source descriptions.', {
+                   'mode': ('text', 'prepare / predict (forward test) / train_test (fresh) / tune_test (parent weights).'),
+                   'sources': ('list', 'Dataset objects: id; preset=bcc/ah08/manifest OR adapter=classified_csv/das_triplet/images/manifest. Roots, patterns, scenes/scene_table/discover, marker_groups, scale and label_mapping. See _usage_guides/classifier_recipes_v0.md.'),
+                   'checkpoint': ('path', 'Existing model for predict/tune_test; empty string for fresh training/preparation.'),
+                   'output_root': ('path', 'Parent for a new run folder. Relative paths use the active project.'),
+                   'training': ('mapping', 'epochs (null selects steps), steps, lr, batch_size, device, threads, seed, class_weighting/cap, marker_drop, gain_jitter, replay_fraction, log_every, validate_every. {} uses launcher defaults.'),
+                   'inference': ('mapping', 'prediction_split=train/val/test/all; predict_all_after_training=true optionally predicts all configured ROIs using best.pt; export_triplet=true saves new DAS triplets for das_triplet sources; deployment_reports=true adds deployment PNGs (default false for all-ROI output). Also inference_tile_px/overlap, target_um_per_px, preview_max_px, error_gallery_limit, debug_scenes, report_classes. {} retains existing behavior.')
+               }),
+        Action("home.stain_correction", "stain correction (AF subtraction)", "controler:startup_stain_correction",
+               "Discover registered stains recursively, resolve explicit per-scene AF references, and preview or subtract.", {
+                   "sources": ("list", "TIFF file/glob specifications. Use ** for recursion; relative paths use the active project."),
+                   "references": ("list", "AF TIFF file/glob specifications, independently selected from target markers."),
+                   "associations": ("mapping", "Marker -> {reference_rounds: [R0, R6Q]}. Defaults: reference_channel=same (from stain filename), combine=max. Optional stain_rounds, stain_channel and reference selection overrides."),
+                   "scaling?": ("mapping", "Omitted/{} uses legacy defaults: method=quantile_softcap, quantile=0.997, cap=2.0, tau=0.5. Partial overrides allowed; method=fixed defaults factor=1.0. Full-image estimation/application."),
+                   "output_root": ("path", "Parent for a fresh output folder on every run, including preflight. Inputs are never overwritten."),
+                   "preview_only": ("yes_no", "y = publish resolved pairs/header checks without reading pixels; n = write float32 corrected TIFFs."),
+                   "workers?": ("number", "Bounded concurrent image calculations; default 1. Writes/evidence remain sequential; scientific results unchanged.")
+               }),
+        Action("home.feature_extraction", "feature extraction from images and masks", "controler:startup_recipe_feature_extraction",
+               "Extract named corrected/raw markers using the existing nucleus/cell/cytoplasm engine.", {
+                   "corrected_result": ("path", "Completed home.stain_correction result.json; empty string for raw-only extraction."),
+                   "corrected_markers": ("list", "Marker names to measure from the corrected result."),
+                   "raw_sources": ("mapping", "Marker -> {sources: [file/glob], optional round: R3, channel: 5}. Known registered filenames supply scene identity."),
+                   "segmentation_root": ("path", "Existing exact Cellpose segmentation folder or its parent. Uses matched_exp5 cell basins and nuclear basins."),
+                   "output_root": ("path", "Parent for fresh per-core/combined CSVs and a DAS triplet."),
+                   "settings?": ("mapping", "Optional n_in, n_out, min_cyto_pixels (engine defaults), workers (default 1, independent cores in parallel)."),
+                   "preview_only?": ("yes_no", "y = resolve images/masks only; omitted/n = extract features."),
+                   "wait_for_inputs?": ("yes_no", "y = accept a running AF result and wait per core for its planned corrected TIFFs; default n.")
+               }),
         root_unported("home.data_editing", "data editing", "controler:legacy_data_editing_menu"),
         Action("home.analysis", "analysis", "controler:open_processing_menu",
                "Collect processing choices, then repeat over groups.", PROCESSING_CONTEXT, "ifp.main"),

@@ -1,5 +1,12 @@
 # One launcher for real datasets
 
+For recipe/GUI operation and a new lab dataset, start with
+[Classifier recipes](../_usage_guides/classifier_recipes_v0.md). The registered
+`home.classifier` action passes explicit source, training and inference settings
+to this same launcher. Forward-test and tune+test templates are in
+`prefab_recipes/classifier_*_template.json`; edit their example paths/patterns/MPP.
+The no-argument IDE workflow below remains available.
+
 Open **`run_project.py`**, edit the settings at the top, and press Run in VS Code.
 It also works from ordinary PowerShell:
 
@@ -100,6 +107,15 @@ as writable output directories.
 `results/normalized_cache/` is part of the run and used by verification; keep it
 until checks complete. New invocations stage fresh inputs and build fresh caches.
 
+For completed historical runs, `python "CLASSIFIER/clear cache.py" D:/CLASSIFIER_OUTPUT`
+previews disposable normalized arrays. Add `--apply` to remove those arrays while
+keeping models, predictions, debug PNGs, records and staged inputs. Pressing Run
+on `clear cache.py` uses its editable TARGET_FOLDER and previews only. An explicit
+`--include-staged` also selects generated TIFF copies; retain those if you want
+to reuse prepared inputs without another network read. Applied cleanup writes a
+receipt. Model/export verification requiring removed caches needs those caches
+rebuilt; the saved historical metrics and checkpoint remain intact.
+
 ## Keep temporary source formats out of the engine
 
 The flow is:
@@ -112,15 +128,17 @@ run_project.py settings -> disposable adapters.py source rules
                        -> shared reports and summaries
 ```
 
-`adapters.py` owns the temporary BCC label mapping and the AH08 combined-observation
-CSV selection. `prepare_classified.py` owns shared ID checks and image resampling.
-Neither knows workstation paths or loads a model. BCC `PanCK+` maps to EPI,
+`adapters.py` owns BCC/AH08 layout selection; shared label policy and aliases live
+in `support/label_conventions.py`. `prepare_classified.py` owns shared ID checks
+and image resampling. Neither knows workstation paths or loads a model. BCC `PanCK+` maps to EPI,
 immune subclasses to IMMUNE, and Other Cells/aSMA+ to the affirmative other-cell
 class (checkpoint name `UNCLASSIFIED`). Cells absent from the CSV stay unscored.
 Unknown categories still fail; absence of annotation does not imply other-cell
-truth. AH08 selects
-`slide_scene` from its combined CSV and preserves the existing four-class labels;
-blank labels remain ignored. Both produce exactly the same downstream format.
+truth. AH08 selects `slide_scene` from its combined CSV. Label ingest prefers
+DAS_unet_labels, otherwise intersects recognized conventions after broad-class
+conversion, with global artifact precedence. Explicit label_column overrides
+remain available. Each ROI records the policy, raw labels and exclusions in its
+label audit and debug summary. Both layouts produce the same downstream format.
 
 When DAS supplies this format, select `DATASET='manifest'`, set its `manifest` path
 and `marker_groups`, and bypass these source adapters. Training manifests must
@@ -137,3 +155,12 @@ point. Older `run_real.py --preflight/--steps/--class-weighting` options are ret
 use MODE='prepare' and edit `TRAIN_SETTINGS` centrally instead.
 
 See [BCC_FORWARD.md](BCC_FORWARD.md) for marker/scale assumptions and proxy scoring.
+
+Optional recipe/GUI deployment: `inference.predict_all_after_training=true`
+loads the selected best checkpoint and predicts every configured ROI, including
+training/reserved cores, reusing the normalized cache. `export_triplet=true`
+also writes a new DAS triplet for each `das_triplet` source, preserving original
+labels and adding `CNN_` annotations. Standalone prediction accepts
+`prediction_split="all"`. All-ROI output defaults to CSVs; enable
+`deployment_reports` for PNGs. See the recipe guide and
+`prefab_recipes/classifier_triplet_train_deploy_template.json` for configuration.

@@ -1,0 +1,107 @@
+DAS recipes: agent quickstart
+============================
+
+Use this as a prompt aide when drafting a recipe for an existing DAS workflow.
+The live action registry and target functions are the source of truth.
+
+Find the operation
+------------------
+Run these from DAS_v2; inspection/checking uses only the Python standard library:
+
+    python run_recipe.py --actions
+    python run_recipe.py --project PROJECT --action ACTION_ID
+    python run_recipe.py --project PROJECT --list
+
+--action returns the parent menu, named answers/help, replayable status and
+existing recipe examples. Inspect only the actions relevant to the request.
+
+Read these functions when the contract needs explanation:
+
+  support/recipe_actions_v0.py
+    MENUS, get_action(), Action.resolve(): IDs, allowed nesting, answer declarations
+    and module:function targets. Follow the target to its implementation.
+
+  support/recipe_v0.py
+    ask(): how answers bind; check(): accepted JSON structure and missing answers;
+    recipe_files()/find_recipe(): lookup; collection(): interactive completion;
+    run_record(): execution evidence.
+
+  controler.py
+    perform_action(), replay_recipe(): the shared GUI/headless execution path.
+    Inspect the target's recipe.ask() calls and the called scientific function
+    for conditional answers, column semantics, units, defaults and side effects.
+
+  run_recipe.py
+    main(), examples(): CLI inspection/check/run behavior and example discovery.
+
+Draft the JSON
+--------------
+Prefer an existing recorded/project recipe or a relevant prefab as the starting
+point. prefab_recipes/proof_zscore_boxplot.json shows load -> nested processing
+-> plotting; its inputs are synthetic fixtures, so replace them for real work.
+
+    {
+      "name": "my_workflow",
+      "steps": [
+        {"do": "home.load_prepared_data", "with": {
+          "folder": "C:/EDIT/project", "stem": "EDIT_saved_stem"
+        }}
+      ]
+    }
+
+- Use registered action IDs and exact named answers, including literal column
+  names. Keep child actions inside their declared parent's steps array.
+- Supply the required/conditional answers needed by the selected execution path.
+  Missing/null values can request prompts; "", false, 0 and [] are explicit.
+  Conditional declaration keys ending in ? lose that suffix in recipe JSON.
+- Respect declared types. yes_no answers usually require "y"/"n", rather than
+  JSON booleans. Inspect mapping/list contents in the target function.
+- Verify actual inputs, column names, units, output destinations and project
+  context. Relative paths generally use the active project, not the recipe's
+  directory; loading another project can change that context.
+- Use ordinary JSON. Variables, interpolation, includes and recipe references
+  are not framework features. A requested operation marked replayable:false
+  needs a port; inventing an ID/answer will not make it executable.
+
+Check, then execute when the task calls for it
+--------------------------------------------
+Save project recipes in PROJECT/recipes/NAME.json, or supply an explicit JSON
+path. Project recipe names shadow matching prefabs.
+
+Also copy each real project recipe cheaply and unchanged into
+prefab_recipes/misc recipes/NAME.json so it ships with DAS as a reusable worked
+example. Keep descriptive name/description headers and concrete project paths;
+these are project examples, not promoted generic prefabs. Refresh the copy when
+editing its project recipe. Consult these examples before drafting from scratch.
+
+    python run_recipe.py --project PROJECT --check NAME_OR_PATH
+    python run_recipe.py --project PROJECT --run NAME_OR_PATH
+
+--check validates structure, names and nesting; it does not read inputs, verify
+columns or test scientific behavior. --check --interactive reports future prompts;
+headless --run requires those choices to be supplied. Use the DAS environment
+for execution, or run the saved recipe from the GUI's Recipes menu.
+
+For a small execution check, inspect recipe_runs/<run>/run.json, steps.jsonl,
+run.log and the action's actual products. A structural pass alone is not a
+successful execution. Completed steps are not rolled back after a later failure.
+
+For long jobs, launch in the background with persistent logs, verify execution
+has started, then return to the user. Do not watch/poll the job to completion
+unless asked. Report the saved recipe and output locations; a later status
+request can inspect the existing execution evidence cheaply.
+
+If extending replay support is required, consult recipe_porting_guide_v0.txt.
+Routine recipe authoring should reuse the registered execution path.
+
+AF subtraction uses home.stain_correction. See stain_correction_recipes_v0.md
+and prefab_recipes/stain_af_template.json. Its preview_only=y execution resolves
+actual scene/round/channel pairs before pixels are read; --check remains purely
+structural. Supply actual AF rounds; omitted channel/combination/scaling use
+the documented same-channel, maximum-AF and curated legacy scaling defaults.
+
+Image feature extraction uses home.feature_extraction; see
+feature_extraction_recipes_v0.md. Consume a completed AF result.json directly
+and add raw named images as needed. Existing cell/nuclear masks suffice; no
+DAPI intensity image is required. Keep real recipes in PROJECT/recipes with
+descriptive name/description headers and a project README linking pass results.

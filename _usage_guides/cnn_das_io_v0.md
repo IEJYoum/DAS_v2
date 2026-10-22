@@ -1,5 +1,10 @@
 # CNN launchers on DAS I/O
 
+2026-10-19: Classifier now also has a registered recipe/GUI action. See
+[Classifier recipes](classifier_recipes_v0.md) for named source lists, CSV/triplet
+adapters, explicit run controls and forward-test/tune templates. The editable
+launcher workflow described below remains available.
+
 The classifier and custom segmentation now use the DAS path, project-config,
 prompt and TIFF-access helpers. You can still run either without opening DAS.
 Their models, losses, normalization, caches, tiles and stitching remain separate.

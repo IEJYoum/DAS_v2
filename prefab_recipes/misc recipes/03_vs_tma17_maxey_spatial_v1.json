@@ -1,0 +1,66 @@
+{
+  "name": "03_vs_tma17_maxey_spatial_v1",
+  "description": "VS-TMA-17 | 754997 extracted cells | Load completed Pin1/aSMA/CD45/Ecad triplet, default Maxey matrices and scoring across all cores (no channel threshold comparison, no log transform), save full triplet before per-scene primary-celltype spatial pseudoimages. Legacy matrix matcher uses first matching compartment (nuc). Save stem maxey_features_all data. Concrete project example, not a generic prefab.",
+  "steps": [
+    {
+      "do": "home.load_prepared_data",
+      "with": {
+        "folder": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\IY_DAS_VS17_features\\feature_outputs\\features_20261020T210128Z_249843a48059",
+        "stem": "features"
+      }
+    },
+    {
+      "do": "home.analysis",
+      "with": {
+        "repeat_column": "all data",
+        "key_strings": []
+      },
+      "steps": [
+        {
+          "do": "ifp.celltyping",
+          "steps": [
+            {
+              "do": "ifp.maxey",
+              "with": {
+                "compare_thresholds": "n",
+                "log_transform": "n"
+              }
+            }
+          ]
+        },
+        {
+          "do": "ifp.selection",
+          "steps": [
+            {
+              "do": "ifp.save",
+              "with": {
+                "filename": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\IY_DAS_VS17_features\\maxey_outputs\\maxey_features"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "do": "home.visualization",
+      "with": {
+        "save_folder": "\\\\graylab\\BCC_Chin_Lab_RDS\\ChinData\\Cyclic_Workflow\\cmIF_2021-10-15_Panc\\IY_DAS_VS17_features\\figures\\maxey_primary",
+        "repeat_column": "all data",
+        "key_strings": [],
+        "categories": [
+          "Primary Celltype: Matrix"
+        ],
+        "autoclean": "n"
+      },
+      "steps": [
+        {
+          "do": "ifv.spatial",
+          "with": {
+            "colors": [],
+            "size_multiplier": 1.0
+          }
+        }
+      ]
+    }
+  ]
+}

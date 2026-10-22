@@ -31,6 +31,8 @@ Structural source specifications: support/ingest_sources.py
   expand_source_spec, prompt_source_specs, source_display_id.
 Known names/layouts: support/image_conventions.py.
 Physical TIFF/channel/window access: support/image_sources.py.
+  ImageSourceInfo also exposes native TIFF resolution/units when present;
+  these are source tags, not inferred physical calibration or OME grid metadata.
 Network retry/atomic files: support/filesystem_utils.py.
 Machine-local preferences: support/das_config.py.
 
@@ -118,6 +120,19 @@ cnn_das_io_v0.md. Legacy consumers retain their own policy pending parity tests.
 Controller calls supply invalidate_project_config as the save callback. External
 process edits still require project reload; there is no cross-process cache watch.
 PLANNED: broader consumer migration and machine/application fallback policy.
+
+CURRENT: home.stain_correction uses the shared discovery/convention/TIFF,
+interaction and atomic publication surfaces. Its source specifications and output
+parent use stain_correction_sources, stain_correction_references and
+stain_correction_output_root. Scientific settings stay in recipes. See
+stain_correction_recipes_v0.md for the current full-image AF-only boundary.
+
+CURRENT: home.feature_extraction consumes a completed AF result plus named raw
+image specifications and the existing Cellpose convention resolver. It wraps
+feature_extract_17, publishes per-core/combined tables and a DAS triplet through
+shared atomic I/O, and records exact input/output associations. See
+feature_extraction_recipes_v0.md. No nuclear intensity image is required when
+existing nuclear and cell masks are supplied.
 
 4. Resolve path text before discovery; name the base
 --------------------------------------------------

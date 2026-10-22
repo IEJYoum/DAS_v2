@@ -3,9 +3,37 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 from pathlib import Path
 from typing import Callable, Type
+from uuid import uuid4
+
+
+def atomic_write_json(path: str | Path, value) -> str:
+    """Publish a JSON artifact through the shared network-aware writer."""
+    return atomic_write_with_retry(path, lambda tmp: Path(tmp).write_text(
+        json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8"),
+        retry_seconds=1, max_minutes=1, require_nonempty=True)
+
+
+def create_run_directory(parent: str | Path, *, prefix: str = "run_") -> Path:
+    """Create a unique output folder with ordinary inherited permissions.
+
+    tempfile.mkdtemp requests mode 0700. Some Windows SMB servers create that
+    directory but reject its private ACL, causing tempfile to retry indefinitely.
+    Only actual name collisions are retried here; access failures propagate.
+    """
+    parent = Path(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(5):
+        folder = parent / (prefix + uuid4().hex[:12])
+        try:
+            folder.mkdir()
+        except FileExistsError:
+            continue
+        return folder
+    raise FileExistsError(f"Could not allocate a unique run directory in {parent}")
 
 
 def retry_io(

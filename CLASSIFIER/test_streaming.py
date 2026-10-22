@@ -125,7 +125,7 @@ class StreamingTests(unittest.TestCase):
                     patch.object(run_project, 'OUTPUT_ROOT', str(root / 'outputs')), \
                     patch.object(run_project, 'TRAIN_SETTINGS', training_settings), \
                     patch.object(infer, 'load_checkpoint', return_value=(None, parent)), \
-                    patch.object(run, 'main') as engine:
+                    patch.object(run, 'main', side_effect=helper.fake_training) as engine:
                 out = run_project.main('tune_test', 'bcc')
                 engine.assert_called_once()
                 cfg = engine.call_args.kwargs['cfg']

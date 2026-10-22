@@ -1,0 +1,41 @@
+{
+  "name": "classifier_triplet_train_deploy_template",
+  "description": "EDIT paths, marker patterns, MPP and ROI names. Fresh train on hand-picked cores; predict all configured cores; save a new DAS triplet. Set mode=tune_test and checkpoint to tune instead.",
+  "steps": [{
+    "do": "home.classifier",
+    "with": {
+      "mode": "train_test",
+      "sources": [{
+        "id": "curated",
+        "adapter": "das_triplet",
+        "triplet_folder": "D:/EDIT_PROJECT/maxey_outputs",
+        "triplet_stem": "EDIT_SAVED_STEM",
+        "scene_column": "slide_scene",
+        "object_column": "seg_label",
+        "object_table": "obs",
+        "label_column": "auto",
+        "image_root": "D:/EDIT_DATASET_ROOT",
+        "mask_root": "D:/EDIT_DATASET_ROOT/Segmentation",
+        "marker_patterns": {
+          "DAPI": "RegisteredImages/{scene_id}/*EDIT_DAPI*.tif",
+          "CD45": "IY_DAS_VS17_features/af_outputs/EDIT_FIXED_AF_RUN/tiffs/{scene_id}/*EDIT_CD45*.tif",
+          "Ecad": "RegisteredImages/{scene_id}/*EDIT_ECAD*.tif"
+        },
+        "marker_groups": {"NUC": ["DAPI"], "IMMUNE": ["CD45"], "EPI": ["Ecad"]},
+        "mask_pattern": "**/{scene_id}_EDIT_EXACT_MASK_SUFFIX.tif",
+        "source_um_per_px": 0.5,
+        "resolution_note": "EDIT: placeholder MPP; confirm actual acquisition/export spacing before running",
+        "scenes": [
+          {"scene_id": "EDIT_TRAIN_CORE", "split": "train"},
+          {"scene_id": "EDIT_VALIDATION_CORE", "split": "val"},
+          {"scene_id": "EDIT_TEST_CORE", "split": "test"},
+          {"scene_id": "EDIT_DEPLOYMENT_CORE", "split": "reserved"}
+        ]
+      }],
+      "checkpoint": "",
+      "output_root": "D:/CLASSIFIER_OUTPUT",
+      "training": {"epochs": 10, "batch_size": 2, "threads": 2, "device": "cpu", "replay_fraction": 0},
+      "inference": {"predict_all_after_training": true, "export_triplet": true, "deployment_reports": false}
+    }
+  }]
+}

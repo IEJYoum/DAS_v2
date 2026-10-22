@@ -41,6 +41,8 @@ class ImageSourceInfo:
     channel_axis: Optional[int]
     channel_count: int
     channel_names: tuple[str, ...]
+    resolution: Optional[tuple[float, float]] = None
+    resolution_unit: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,14 @@ def inspect_image_source(path: str | Path, *, series_index: int = 0) -> ImageSou
         dtype = str(getattr(series, "dtype", ""))
         page_count = int(len(series.pages))
         channel_names = parse_ome_channel_names(getattr(tf, "ome_metadata", None))
+        tags = series.pages[0].tags
+        resolution = None
+        resolution_unit = None
+        if "XResolution" in tags and "YResolution" in tags:
+            xres, yres = tags["XResolution"].value, tags["YResolution"].value
+            if xres[1] and yres[1]:
+                resolution = (float(xres[0] / xres[1]), float(yres[0] / yres[1]))
+                resolution_unit = int(tags["ResolutionUnit"].value) if "ResolutionUnit" in tags else None
 
     channel_axis = _channel_axis_from_series(axes, shape, channel_names)
     if channel_axis is None:
@@ -129,6 +139,8 @@ def inspect_image_source(path: str | Path, *, series_index: int = 0) -> ImageSou
         channel_axis=channel_axis,
         channel_count=channel_count,
         channel_names=tuple(str(name) for name in channel_names),
+        resolution=resolution,
+        resolution_unit=resolution_unit,
     )
 
 
@@ -142,8 +154,13 @@ def iter_channel_sources(path_or_folder: str | Path, *, series_index: int = 0) -
         return out
 
     info = inspect_image_source(path, series_index=series_index)
+    return channel_sources_from_info(info)
+
+
+def channel_sources_from_info(info: ImageSourceInfo) -> list[ChannelSource]:
+    """Describe channels from an inspected header without reopening the source."""
     if info.channel_axis is None:
-        marker = path.stem
+        marker = Path(info.path).stem
         return [
             ChannelSource(
                 path=info.path,

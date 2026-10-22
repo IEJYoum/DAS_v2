@@ -417,7 +417,7 @@ def parse_koei_cycif_record(file_name: str, stem: Optional[str] = None) -> Optio
     parts = stem.split("_")
     if len(parts) < 3:
         return None
-    round_token = parts[0]
+    round_token = re.sub(r'^Registered-', '', parts[0], flags=re.IGNORECASE)
     if re.fullmatch(r"R\d+[A-Za-z]*", round_token, re.IGNORECASE) is None:
         return None
     marker_block = parts[1]
@@ -626,7 +626,8 @@ def parse_koei_feature_marker_record(file_name: str, stem: Optional[str] = None)
     marker = _marker_from_block_for_channel(parts[1], channel_number)
     if marker is None:
         return None
-    round_token = parts[0] if re.match(r"R\d+", parts[0], re.IGNORECASE) else ""
+    round_token = re.sub(r'^Registered-', '', parts[0], flags=re.IGNORECASE)
+    round_token = round_token if re.fullmatch(r'R\d+[A-Za-z]*', round_token, re.IGNORECASE) else ''
     return FeatureImageRecord(
         file_name=file_name,
         convention="Koei",
@@ -778,12 +779,14 @@ def collect_feature_marker_files(
         record = parse_feature_marker_record(path.name)
         if record is None:
             continue
-        if allowed and not any(token in record.marker.lower() for token in allowed):
-            continue
-
+        # AF labels describe the reference acquisition, not the target stain.
+        # Classify references before applying a target-marker selection.
         is_qc = any(token in path.name for token in qc_tokens)
         if is_qc:
             qc_files.append(path.name)
+            continue
+
+        if allowed and not any(token in record.marker.lower() for token in allowed):
             continue
 
         if record.convention == "DAS":
@@ -794,9 +797,98 @@ def collect_feature_marker_files(
     return qc_files, stain_files
 
 
+def resolve_stain_reference_pairs(stain_paths, reference_paths, associations):
+    """Pair registered Koei stains with explicit scene/round/channel references.
+
+    Paths are already discovered by ingest_sources. No walking, TIFF access,
+    panel inference or channel fallback belongs here. Defaults are the stain's
+    optical channel and maximum over supplied rounds; duplicates within a round
+    are always ambiguous. Unknown naming schemes require a separate adapter.
+    """
+    if not isinstance(associations, dict) or not associations:
+        raise ValueError("associations must map target marker names to reference selections")
+
+    def records(paths):
+        result = []
+        for path in paths:
+            path = Path(path)
+            acquisition = parse_cycif_record(path.name)
+            feature = parse_feature_marker_record(path.name)
+            if acquisition is not None and feature is not None and acquisition.convention == "Koei":
+                result.append((path, acquisition, feature))
+        return result
+
+    stains, references = records(stain_paths), records(reference_paths)
+    pairs, used, marker_keys = [], set(), set()
+    for marker, rule in associations.items():
+        if not isinstance(marker, str) or not marker.strip() or not isinstance(rule, dict):
+            raise ValueError("Each association needs a marker name and an object")
+        marker_key = normalize_marker_key(marker)
+        if not marker_key or marker_key in marker_keys:
+            raise ValueError(f"Duplicate/invalid target marker: {marker!r}")
+        marker_keys.add(marker_key)
+        unknown = set(rule) - {"stain_rounds", "stain_channel", "reference_rounds", "reference_channel", "combine"}
+        if unknown:
+            raise ValueError(f"Unknown association fields for {marker}: {sorted(unknown)}")
+        rounds = rule.get("reference_rounds")
+        stain_rounds = rule.get("stain_rounds", [])
+        for name, values in (("reference_rounds", rounds), ("stain_rounds", stain_rounds)):
+            if not isinstance(values, list) or any(not isinstance(x, str) or re.fullmatch(r"R\d+[A-Za-z]*", x, re.I) is None for x in values):
+                raise ValueError(f"{marker}.{name} must be a list of round tokens, e.g. R0/R6Q")
+            if len({x.casefold() for x in values}) != len(values):
+                raise ValueError(f"Duplicate {name} for {marker}")
+        if not rounds:
+            raise ValueError(f"Explicit reference_rounds required for {marker}")
+        channel = rule.get("reference_channel", "same")
+        stain_channel = rule.get("stain_channel")
+        for name, value in (("reference_channel", channel), ("stain_channel", stain_channel)):
+            if name == "reference_channel" and value == "same":
+                continue
+            if name == "stain_channel" and value is None:
+                continue
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{marker}.{name} requires a positive optical channel number" +
+                                 (" or 'same'" if name == "reference_channel" else ""))
+        combine = rule.get("combine", "max")
+        if combine not in ("single", "max") or (combine == "single" and len(rounds) != 1):
+            raise ValueError(f"{marker}.combine requires single (one round) or max")
+        matched = [(p, a, f) for p, a, f in stains if normalize_marker_key(f.marker) == marker_key
+                   and (not stain_rounds or a.round_token.casefold() in {x.casefold() for x in stain_rounds})
+                   and (stain_channel is None or f.channel_number == stain_channel)]
+        if not matched:
+            raise ValueError(f"No registered stain matched marker {marker!r}")
+        seen = set()
+        for path, acquisition, feature in matched:
+            key = (acquisition.slide_scene, acquisition.round_token.casefold(), feature.channel_number)
+            if key in seen or path in used:
+                raise ValueError(f"Ambiguous/overlapping stain selection for {marker}: {key}")
+            seen.add(key)
+            used.add(path)
+            ref_channel = feature.channel_number if channel == "same" else channel
+            selected = []
+            for round_token in rounds:
+                candidates = [p for p, a, f in references if a.slide_scene == acquisition.slide_scene
+                              and a.round_token.casefold() == round_token.casefold()
+                              and f.channel_number == ref_channel]
+                if len(candidates) != 1:
+                    raise ValueError(f"Expected one AF reference for {acquisition.slide_scene} {marker} "
+                                     f"{round_token} c{ref_channel}; found {len(candidates)}: {candidates}")
+                if candidates[0] == path:
+                    raise ValueError(f"Stain cannot be its own AF reference: {path}")
+                selected.append(str(candidates[0]))
+            pairs.append(dict(slide_scene=acquisition.slide_scene, marker=marker,
+                stain_round=acquisition.round_token, stain_channel=feature.channel_number,
+                stain=str(path), references=selected, reference_rounds=list(rounds),
+                reference_channel=ref_channel, combine=combine))
+    return sorted(pairs, key=lambda row: (row["slide_scene"], row["stain_round"], row["stain"]))
+
+
 def find_segmentation_pair(
     seg_root: Union[str, os.PathLike[str], None],
     core_name: str,
+    *,
+    strict: bool = False,
+    kind: Optional[str] = None,
 ) -> SegmentationPair:
     """
     Resolve segmentation labels for feature extraction.
@@ -804,13 +896,47 @@ def find_segmentation_pair(
     DAS StarDist currently emits one label image; use it as both nucleus and
     cell labels so the existing extractor can run without algorithm changes.
     Koei keeps the old Cellpose filename contract.
+    strict=True with kind=nucleus/cell opts into an exact Cellpose folder and
+    unambiguous basins; it never searches sibling test or R1-Segmentation runs.
     """
     if seg_root is None or str(seg_root).strip() == "":
         return SegmentationPair(None, None, None, "")
 
     root = Path(seg_root)
     if not root.is_dir():
+        if strict:
+            raise FileNotFoundError(f'Segmentation root missing: {root}')
         return SegmentationPair(None, None, None, "")
+
+    if strict:
+        if kind not in {'nucleus', 'cell'}:
+            raise ValueError('Strict segmentation selection requires kind=nucleus or cell')
+        slide, _ = _split_slide_scene_token(core_name)
+        expected = slide + '_CellposeSegmentation'
+        folder = root if root.name == expected else root / expected
+        if not folder.is_dir():
+            raise FileNotFoundError(f'Exact Cellpose segmentation folder is missing: {folder}')
+        # Explicit opt-in: never search sibling R1-Segmentation/test folders or
+        # substitute cell basins for nuclear IDs. Keep legacy selection intact.
+        files = [name for name in _tiff_files(folder)
+                 if name.lower().startswith(core_name.lower() + '_')]
+        def unique_suffix(suffix):
+            matches = [name for name in files if Path(name).stem.lower().endswith(suffix)]
+            if len(matches) > 1:
+                raise ValueError(f'Ambiguous segmentation for {core_name}: {matches}')
+            return matches[0] if matches else None
+        nuclear = unique_suffix('_nuc30_nucleisegmentationbasins')
+        cell = None
+        if kind == 'cell':
+            for suffix in ('_nuc30_cell30_matched_exp5_cellsegmentationbasins',
+                           '_nuc30_cell30_matched_cellsegmentationbasins',
+                           '_cell30_cellsegmentationbasins'):
+                cell = unique_suffix(suffix)
+                if cell is not None:
+                    break
+        if (nuclear if kind=='nucleus' else cell) is None:
+            raise FileNotFoundError(f'No strict {kind} basins for {core_name} in {folder}')
+        return SegmentationPair(cell, nuclear, str(folder), 'Koei-strict')
 
     for folder in _segmentation_candidate_dirs(root, core_name):
         das_pair = _find_das_segmentation_pair_in_dir(folder, core_name)
@@ -823,6 +949,40 @@ def find_segmentation_pair(
             return koei_pair
 
     return SegmentationPair(None, None, None, "")
+
+
+def resolve_registered_cellpose_sources(image_root, seg_root, core_name, marker_names,
+                                        *, nuclear_marker, nuclear_round, mask_kind='nucleus'):
+    """Resolve registered single-plane CycIF stains plus an explicit mask kind.
+
+    Shared by consumers needing the RegisteredImages/<slide_scene> and exact
+    <slide>_CellposeSegmentation layout. Marker identity/channel parsing stays in
+    this registry; repeated markers/nuclear rounds must be selected unambiguously.
+    Nuclear round/channel 1 is an explicit acquisition choice, not an inferred stain.
+    """
+    folder = Path(image_root) / core_name
+    if not folder.is_dir():
+        raise FileNotFoundError(f'Registered scene folder missing: {folder}')
+    candidates = {name:[] for name in marker_names}
+    for filename in _tiff_files(folder):
+        feature = parse_feature_marker_record(filename)
+        acquisition = parse_cycif_record(filename)
+        if acquisition is None or acquisition.slide_scene.lower() != core_name.lower():
+            continue
+        for name in marker_names:
+            if name == nuclear_marker:
+                matched = (acquisition.channel_number == 1
+                           and acquisition.round_token.lower() == str(nuclear_round).lower())
+            else:
+                matched = feature is not None and normalize_marker_key(feature.marker) == normalize_marker_key(name)
+            if matched:
+                candidates[name].append(folder / filename)
+    for name, paths in candidates.items():
+        if len(paths) != 1:
+            raise ValueError(f'Expected one {name} image for {core_name}; found {len(paths)}: {paths}')
+    pair = find_segmentation_pair(seg_root, core_name, strict=True, kind=mask_kind)
+    filename = pair.nuc_file if mask_kind=='nucleus' else pair.cell_file
+    return {name:paths[0] for name, paths in candidates.items()}, Path(pair.folder) / filename
 
 
 def _marker_from_block_for_channel(marker_block: str, channel_number: int) -> Optional[str]:
@@ -911,11 +1071,12 @@ def _segmentation_dir_sort_key(path: Path) -> tuple[int, float, str]:
 
 def _tiff_files(folder: Path) -> list[str]:
     try:
-        return sorted(
-            path.name
-            for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
-        )
+        # DirEntry uses file attributes from the directory listing on Windows.
+        # Path.is_file() would issue a separate SMB request for every entry.
+        with os.scandir(folder) as entries:
+            return sorted(entry.name for entry in entries
+                          if Path(entry.name).suffix.lower() in {".tif", ".tiff"}
+                          and entry.is_file())
     except Exception:
         return []
 

@@ -48,10 +48,12 @@ def read_scene(scene_json):
         if raw.shape != mask.shape or not np.isfinite(raw).all() or raw.min() < 0:
             raise ValueError(f"{path}: {name} shape/intensity contract failed")
     labels = pd.read_csv(path.parent / meta["cells"])
-    ids = labels["cell_id"].to_numpy()
+    labels['cell_id'] = pd.to_numeric(labels['cell_id'], errors='raise')
+    ids = labels["cell_id"].to_numpy(dtype=np.float64)
     if (labels.cell_id.duplicated().any() or not np.isfinite(ids).all()
             or (ids <= 0).any() or not np.equal(ids, ids.astype(np.int64)).all()):
         raise ValueError(f"{path}: label IDs must be unique positive integers")
+    labels['cell_id'] = labels['cell_id'].astype(np.int64)
     extra = set(ids) - set(np.unique(mask))
     if extra:
         raise ValueError(f"{path}: label IDs absent from mask: {sorted(extra)}")
@@ -174,15 +176,15 @@ def read_manifest(manifest_path):
     resolved = [(path.parent / p).resolve() for p in manifest.scene_json]
     if manifest.scene_id.duplicated().any() or len(set(resolved)) != len(resolved):
         raise ValueError("Scene/scene-path duplicates across manifest rows or splits")
-    if not set(manifest.split) <= {"train", "val", "test"}:
-        raise ValueError("Manifest split must be train, val, or test")
-    source_splits, mask_owners = {}, {}
+    if not set(manifest.split) <= {"train", "val", "test", "reserved"}:
+        raise ValueError("Manifest split must be train, val, test or reserved")
+    source_splits, mask_owners, original_owners = {}, {}, {}
     for row in manifest.itertuples(index=False):
         scene_path = path.parent / row.scene_json
         meta = json.loads(scene_path.read_text(encoding="utf-8"))
         if meta["scene_id"] != row.scene_id or meta["split"] != row.split:
             raise ValueError("Manifest and scene metadata disagree")
-        source = meta.get("parent_scene_id", row.scene_id)
+        source = meta.get('source_uid', meta.get("parent_scene_id", row.scene_id))
         if source in source_splits and source_splits[source] != row.split:
             raise ValueError(f"Source scene {source} occurs in more than one split")
         source_splits[source] = row.split
@@ -190,6 +192,15 @@ def read_manifest(manifest_path):
         if mask_path in mask_owners:
             raise ValueError(f"Duplicate source mask across scenes: {mask_owners[mask_path]} / {row.scene_id}")
         mask_owners[mask_path] = row.scene_id
+        original = meta.get('source_mask')
+        evidence = scene_path.parent/'ingest_report.json'
+        if not original and evidence.is_file():
+            original = json.loads(evidence.read_text(encoding='utf-8')).get('source_mask')
+        if original:
+            original = resolve_native_path(original)
+            if original in original_owners:
+                raise ValueError(f'Duplicate original source mask: {original_owners[original]} / {row.scene_id}')
+            original_owners[original] = row.scene_id
     return manifest
 
 

@@ -1232,11 +1232,11 @@ def _resolve_initial_context(
     }
 
 
-def headless_state(project_folder) -> SessionState:
+def headless_state(project_folder, *, require_pixel_size=True) -> SessionState:
     """Construct an explicit project session without startup discovery or writes."""
     root = resolve_native_path(project_folder, must_exist=True, kind="directory")
     pixel_size = _configured_pixel_size_um()
-    if pixel_size is None:
+    if pixel_size is None and require_pixel_size:
         raise recipe.RecipeError("Set pixel size once in DAS before running a headless recipe")
     return SessionState(project_root=root, data_folder=root, build_folder=root,
                         figure_folder=_default_figure_folder(root), stem="",
@@ -1339,7 +1339,7 @@ def main_menu(state: SessionState) -> bool:
     io.flush_session_log()
     ids = ["home.data_editing", "home.analysis", "home.visualization", "home.svm",
            "home.old_tool", "home.html", "home.roi_mailbox", "home.threshold_updates",
-           "home.recipes"]
+           "home.recipes", "home.classifier"]
     idx = menu_index("Main Menu", [recipe_actions.get_action(key).label for key in ids])
     io.flush_session_log()
     if idx is None:
@@ -1402,6 +1402,7 @@ def menu_index(
     Integer menu with legacy-style prompt wording.
     """
     io.iprint("menu")
+    io.iprint(title)
     io.iprint("")
     for idx, label in enumerate(options):
         io.iprint(f"{idx} : {label}")
@@ -1426,7 +1427,7 @@ def _confirm_quit() -> bool:
 
 def startup_menu(state: SessionState) -> bool:
     ids = ["home.set_project", "home.prepare", "home.load_prepared_data",
-           "home.load_latest", "home.recipes"]
+           "home.load_latest", "home.recipes", "home.classifier"]
     while True:
         io.flush_session_log()
         latest = find_latest_stem(state.data_folder)
@@ -1460,7 +1461,6 @@ def loading_menu(state: SessionState) -> None:
         auto_clean_full,
         save_current,
         startup_spectral_flow_import,
-        startup_cell_classifier,
     ]
     while True:
         io.flush_session_log()
@@ -1539,15 +1539,20 @@ def startup_prepare_data(state: SessionState) -> None:
         startup_build_data,
         startup_import_rna_data,
         startup_spectral_flow_import,
+        lambda state: perform_action(state, 'home.classifier'),
+        lambda state: perform_action(state, 'home.stain_correction'),
+        lambda state: perform_action(state, 'home.feature_extraction'),
     ]
     options = [
         "image registration",
         "cell segmentation",
-        "stain correction and feature extraction",
+        "stain correction and feature extraction (legacy)",
         "format tabular data (formerly import and clean data)",
         "high-plex feature reduction (RNA path)",
         "Spectral deconvolution (Spectral flow path)",
         "CNN cell classification",
+        "stain correction (AF subtraction; recipes)",
+        "feature extraction from corrected/raw images (recipes)",
     ]
     descriptions = [
         "Register raw or per-round image stacks into a registered image set for downstream extraction.",
@@ -1557,6 +1562,8 @@ def startup_prepare_data(state: SessionState) -> None:
         "Run the RNA / high-plex reduction path.",
         "Run the spectral flow import and deconvolution path.",
         "Run the central classifier with project paths and an explicit experiment mode.",
+        "Preview explicit stain/AF pairs or subtract AF using shared recursive source discovery.",
+        "Measure named corrected/raw stains using existing cell and nuclear segmentation masks.",
     ]
     while True:
         idx = menu_index("Prepare Data", options, option_descriptions=descriptions)
@@ -1565,6 +1572,113 @@ def startup_prepare_data(state: SessionState) -> None:
         functions[idx](state)
         if state.has_data():
             return
+
+
+def startup_stain_correction(state: SessionState, sources=None, references=None,
+                             associations=None, scaling=None, output_root=None,
+                             preview_only=None, workers=None):
+    from support.ingest_sources import prompt_source_specs, join_source_specs
+    from support.project_config import load_project_settings, save_project_settings
+    from support.shared_utils import flexMenu
+    from data_extraction.stain_correction import scaling_settings
+
+    supplied_recipe = recipe.current_step() is not None and "with" in recipe.current_step().row
+    values, _ = load_project_settings(state.data_folder)
+
+    def source_prompt(key):
+        return prompt_source_specs(values.get(key, str(state.build_folder / "**" / "Registered*.tif")),
+            input_fn=io.iget, print_fn=io.iprint, want="files", base_dir=state.data_folder)
+
+    def association_prompt():
+        result = {}
+        for marker in flexMenu("target marker name", input_fn=io.iget):
+            rounds = flexMenu(f"AF reference round for {marker} (e.g. R0 or R6Q)", input_fn=io.iget)
+            result[marker] = dict(reference_rounds=rounds)
+        return result
+
+    def scaling_prompt():
+        method = checkChange("quantile_softcap", "AF scaling method (fixed/quantile_softcap)", input_fn=io.iget)
+        if method == "fixed":
+            return dict(method=method, factor=float(checkChange("1", "AF scale factor", input_fn=io.iget)))
+        if method == "quantile_softcap":
+            return dict(method=method,
+                quantile=float(checkChange("0.997", "intensity quantile", input_fn=io.iget)),
+                cap=float(checkChange("2", "scale soft cap", input_fn=io.iget)),
+                tau=float(checkChange("0.5", "soft-cap tau", input_fn=io.iget)))
+        raise recipe.RecipeError(f"Unknown AF scaling method: {method}")
+
+    sources = recipe.ask("sources", sources, lambda: source_prompt("stain_correction_sources"))
+    references = recipe.ask("references", references, lambda: source_prompt("stain_correction_references"))
+    associations = recipe.ask("associations", associations, association_prompt)
+    # Saved recipes can omit scaling in every transport. A fresh interactive
+    # action still offers DAS controls, starting from the curated defaults.
+    if scaling is None and (io.is_headless() or supplied_recipe):
+        scaling = scaling_settings()
+    scaling = recipe.ask("scaling", scaling, scaling_prompt)
+    scaling = scaling_settings(scaling)
+    output_root = recipe.ask("output_root", output_root, lambda: checkChange(
+        values.get("stain_correction_output_root", str(state.data_folder / "stain_correction")),
+        "stain correction output root", input_fn=io.iget))
+    preview_only = recipe.ask("preview_only", preview_only, "preview pairs only? (y/n): ")
+    workers = recipe.ask("workers", 1 if workers is None else workers)
+    if recipe.collecting():
+        return state
+
+    module = importlib.import_module("data_extraction.stain_correction")
+    owner = recipe.current_step()
+    try:
+        io.reset_progress(0, "Resolving stain/AF pairs")
+        product = module.run(sources=sources, references=references, associations=associations,
+            scaling=scaling, output_root=output_root, preview_only=preview_only,
+            workers=workers,
+            base_dir=state.data_folder, recipe_reference=recipe.run_reference(),
+            output_callback=owner.outputs.append if owner is not None else None,
+            print_fn=io.iprint, progress=io.tick_progress, start_progress=io.reset_progress)
+    finally:
+        io.clear_progress()
+    if preview_only == "n":
+        save_project_settings(state.data_folder, {
+            "stain_correction_sources": join_source_specs(sources),
+            "stain_correction_references": join_source_specs(references),
+            "stain_correction_output_root": str(Path(product).parent.parent),
+        }, on_update=invalidate_project_config)
+    io.iprint("Stain correction result:", product)
+    return product
+
+
+def startup_recipe_feature_extraction(state: SessionState, corrected_result=None, corrected_markers=None,
+                                     raw_sources=None, segmentation_root=None, output_root=None,
+                                     settings=None, preview_only=None, wait_for_inputs=None):
+    from support.shared_utils import flexMenu
+    from support.ingest_sources import prompt_source_specs
+    def raw_prompt():
+        rows = {}
+        for marker in flexMenu("raw marker to extract", input_fn=io.iget):
+            rows[marker] = dict(sources=prompt_source_specs("", input_fn=io.iget,
+                print_fn=io.iprint, want="files", base_dir=state.data_folder))
+        return rows
+    corrected_result = recipe.ask("corrected_result", corrected_result, "completed AF result.json (blank for raw-only): ")
+    corrected_markers = recipe.ask("corrected_markers", corrected_markers,
+                                 lambda:flexMenu("corrected marker to extract", input_fn=io.iget))
+    raw_sources = recipe.ask("raw_sources", raw_sources, raw_prompt)
+    segmentation_root = recipe.ask("segmentation_root", segmentation_root,
+        lambda:checkChange(str(state.segmentation_root or ""), "segmentation root", input_fn=io.iget))
+    output_root = recipe.ask("output_root", output_root,
+        lambda:checkChange(str(state.data_folder/"features"), "feature output root", input_fn=io.iget))
+    settings = recipe.ask("settings", {} if settings is None else settings)
+    preview_only = recipe.ask("preview_only", "n" if preview_only is None else preview_only)
+    wait_for_inputs = recipe.ask("wait_for_inputs", "n" if wait_for_inputs is None else wait_for_inputs)
+    if recipe.collecting():
+        return state
+    module = importlib.import_module("data_extraction.feature_extraction_recipe")
+    owner = recipe.current_step()
+    product = module.run(corrected_result=corrected_result, corrected_markers=corrected_markers,
+        raw_sources=raw_sources, segmentation_root=segmentation_root, output_root=output_root,
+        settings=settings, preview_only=preview_only, wait_for_inputs=wait_for_inputs, base_dir=state.data_folder,
+        recipe_reference=recipe.run_reference(), output_callback=owner.outputs.append if owner else None,
+        print_fn=io.iprint)
+    io.iprint("Feature extraction result:", product)
+    return product
 
 
 def startup_image_registration(state: SessionState) -> None:
@@ -1635,20 +1749,104 @@ def startup_cell_segmentation(state: SessionState) -> None:
                 figure_folder=state.figure_folder, segmentation_root=Path(output))
 
 
-def startup_cell_classifier(state: SessionState) -> None:
-    """Use the standalone launcher; prompts and saves use the active DAS session."""
-    modes = ['predict', 'prepare', 'train_test', 'tune_test']
-    selected = menu_index('Classifier mode', modes)
-    if selected is None:
-        return
+def _classifier_sources_prompt(state, mode='predict'):
+    """Collect files/columns through DAS; source JSON remains an advanced import."""
+    from CLASSIFIER.gui_sources import prompt_sources
+    return prompt_sources(state, mode, menu_index)
+
+
+def _classifier_training_prompt(mode):
+    if mode not in {'train_test','tune_test'}:
+        return {}
+    from CLASSIFIER.run_project import EPOCHS, TUNE_LR, TRAIN_SETTINGS
+    return {'epochs':int(checkChange(str(EPOCHS),'epochs',input_fn=io.iget)),
+            'batch_size':int(checkChange(str(TRAIN_SETTINGS['batch_size']),'batch size',input_fn=io.iget)),
+            'lr':float(checkChange(str(TUNE_LR if mode=='tune_test' else 1e-3),'learning rate',input_fn=io.iget))}
+
+
+def _classifier_inference_prompt(mode, sources):
+    """Collect optional deployment products through the shared GUI/recipe hooks."""
+    if mode=='prepare':
+        return {}
+    training = mode in {'train_test','tune_test'}
+    choices = ['Held-out test only' if training else 'Selected test ROIs',
+               'Predict all selected ROIs after training' if training else 'All selected ROIs']
+    if any(s.get('adapter')=='das_triplet' for s in sources):
+        choices.append('All selected ROIs + DAS triplet export')
+    index = menu_index('Classifier output scope', choices)
+    if index is None or index==0:
+        return {}
+    settings = {'predict_all_after_training':True} if training else {'prediction_split':'all'}
+    if index==2:
+        settings['export_triplet'] = True
+    io.iprint('Whole-dataset output includes train/validation/reserved ROIs in the source selection. '
+              'CSV output is enabled; extra deployment PNGs are disabled. Existing labels are preserved.')
+    return settings
+
+
+def startup_cell_classifier(state: SessionState, mode=None, sources=None, checkpoint=None,
+                            output_root=None, training=None, inference=None):
+    """Recipe and GUI bind the same six answers, then call the central launcher."""
+    def pick_mode():
+        modes = ['predict','prepare','train_test','tune_test']
+        index = menu_index('Classifier mode', modes, option_descriptions=[
+            'Forward pass and scoring only; no training.', 'Stage inputs and preview without training.',
+            'Train a fresh model, validate and test.', 'Tune a parent with a fresh optimizer, validate and test.'])
+        return modes[index] if index is not None else ''
+    def pick_checkpoint():
+        if mode not in {'predict','tune_test'}:
+            return ''
+        from CLASSIFIER.run_project import CHECKPOINT
+        from support.project_config import load_project_settings
+        values, _ = load_project_settings(state.data_folder)
+        return checkChange(values.get('classifier_checkpoint',CHECKPOINT),'parent checkpoint',input_fn=io.iget)
+    def pick_output():
+        from CLASSIFIER.run_project import OUTPUT_ROOT
+        from support.project_config import load_project_settings
+        values, _ = load_project_settings(state.data_folder)
+        return checkChange(values.get('classifier_output_root',OUTPUT_ROOT),'classifier output root',input_fn=io.iget)
+    mode = recipe.ask('mode', mode, pick_mode)
+    if not mode:
+        return False
+    sources = recipe.ask('sources', sources, lambda: _classifier_sources_prompt(state, mode))
+    if not sources:
+        return False
+    checkpoint = recipe.ask('checkpoint', checkpoint, pick_checkpoint)
+    output_root = recipe.ask('output_root', output_root, pick_output)
+    training = recipe.ask('training', training, lambda: _classifier_training_prompt(mode))
+    inference = recipe.ask('inference', inference, lambda: _classifier_inference_prompt(mode, sources))
+    if recipe.collecting():
+        return state
+    if mode in {'predict','tune_test'} and not checkpoint:
+        raise recipe.RecipeError('Classifier predict/tune_test requires an explicit checkpoint')
     project = importlib.import_module('CLASSIFIER.run_project')
-    datasets = list(project.DATASETS)
-    dataset = menu_index('Classifier dataset adapter', datasets)
-    if dataset is None:
-        return
-    project.main(modes[selected], datasets[dataset], project_root=state.data_folder,
-        interactive=True, config_changed=invalidate_project_config,
-        input_fn=io.iget, print_fn=io.iprint)
+    out = project.main(mode=mode, sources=sources, checkpoint=checkpoint,
+        output_root=output_root, training=training, inference=inference,
+        project_root=state.data_folder, base_dir=state.data_folder, interactive=False,
+        config_changed=invalidate_project_config, input_fn=io.iget, print_fn=io.iprint)
+    product = Path(out)/'result.json'
+    if not product.is_file():
+        raise recipe.RecipeError('Classifier returned without result.json')
+    import json
+    result = json.loads(product.read_text(encoding='utf-8'))
+    if result.get('status')!='complete':
+        raise recipe.RecipeError('Classifier did not produce a completed result')
+    from support.project_config import save_project_settings
+    save_project_settings(state.data_folder, {'classifier_gui_sources':json.dumps(sources)},
+                          on_update=invalidate_project_config)
+    owner = recipe.current_step()
+    if owner is not None:
+        owner.outputs.append(str(product))
+        if result.get('deployment_predictions'):
+            owner.outputs.append(result['deployment_predictions'])
+        for exported in result.get('triplet_exports', []):
+            owner.outputs.extend(exported['files'].values())
+            owner.outputs.append(exported['annotations'])
+        result['recipe'] = recipe.run_reference()
+        from CLASSIFIER.outputs import write_json
+        write_json(product,result)
+    io.iprint('Classifier result:', product)
+    return out
 
 
 def _default_stardist_input_folder(state: SessionState) -> Path:
@@ -3338,7 +3536,8 @@ def make_figure_path(
     )
 
 
-def load_triplet(folder: Path, stem: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_triplet(folder: Path, stem: str, *, normalize_labels=True,
+                 strict_alignment=False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Load exactly the df/obs/dfxy members for a saved stem.
     """
@@ -3351,13 +3550,19 @@ def load_triplet(folder: Path, stem: str) -> Tuple[pd.DataFrame, pd.DataFrame, p
         df = pd.read_csv(df_path, index_col=0)
         io.tick_progress(f"Loading triplet | {df_path.name}")
         io.tick_progress(f"Loading triplet | {obs_path.name}")
-        obs = pd.read_csv(obs_path, index_col=0).astype(str)
+        obs = pd.read_csv(obs_path, index_col=0)
+        if normalize_labels:
+            obs = obs.astype(str)
         io.tick_progress(f"Loading triplet | {obs_path.name}")
         io.tick_progress(f"Loading triplet | {dfxy_path.name}")
         dfxy = pd.read_csv(dfxy_path, index_col=0)
         io.tick_progress(f"Loading triplet | {dfxy_path.name}")
+        if strict_alignment and (not all(t.index.is_unique for t in (df,obs,dfxy))
+                or not df.index.equals(obs.index) or not df.index.equals(dfxy.index)):
+            raise ValueError('Triplet export requires unique, identically ordered df/obs/dfxy indices')
         df, obs, dfxy = align_triplet(df, obs, dfxy)
-        obs = normalize_primary_labels(obs)
+        if normalize_labels:
+            obs = normalize_primary_labels(obs)
         return df, obs, dfxy
     finally:
         io.clear_progress()

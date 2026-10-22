@@ -1,0 +1,20 @@
+{
+  "name": "stain_af_template",
+  "description": "Edit paths and supplied AF rounds. Defaults: same optical channel, maximum AF, legacy scaling. R0/R6Q below are examples.",
+  "steps": [
+    {
+      "do": "home.stain_correction",
+      "with": {
+        "sources": ["C:/EDIT/TMA/RegisteredImages/**/*.tif"],
+        "references": ["C:/EDIT/TMA/RegisteredImages/**/*.tif"],
+        "associations": {
+          "Pin1": {
+            "reference_rounds": ["R0", "R6Q"]
+          }
+        },
+        "output_root": "C:/EDIT/TMA/AF_outputs",
+        "preview_only": "y"
+      }
+    }
+  ]
+}

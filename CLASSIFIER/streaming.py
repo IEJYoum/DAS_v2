@@ -24,12 +24,12 @@ def close_scene(scene):
 
 
 class Scenes(Sequence):
-    def __init__(self, records, cfg, split=None):
+    def __init__(self, records, cfg, split=None, *, whole_sources=False):
         self.records = [r for r in records if split is None or r['meta']['split'] == split]
         self.cfg = cfg
         self.items = []
         for i, record in enumerate(self.records):
-            windows = record['meta'].get('windows') if record['meta']['split'] == 'train' else None
+            windows = record['meta'].get('windows') if record['meta']['split'] == 'train' and not whole_sources else None
             self.items.extend((i, window) for window in windows) if windows is not None else self.items.append((i, None))
         if not self.items:
             raise ValueError(f'No cached scenes for split {split}')
@@ -75,7 +75,7 @@ class Scenes(Sequence):
                     stats=record['stats'], class_names=self.cfg['class_names'])
 
 
-def cache_manifest(manifest, cfg, directory, log=print, split=None):
+def cache_manifest(manifest, cfg, directory, log=print, split=None, *, training=True):
     """Prepare one full ROI at a time; save normalized planes, not duplicated tiles."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
@@ -88,9 +88,9 @@ def cache_manifest(manifest, cfg, directory, log=print, split=None):
         path = (Path(manifest).parent / row.scene_json).resolve()
         scene = data.prepare_scene(path, cfg)
         meta = scene['metadata']
-        if row.split == 'train' and 'windows' not in meta:
+        if training and row.split == 'train' and 'windows' not in meta:
             raise ValueError(f'{row.scene_id}: bounded-memory training needs coverage windows')
-        if row.split == 'train':
+        if training and row.split == 'train':
             if meta.get('dataset_role', 'primary') not in {'primary', 'replay'}:
                 raise ValueError('Training dataset_role must be primary or replay')
             if len({tuple(w) for w in meta['windows']}) != len(meta['windows']):
