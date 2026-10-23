@@ -2,6 +2,16 @@
 import numpy as np
 
 
+def cutoff_for_recall(positive_scores, target=.99):
+    """Highest observed inclusive cutoff retaining at least target of positives."""
+    values=np.sort(np.asarray(positive_scores,dtype=float))
+    if (values.ndim!=1 or not len(values) or not np.isfinite(values).all()
+            or ((values<0)|(values>1)).any() or not 0<target<=1):
+        raise ValueError('Recall endpoint requires positive scores in [0,1] and target in (0,1]')
+    allowed=int(np.floor((1-target)*len(values)+1e-9))
+    return float(values[min(allowed,len(values)-1)])
+
+
 def fit_binary_cutoff(scores, positive, grid_step=.001):
     """Fit balanced accuracy on explicit binary references, not confidence calibration."""
     scores, positive = np.asarray(scores, float), np.asarray(positive)

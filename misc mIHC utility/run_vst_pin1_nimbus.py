@@ -97,47 +97,73 @@ def execute(recipe_path, pilot):
         result=json.loads(product.read_text())
         if result['status']!='complete':
             raise ValueError('No completed Nimbus output')
-        raw=pd.read_csv(result['long_results'])
-        scores=raw.loc[raw.marker.eq('Pin1')].set_index(['slide_scene','mask_label'])[['score']]
-        rows=reference()
-        keys=pd.MultiIndex.from_arrays([rows.slide_scene,rows.seg_label],names=scores.index.names)
-        selected=rows.slide_scene.isin(workflow['calibration_scenes'])
-        calibration_scores=scores.reindex(keys[selected]).score.to_numpy()
-        if not np.isfinite(calibration_scores).all():
-            raise ValueError('Some calibration cells lack a Nimbus score')
-        decision=fit_binary_cutoff(calibration_scores,rows.loc[selected,'Pin1_cell'].ge(200).to_numpy())
-        decision.update(intensity_reference=200,calibration_scenes=workflow['calibration_scenes'],
-            interpretation=workflow['interpretation'],model_result=str(product),
-            normalization=result['worker_result']['normalization_dict'])
-        cutoff=decision['threshold']
-        atomic_write_json(job/('pilot_decision.json' if pilot else 'decision.json'),decision)
-        summary=[workflow['interpretation'],f'Cutoff: {cutoff:.3f}',
-            f'Calibration proxy balanced agreement: {decision["balanced_accuracy"]:.3%}',
-            f'Raw model result: {product}',f'Target obs: {OBS}']
-        if not pilot:
-            annotations=scores.loc[scores.index.isin(keys)].rename(columns={'score':'nimbus_score_Pin1'})
-            annotations['Pin1: Nimbus']=np.where(annotations.nimbus_score_Pin1.ge(cutoff),'Pin1+','Pin1-')
-            aligned=align_annotation_columns(keys,annotations,rows.index)
-            if aligned.isna().any().any():
-                raise ValueError('Incomplete obs predictions; publication refused')
-            audit=rows.join(aligned)
-            audit['intensity_proxy_positive']=audit.Pin1_cell.ge(200)
-            audit['agrees_with_intensity_proxy']=audit['Pin1: Nimbus'].eq('Pin1+').eq(audit.intensity_proxy_positive)
-            audit.to_csv(job/'pin1_predictions.csv')
-            publication=write_obs_annotations(OBS,annotations)
-            atomic_write_json(job/'obs_publication.json',publication)
-            summary += [f'Published rows: {publication["rows"]:,}',
-                f'Positive calls: {int(audit["Pin1: Nimbus"].eq("Pin1+").sum()):,}',
-                f'Mask objects outside obs: {int((~scores.index.isin(keys)).sum())}',
-                'Added obs columns: nimbus_score_Pin1; Pin1: Nimbus. Existing backup supplied by user.']
-        (job/'debug_summary.txt').write_text('\n'.join(summary)+'\n',encoding='utf-8')
-        workflow.update(status='pilot_complete' if pilot else 'complete',result=str(product),threshold=cutoff)
-        atomic_write_json(job/'workflow.json',workflow)
-        print('\n'.join(summary),flush=True)
+        finish(product,pilot=pilot)
     except BaseException as exc:
         workflow.update(status='failed',error=f'{type(exc).__name__}: {exc}')
         atomic_write_json(job/'workflow.json',workflow)
         raise
+
+
+def finish(product, pilot=False, publish=True):
+    product=Path(product)
+    job=product.parents[2]
+    workflow=json.loads((job/'workflow.json').read_text())
+    result=json.loads(product.read_text())
+    if result['status']!='complete':
+        raise ValueError('Requires a completed, validated model result')
+    workflow.pop('error',None)
+    workflow['status']='postprocessing'
+    atomic_write_json(job/'workflow.json',workflow)
+    from data_extraction.nimbus_bridge import validate_long_results
+    raw=validate_long_results(result['long_results'],result)
+    scores=raw.loc[raw.marker.eq('Pin1')].set_index(['slide_scene','mask_label'])[['score']]
+    rows=reference()
+    keys=pd.MultiIndex.from_arrays([rows.slide_scene,rows.seg_label],names=scores.index.names)
+    all_scores=scores.reindex(keys).score.to_numpy()
+    observed=np.isfinite(all_scores)
+    selected=rows.slide_scene.isin(workflow['calibration_scenes']) & observed
+    calibration_scores=all_scores[selected]
+    # The cell-matched mask omits some nuclei retained in obs; do not fabricate
+    # negative calls for those objects or include their fallback intensities in fitting.
+    decision=fit_binary_cutoff(calibration_scores,rows.loc[selected,'Pin1_cell'].ge(200).to_numpy())
+    decision.update(intensity_reference=200,calibration_scenes=workflow['calibration_scenes'],
+        interpretation=workflow['interpretation'],model_result=str(product),
+        normalization=result['worker_result']['normalization_dict'])
+    cutoff=decision['threshold']
+    atomic_write_json(job/('pilot_decision.json' if pilot else 'decision.json'),decision)
+    summary=[workflow['interpretation'],f'Cutoff: {cutoff:.3f}',
+        f'Calibration proxy balanced agreement: {decision["balanced_accuracy"]:.3%}',
+        f'Raw model result: {product}',f'Target obs: {OBS}']
+    if not pilot:
+        annotations=scores.loc[scores.index.isin(keys)].rename(columns={'score':'nimbus_score_Pin1'})
+        annotations['Pin1: Nimbus']=np.where(annotations.nimbus_score_Pin1.ge(cutoff),'Pin1+','Pin1-')
+        aligned=align_annotation_columns(keys,annotations,rows.index)
+        aligned['nimbus_Pin1_predicted']=aligned.nimbus_score_Pin1.notna()
+        aligned['Pin1: Nimbus']=aligned['Pin1: Nimbus'].fillna('UNSCORED')
+        audit=rows.join(aligned)
+        audit['intensity_proxy_positive']=audit.Pin1_cell.ge(200)
+        audit['agrees_with_intensity_proxy']=audit['Pin1: Nimbus'].eq('Pin1+').eq(audit.intensity_proxy_positive).where(audit.nimbus_Pin1_predicted)
+        audit.to_csv(job/'pin1_predictions.csv')
+        annotations=aligned.copy()
+        annotations.index=keys
+        if publish:
+            publication=write_obs_annotations(OBS,annotations,nullable_columns=['nimbus_score_Pin1'])
+            atomic_write_json(job/'obs_publication.json',publication)
+        else:
+            publication={'rows':len(rows)}
+        from support.single_marker_reporting import write_reports
+        write_reports(audit,result['scenes'],job/'validation',marker='Pin1',cutoff=cutoff,
+            intensity_column='Pin1_cell',intensity_threshold=200,calibration_scenes=workflow['calibration_scenes'])
+        summary += [f'Published rows: {publication["rows"]:,}',
+            f'Positive calls: {int(audit["Pin1: Nimbus"].eq("Pin1+").sum()):,}',
+            f'Mask objects outside obs: {int((~scores.index.isin(keys)).sum())}',
+            f'Unscored cells without a whole-cell mask: {int((~audit.nimbus_Pin1_predicted).sum()):,}',
+            'Added obs columns: nimbus_score_Pin1; Pin1: Nimbus; nimbus_Pin1_predicted. Existing backup supplied by user.',
+            'Compact overlays/metrics: validation/. Unscored calls are not negative.']
+    (job/'debug_summary.txt').write_text('\n'.join(summary)+'\n',encoding='utf-8')
+    workflow.update(status='pilot_complete' if pilot else 'complete',result=str(product),threshold=cutoff)
+    atomic_write_json(job/'workflow.json',workflow)
+    print('\n'.join(summary),flush=True)
 
 
 if __name__=='__main__':
@@ -146,6 +172,9 @@ if __name__=='__main__':
     group.add_argument('--prepare',action='store_true')
     group.add_argument('--pilot',metavar='RECIPE')
     group.add_argument('--run',metavar='RECIPE')
+    group.add_argument('--finish',metavar='RESULT',help='Finish saved inference; no model execution')
+    group.add_argument('--reports-only',metavar='RESULT',help='Regenerate debug from saved scores; do not edit obs')
     args=parser.parse_args()
     if args.prepare:prepare()
+    elif args.finish or args.reports_only:finish(args.finish or args.reports_only,publish=not bool(args.reports_only))
     else:execute(args.pilot or args.run,bool(args.pilot))
