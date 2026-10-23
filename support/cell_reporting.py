@@ -200,9 +200,15 @@ def preview_overlay(image, mask, targets, size, colors=COLORS):
     the same nearest-neighbour coordinates, never interpolated label values.
     Only display arrays change; native masks, calls and CSVs remain untouched.
     """
+    resized, labels, classes = resize_overlay_inputs(image, mask, targets, size)
+    return overlay(resized, labels, classes, colors)
+
+
+def resize_overlay_inputs(image, mask, targets, size):
+    """Shared display grid for reusing an ROI across multiple overlay decisions."""
     width, height = size
     if mask.shape == (height, width):
-        return overlay(image, mask, targets, colors)
+        return image, mask, targets
     ys = np.minimum(((np.arange(height) + .5) * mask.shape[0] / height).astype(int), mask.shape[0] - 1)
     xs = np.minimum(((np.arange(width) + .5) * mask.shape[1] / width).astype(int), mask.shape[1] - 1)
     region = np.ix_(ys, xs)
@@ -210,6 +216,6 @@ def preview_overlay(image, mask, targets, size, colors=COLORS):
     def resize(plane):
         return np.asarray(Image.fromarray(np.asarray(plane, dtype=np.float32)).resize(size, resampling))
     resized = resize(image) if image.ndim == 2 else np.stack([resize(image[..., c]) for c in range(image.shape[-1])], axis=-1)
-    return overlay(resized, mask[region], targets[region], colors)
+    return resized, mask[region], targets[region]
 
 

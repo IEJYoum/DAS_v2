@@ -47,3 +47,46 @@ def align_annotation_columns(keys, annotations, observation_index):
     aligned = annotations.reindex(keys)
     aligned.index = observation_index
     return aligned
+
+
+def write_obs_annotations(path, annotations, *, scene_column='slide_scene', object_column='seg_label', nullable_columns=()):
+    """Atomically add columns to an existing obs CSV, keeping its strings/order.
+
+    Caller owns backup policy. Refuse column collisions, missing predictions and
+    edits arriving during publication; never load or rewrite df/dfxy companions.
+    Explicit nullable_columns permits missing scores when every observation
+    still has an annotation row (e.g. an affirmative UNSCORED status).
+    """
+    from support.filesystem_utils import atomic_write_with_retry
+    path = Path(path)
+    signature = lambda: (path.stat().st_size, path.stat().st_mtime_ns)
+    before = signature()
+    obs = pd.read_csv(path, index_col=0, dtype=str, keep_default_na=False)
+    if not obs.index.is_unique or not obs.columns.is_unique:
+        raise ValueError('obs indexes and columns must be unique')
+    ids = pd.to_numeric(obs[object_column], errors='raise')
+    if not np.isfinite(ids).all() or (ids<=0).any() or (ids!=np.floor(ids)).any():
+        raise ValueError('obs mask IDs must be positive integers')
+    keys = pd.MultiIndex.from_arrays([obs[scene_column], ids.astype('int64')],
+                                     names=['slide_scene','mask_label'])
+    if not keys.is_unique or (obs[scene_column].str.strip()=='').any():
+        raise ValueError('obs scene/object keys must be distinct and nonempty')
+    collision = set(obs.columns)&set(annotations.columns)
+    if collision:
+        raise ValueError(f'obs already has requested output columns: {sorted(collision)}')
+    if set(nullable_columns)-set(annotations.columns):
+        raise ValueError('Nullable columns must be declared annotation columns')
+    if len(keys.difference(annotations.index)):
+        raise ValueError('Some obs cells lack an annotation; target was not edited')
+    aligned = align_annotation_columns(keys, annotations, obs.index)
+    if aligned.drop(columns=list(nullable_columns)).isna().any().any():
+        raise ValueError('Some obs cells lack an annotation; target was not edited')
+    def writer(temporary):
+        if signature()!=before:
+            raise ValueError('obs changed during annotation; rerun against the latest file')
+        obs.join(aligned, validate='one_to_one').to_csv(temporary)
+        if signature()!=before:
+            raise ValueError('obs changed during annotation; target was not edited')
+    atomic_write_with_retry(path, writer, retry_seconds=1, max_minutes=1, require_nonempty=True)
+    return dict(path=str(path), rows=len(obs), added_columns=list(annotations.columns), original_columns=list(obs.columns),
+                nullable_values={c:int(aligned[c].isna().sum()) for c in nullable_columns})

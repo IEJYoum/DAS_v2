@@ -18,16 +18,7 @@ def read_plane(path):
         return np.array(image)
 
 
-def tile_starts(length, tile_px, overlap=0):
-    """Cover an axis, including the far edge, without exceeding image bounds."""
-    if min(length, tile_px) < 1 or not 0 <= overlap < tile_px:
-        raise ValueError("Invalid tile size/overlap")
-    if length <= tile_px:
-        return [0]
-    starts = list(range(0, length - tile_px + 1, tile_px - overlap))
-    if starts[-1] != length - tile_px:
-        starts.append(length - tile_px)
-    return starts
+from support.cell_tiles import tile_starts
 
 
 def read_scene(scene_json):
