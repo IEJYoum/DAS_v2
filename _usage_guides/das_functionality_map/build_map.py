@@ -148,6 +148,7 @@ def main():
                  generated_utc=datetime.now(timezone.utc).isoformat(),
                  scope='Current controller menus, registered actions/options, selected active legacy submenus, and reviewed data/context relationships. Not a complete call graph.',
                  nodes=list(nodes.values()), edges=edges, views=annotations['views'],
+                 presentation=annotations.get('presentation', {}),
                  notes=annotations['notes'], warnings=warnings, script_inventory=inventory)
     (output / 'functionality.json').write_text(json.dumps(model, indent=2) + '\n', encoding='utf-8')
     template = (here / 'viewer.html').read_text(encoding='utf-8')

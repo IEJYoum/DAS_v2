@@ -5,70 +5,504 @@
     "Recipes supply saved answers to the same registered actions. Registry presence does not by itself mean an action appears directly in the visible Home menu.",
     "Repeat context selects groups using a repeat column and key strings. Visualization repeats the collected commands within each group and selected category (catlist). Some plot-specific category limits apply.",
     "Script inventory includes files not directly linked to a mapped entry point. These are not classified as unused or unreachable.",
-    "Reviewed relationships are editable in annotations.json; generated declarations come from build_map.py. View layout is independent from the truth map."
+    "Reviewed relationships are editable in annotations.json; generated declarations come from build_map.py. View layout is independent from the truth map.",
+    "Embedding, box/violin and ComBat leaves are method choices within their parent action. The Analysis visualization shortcut is shown once without duplicating its entire subtree; its actual navigation remains in the truth JSON."
   ],
   "nodes": [
-    {"id":"raw.images","label":"Image data","kind":"data","description":"CZI / SVS / TIFF, depending on registration path.","evidence":"reviewed"},
-    {"id":"raw.tables","label":"Raw CSV tables","kind":"data","description":"Paths, folders or recursive globs; assemble and select coordinates/observations.","evidence":"reviewed"},
-    {"id":"data.registered","label":"Registered images","kind":"data","evidence":"reviewed"},
-    {"id":"data.masks","label":"Segmentation masks","kind":"data","description":"Object-label images; label identity must match downstream cells.","evidence":"reviewed"},
-    {"id":"data.triplet","label":"Triplet: df + obs + dfxy","kind":"data","description":"Aligned cell features, annotations and coordinates. Shared cell index.","evidence":"reviewed"},
-    {"id":"data.saved","label":"Saved triplets","kind":"data","evidence":"reviewed"},
-    {"id":"data.figures","label":"Figures / statistics","kind":"data","evidence":"reviewed"},
-    {"id":"data.viewer","label":"HTML spatial viewer","kind":"data","description":"Image/segmentation assets, ROIs, marker thresholds and cell annotations.","evidence":"reviewed"},
-    {"id":"registration.cycif","label":"CycIF registration","kind":"action","target":"registration:run_cycif","evidence":"reviewed"},
-    {"id":"registration.whole","label":"mIHC whole / precropped","kind":"action","target":"registration:run_mihc_whole","evidence":"reviewed"},
-    {"id":"registration.xml","label":"mIHC XML-defined ROIs","kind":"action","target":"registration:run_mihc_xml","evidence":"reviewed"},
-    {"id":"context.recipe","label":"Recipe: saved action choices","kind":"context","description":"Ordered {do, with, steps} rows. Collected choices and explicit answers reuse registered controller/analysis/visualization actions.","target":"recipe_v0:invoke","evidence":"reviewed"},
-    {"id":"context.repeat","label":"Repeat context: column + filters","kind":"context","description":"Select groups (e.g. slide_scene or patient) and run the chosen commands per group.","evidence":"reviewed"},
-    {"id":"context.categories","label":"Categories / catlist","kind":"context","description":"Selected obs columns for plotting. Inside each repeat group, visualization runs commands for each eligible category.","target":"IFvisualization2:main","evidence":"reviewed"},
-    {"id":"context.commands","label":"Collected command list","kind":"context","description":"Choose operations/options once, then execute repeatedly. This is separate from data subsetting.","evidence":"reviewed"},
-    {"id":"context.figure","label":"Plots per group and category","kind":"data","evidence":"reviewed"}
+    {
+      "id": "raw.images",
+      "label": "Image data",
+      "kind": "data",
+      "description": "CZI / SVS / TIFF, depending on registration path.",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "raw.tables",
+      "label": "Raw CSV tables",
+      "kind": "data",
+      "description": "Paths, folders or recursive globs; assemble and select coordinates/observations.",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "data.registered",
+      "label": "Registered images",
+      "kind": "data",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "data.masks",
+      "label": "Segmentation masks",
+      "kind": "data",
+      "description": "Object-label images; label identity must match downstream cells.",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "data.triplet",
+      "label": "Triplet: df + obs + dfxy",
+      "kind": "data",
+      "description": "Aligned cell features, annotations and coordinates. Shared cell index.",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "data.saved",
+      "label": "Saved triplets",
+      "kind": "data",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "data.figures",
+      "label": "Figures / statistics",
+      "kind": "data",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "data.viewer",
+      "label": "HTML spatial viewer",
+      "kind": "data",
+      "description": "Image/segmentation assets, ROIs, marker thresholds and cell annotations.",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "registration.cycif",
+      "label": "CycIF registration",
+      "kind": "action",
+      "target": "registration:run_cycif",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "registration.whole",
+      "label": "mIHC whole / precropped",
+      "kind": "action",
+      "target": "registration:run_mihc_whole",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "registration.xml",
+      "label": "mIHC XML-defined ROIs",
+      "kind": "action",
+      "target": "registration:run_mihc_xml",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "context.recipe",
+      "label": "Recipe: saved action choices",
+      "kind": "context",
+      "description": "Ordered {do, with, steps} rows. Collected choices and explicit answers reuse registered controller/analysis/visualization actions.",
+      "target": "recipe_v0:invoke",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "context.repeat",
+      "label": "Repeat context: column + filters",
+      "kind": "context",
+      "description": "Select groups (e.g. slide_scene or patient) and run the chosen commands per group.",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "context.categories",
+      "label": "Categories / catlist",
+      "kind": "context",
+      "description": "Selected obs columns for plotting. Inside each repeat group, visualization runs commands for each eligible category.",
+      "target": "IFvisualization2:main",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "context.commands",
+      "label": "Collected command list",
+      "kind": "context",
+      "description": "Choose operations/options once, then execute repeatedly. This is separate from data subsetting.",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "context.figure",
+      "label": "Plots per group and category",
+      "kind": "data",
+      "evidence": "reviewed"
+    },
+    {
+      "id": "embedding.umap",
+      "label": "UMAP",
+      "kind": "choice",
+      "description": "method=umap",
+      "evidence": "reviewed",
+      "configures": "ifv.embedding"
+    },
+    {
+      "id": "embedding.tsne",
+      "label": "t-SNE",
+      "kind": "choice",
+      "description": "method=tsne",
+      "evidence": "reviewed",
+      "configures": "ifv.embedding"
+    },
+    {
+      "id": "embedding.pca",
+      "label": "PCA",
+      "kind": "choice",
+      "description": "method=pca",
+      "evidence": "reviewed",
+      "configures": "ifv.embedding"
+    },
+    {
+      "id": "distribution.box",
+      "label": "Box plot",
+      "kind": "choice",
+      "description": "violin=n",
+      "evidence": "reviewed",
+      "configures": "ifv.boxplot"
+    },
+    {
+      "id": "distribution.violin",
+      "label": "Violin plot",
+      "kind": "choice",
+      "description": "violin=y",
+      "evidence": "reviewed",
+      "configures": "ifv.boxplot"
+    },
+    {
+      "id": "combat.annotation",
+      "label": "ComBat by batch annotation",
+      "kind": "choice",
+      "description": "mode=annotation; choose an obs batch column",
+      "evidence": "reviewed",
+      "configures": "ifp.combat"
+    },
+    {
+      "id": "combat.je_tma",
+      "label": "ComBat fitted on JE controls",
+      "kind": "choice",
+      "description": "mode=je_tma; fit JE slide_type cells and transform by batch",
+      "evidence": "reviewed",
+      "configures": "ifp.combat"
+    },
+    {
+      "id": "viewer.full_study",
+      "label": "Full-study view",
+      "kind": "action",
+      "description": "Browse study cells, images and annotations across slide_scene values",
+      "evidence": "reviewed",
+      "configures": "home.html"
+    },
+    {
+      "id": "viewer.roi",
+      "label": "Manual ROI annotation",
+      "kind": "action",
+      "description": "Draw ROIs and export annotation patches for the DAS mailbox",
+      "evidence": "reviewed",
+      "configures": "home.html"
+    },
+    {
+      "id": "viewer.threshold",
+      "label": "Manual threshold selection",
+      "kind": "action",
+      "description": "Inspect marker expression, set thresholds and export study threshold updates",
+      "evidence": "reviewed",
+      "configures": "home.html"
+    }
   ],
   "edges": [
-    {"source":"controller.startup_image_registration","target":"registration.cycif","kind":"navigation"},
-    {"source":"controller.startup_image_registration","target":"registration.whole","kind":"navigation"},
-    {"source":"controller.startup_image_registration","target":"registration.xml","kind":"navigation"},
-    {"source":"raw.images","target":"controller.startup_image_registration","kind":"data"},
-    {"source":"controller.startup_image_registration","target":"data.registered","kind":"data"},
-    {"source":"data.registered","target":"controller.startup_cell_segmentation","kind":"data"},
-    {"source":"controller.startup_cell_segmentation","target":"data.masks","kind":"data"},
-    {"source":"data.registered","target":"home.feature_extraction","kind":"data"},
-    {"source":"data.masks","target":"home.feature_extraction","kind":"data"},
-    {"source":"home.feature_extraction","target":"data.triplet","kind":"data"},
-    {"source":"raw.tables","target":"controller.startup_build_data","kind":"data"},
-    {"source":"controller.startup_build_data","target":"data.triplet","kind":"data"},
-    {"source":"data.saved","target":"home.load_prepared_data","kind":"data"},
-    {"source":"home.load_prepared_data","target":"data.triplet","kind":"data"},
-    {"source":"home.load_latest","target":"data.triplet","kind":"data"},
-    {"source":"data.triplet","target":"home","kind":"data"},
-    {"source":"home.visualization","target":"data.figures","kind":"data"},
-    {"source":"home.html","target":"data.viewer","kind":"data"},
-    {"source":"home.recipes","target":"context.recipe","kind":"context"},
-    {"source":"context.recipe","target":"context.commands","kind":"context"},
-    {"source":"context.repeat","target":"context.commands","kind":"context"},
-    {"source":"context.commands","target":"context.categories","kind":"context"},
-    {"source":"context.categories","target":"context.figure","kind":"context"}
+    {
+      "source": "controller.startup_image_registration",
+      "target": "registration.cycif",
+      "kind": "navigation"
+    },
+    {
+      "source": "controller.startup_image_registration",
+      "target": "registration.whole",
+      "kind": "navigation"
+    },
+    {
+      "source": "controller.startup_image_registration",
+      "target": "registration.xml",
+      "kind": "navigation"
+    },
+    {
+      "source": "raw.images",
+      "target": "controller.startup_image_registration",
+      "kind": "data"
+    },
+    {
+      "source": "controller.startup_image_registration",
+      "target": "data.registered",
+      "kind": "data"
+    },
+    {
+      "source": "data.registered",
+      "target": "controller.startup_cell_segmentation",
+      "kind": "data"
+    },
+    {
+      "source": "controller.startup_cell_segmentation",
+      "target": "data.masks",
+      "kind": "data"
+    },
+    {
+      "source": "data.registered",
+      "target": "home.feature_extraction",
+      "kind": "data"
+    },
+    {
+      "source": "data.masks",
+      "target": "home.feature_extraction",
+      "kind": "data"
+    },
+    {
+      "source": "home.feature_extraction",
+      "target": "data.triplet",
+      "kind": "data"
+    },
+    {
+      "source": "raw.tables",
+      "target": "controller.startup_build_data",
+      "kind": "data"
+    },
+    {
+      "source": "controller.startup_build_data",
+      "target": "data.triplet",
+      "kind": "data"
+    },
+    {
+      "source": "data.saved",
+      "target": "home.load_prepared_data",
+      "kind": "data"
+    },
+    {
+      "source": "home.load_prepared_data",
+      "target": "data.triplet",
+      "kind": "data"
+    },
+    {
+      "source": "home.load_latest",
+      "target": "data.triplet",
+      "kind": "data"
+    },
+    {
+      "source": "data.triplet",
+      "target": "home",
+      "kind": "data"
+    },
+    {
+      "source": "home.visualization",
+      "target": "data.figures",
+      "kind": "data"
+    },
+    {
+      "source": "home.html",
+      "target": "data.viewer",
+      "kind": "data"
+    },
+    {
+      "source": "home.recipes",
+      "target": "context.recipe",
+      "kind": "context"
+    },
+    {
+      "source": "context.recipe",
+      "target": "context.commands",
+      "kind": "context"
+    },
+    {
+      "source": "context.repeat",
+      "target": "context.commands",
+      "kind": "context"
+    },
+    {
+      "source": "context.commands",
+      "target": "context.categories",
+      "kind": "context"
+    },
+    {
+      "source": "context.categories",
+      "target": "context.figure",
+      "kind": "context"
+    },
+    {
+      "source": "ifv.embedding",
+      "target": "embedding.umap",
+      "kind": "navigation",
+      "relationship": "configuration choice"
+    },
+    {
+      "source": "ifv.embedding",
+      "target": "embedding.tsne",
+      "kind": "navigation",
+      "relationship": "configuration choice"
+    },
+    {
+      "source": "ifv.embedding",
+      "target": "embedding.pca",
+      "kind": "navigation",
+      "relationship": "configuration choice"
+    },
+    {
+      "source": "ifv.boxplot",
+      "target": "distribution.box",
+      "kind": "navigation",
+      "relationship": "configuration choice"
+    },
+    {
+      "source": "ifv.boxplot",
+      "target": "distribution.violin",
+      "kind": "navigation",
+      "relationship": "configuration choice"
+    },
+    {
+      "source": "ifp.combat",
+      "target": "combat.annotation",
+      "kind": "navigation",
+      "relationship": "configuration choice"
+    },
+    {
+      "source": "ifp.combat",
+      "target": "combat.je_tma",
+      "kind": "navigation",
+      "relationship": "configuration choice"
+    },
+    {
+      "source": "home.html",
+      "target": "viewer.full_study",
+      "kind": "navigation",
+      "relationship": "viewer capability"
+    },
+    {
+      "source": "home.html",
+      "target": "viewer.roi",
+      "kind": "navigation",
+      "relationship": "viewer capability"
+    },
+    {
+      "source": "home.html",
+      "target": "viewer.threshold",
+      "kind": "navigation",
+      "relationship": "viewer capability"
+    }
   ],
   "views": {
     "workflow": {
-      "title":"From source data to analysis",
+      "title": "From source data to analysis",
       "positions": {
-        "raw.images":[30,70],"controller.startup_image_registration":[330,70],"data.registered":[630,70],
-        "controller.startup_cell_segmentation":[930,70],"data.masks":[1230,70],
-        "home.feature_extraction":[1230,240],"data.triplet":[1530,390],"home":[1830,390],
-        "raw.tables":[30,390],"controller.startup_build_data":[630,390],
-        "data.saved":[30,680],"home.load_prepared_data":[630,680],
-        "home.analysis":[2130,100],"home.visualization":[2130,260],"home.data_editing":[2130,420],
-        "home.html":[2130,580],"home.svm":[2130,740],
-        "data.figures":[2430,260],"data.viewer":[2430,580]
+        "raw.images": [
+          30,
+          70
+        ],
+        "controller.startup_image_registration": [
+          330,
+          70
+        ],
+        "data.registered": [
+          630,
+          70
+        ],
+        "controller.startup_cell_segmentation": [
+          930,
+          70
+        ],
+        "data.masks": [
+          1230,
+          70
+        ],
+        "home.feature_extraction": [
+          1230,
+          240
+        ],
+        "data.triplet": [
+          1530,
+          390
+        ],
+        "home": [
+          1830,
+          390
+        ],
+        "raw.tables": [
+          30,
+          390
+        ],
+        "controller.startup_build_data": [
+          630,
+          390
+        ],
+        "data.saved": [
+          30,
+          680
+        ],
+        "home.load_prepared_data": [
+          630,
+          680
+        ],
+        "home.analysis": [
+          2130,
+          100
+        ],
+        "home.visualization": [
+          2130,
+          260
+        ],
+        "home.data_editing": [
+          2130,
+          420
+        ],
+        "home.html": [
+          2130,
+          580
+        ],
+        "home.svm": [
+          2130,
+          740
+        ],
+        "data.figures": [
+          2430,
+          260
+        ],
+        "data.viewer": [
+          2430,
+          580
+        ]
       },
-      "edge_kinds":["navigation","data"]
+      "edge_kinds": [
+        "navigation",
+        "data"
+      ]
     },
     "contexts": {
-      "title":"Recipes and repetition",
-      "positions": {"home.recipes":[30,170],"context.recipe":[350,170],"context.repeat":[350,390],"context.commands":[740,270],"context.categories":[1100,270],"context.figure":[1460,270]},
-      "edge_kinds":["context"]
+      "title": "Recipes and repetition",
+      "positions": {
+        "home.recipes": [
+          30,
+          170
+        ],
+        "context.recipe": [
+          350,
+          170
+        ],
+        "context.repeat": [
+          350,
+          390
+        ],
+        "context.commands": [
+          740,
+          270
+        ],
+        "context.categories": [
+          1100,
+          270
+        ],
+        "context.figure": [
+          1460,
+          270
+        ]
+      },
+      "edge_kinds": [
+        "context"
+      ]
+    }
+  },
+  "presentation": {
+    "terminal_branches": [
+      "ifp.visualize"
+    ],
+    "labels": {
+      "ifp.visualize": "Visualization (see Home)",
+      "ifp.batch_correction": "Batch correction (see Scaling)"
     }
   }
 }
