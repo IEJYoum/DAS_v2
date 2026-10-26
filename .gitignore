@@ -4,3 +4,5 @@ __pycache__/
 deepcell_access_token.txt
 das_config.txt
 _usage_guides/machine_specific_DS_instructions.txt
+
+/zzz_old-prototypes/

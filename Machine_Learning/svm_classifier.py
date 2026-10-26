@@ -127,8 +127,16 @@ def train_model(
         clf = svm.LinearSVC(class_weight=weight, max_iter=int(max_iter), dual=False)
     elif model_type == "svc":
         clf = svm.SVC(class_weight=weight, kernel=kernel, probability=probability)
+    elif model_type == "mlp":
+        from sklearn.neural_network import MLPClassifier
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        # Persist fitted scaling with the model; prediction must not refit it.
+        clf = make_pipeline(StandardScaler(), MLPClassifier(
+            hidden_layer_sizes=(100,), activation="tanh", solver="adam",
+            alpha=1e-5, max_iter=int(max_iter), random_state=1))
     else:
-        raise ValueError("unknown SVM model_type: " + str(model_type))
+        raise ValueError("unknown classifier model_type: " + str(model_type))
     clf.fit(X.values, y.values)
     return clf
 
@@ -312,7 +320,7 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--output-obs", default="")
     parser.add_argument("--prediction-col", default=DEFAULT_PREDICTION_COL)
     parser.add_argument("--target-mode", choices=[LEGACY_NUMERIC_TARGET, LABEL_TARGET], default=LEGACY_NUMERIC_TARGET)
-    parser.add_argument("--model-type", choices=["svc", "linear_svc"], default="svc")
+    parser.add_argument("--model-type", choices=["svc", "linear_svc", "mlp"], default="svc")
     parser.add_argument("--kernel", default="rbf")
     parser.add_argument("--max-train-rows", type=int, default=0)
     parser.add_argument("--max-iter", type=int, default=5000)
