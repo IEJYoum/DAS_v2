@@ -61,3 +61,107 @@ generalization. Avoid building every data-size/model combination initially.
 
 Implementation order when resumed: inventory/targets/splits -> current-model
 learning curve -> checkpoint-safe model choices -> focused ML comparisons.
+
+## 3. Hierarchical classification: confirmed goals, 2026-10-27
+
+Extend the same classifier framework to a configurable tree of models. These
+are planned capabilities, not claims that hierarchical execution is already
+implemented. **Functional-state prediction is out of scope for this work.**
+
+- Each node declares its parent population, required semantic input groups,
+  label source, ordered output classes, checkpoint and annotation destination.
+  Reuse existing ingest, tiling, training, inference, reporting and DAS exports;
+  do not build separate pipelines for individual branches. Separate checkpoints
+  per node are sufficient initially; shared encoders remain an experiment.
+- Materialize multiple annotation levels, for example `major class`,
+  `immune major class` and `immune subclass`. Preserve parent annotations when
+  adding children. Store node/model provenance and per-level probabilities so
+  a final leaf label does not hide the decisions leading to it.
+- Example branches: immune -> myeloid / lymphoid / immune-other; myeloid ->
+  macrophage / other supported populations; lymphoid -> T / B / NK;
+  T -> CD4 / CD8 / T-other. Other branches can distinguish endothelial,
+  fibroblast and stromal-other populations, or epithelial subtypes. Final
+  siblings must have explicit, non-overlapping definitions supported by labels.
+- "Only sees immune cells" means **only eligible immune cells contribute loss
+  and subtype evaluation**, not that surrounding cells are removed from the
+  images. Retain full tissue context for morphology, neighbors and spillover.
+  Training eligibility uses reference parent labels; deployment routing uses
+  parent predictions. Each child can use inputs appropriate to its own task.
+- The immune major-class model should receive separate **myeloid and lymphoid
+  superstains**, retaining their distinction. More detailed children may need
+  additional semantic planes; do not collapse all distinguishing signals into
+  one generic immune plane and expect the child to recover them.
+- Coarse-only annotations train eligible ancestors without inventing child
+  labels. Keep "subtype unresolved", missing labels and skipped branches distinct
+  from an affirmative Other class. Missing required inputs can stop annotation
+  at the deepest supported level. Separate models for different available input
+  sets remain acceptable.
+- Evaluate children both with correct reference routing and within the complete
+  predicted cascade. Report parent-routing errors separately from subtype errors.
+  Keep source ROI/patient split assignments consistent across all nodes; a child
+  must not train on a parent model's held-out test ROI.
+
+The existing CNN core already separates features from the output head, but
+launcher validation, label resolution and reporting still assume the original
+input groups/classes. Generalize those task contracts and add routing; a recipe
+alone cannot currently enable this tree. Preserve existing broad-lineage models
+and their checkpoint semantics during that change.
+
+## 4. Panel-specific superstains and explicit marker exclusions
+
+Make semantic inputs easy for both agents and humans to configure through the
+existing recipe/GUI mechanisms. Separate the cell-class taxonomy from the
+panel-specific choice of proteins used to construct each semantic signal.
+
+- Example: one panel defines its macrophage superstain from `F480` and `CSF1R`;
+  another supplies `CD68`. The model-facing semantic role remains macrophage,
+  while the source mapping, raw marker names and combination rule are explicit.
+- Allow a manual exclusion even when a marker is available and recognized by
+  the taxonomy. For example, exclude background-only `CSF1R` from the first
+  panel and construct the signal from `F480` alone. Scope exclusions to the
+  relevant panel/dataset; do not globally delete a marker or relabel cells.
+- Manual inclusions/exclusions override any future automatic selection.
+  Automation may suggest mappings or flag poor signal, but must not silently
+  re-enable an excluded stain. Keep an editable central mapping/alias surface,
+  with recipe overrides for source-specific exceptions.
+- Record available, selected and excluded markers, exclusion reasons when
+  supplied, normalization and combination settings in the resolved configuration,
+  session log and debug provenance. Training and deployment must expose the
+  actual signal composition, not merely the intended taxonomy membership.
+- If exclusions leave a required semantic group empty, report the missing input
+  and skip/stop that branch or select an explicitly compatible model. Do not
+  silently replace missing inputs with zeros or unrelated proteins.
+
+Input-group names/order, taxonomy and normalization belong in the checkpoint
+contract. Alternative proteins for a shared role are a generalization hypothesis
+to test across panels, not a guarantee that their images are interchangeable.
+
+## 5. Coordinated training program
+
+Use one central experiment inventory and reproducible recipes rather than a
+series of unrelated dataset-specific runs. Extend sections 1-2 as follows:
+
+1. Define/version class meanings, hierarchy, label uncertainty and required
+   signals before collecting large training sets. Preserve original fine labels;
+   broad lineage mappings must not erase potential child supervision.
+2. Inventory datasets by patient, tissue, lab, batch, assay, stain composition,
+   physical resolution, segmentation convention, label provenance and annotation
+   depth. Track class/node support and marker-quality exclusions.
+3. Freeze whole-ROI allocations, group related patient samples appropriately,
+   and reserve unseen batches/labs for transfer evaluation. Maintain a small
+   independently reviewed reference set alongside larger heuristic/agreement
+   label sets. Agreement with a labeling rule is not independent accuracy.
+4. Add targeted diversity: weak staining, spillover, artifacts, rare populations
+   and segmentation variation. Balance sampling across sources as well as
+   classes so one very large dataset does not dominate the training objective.
+5. Establish the broad-lineage baseline and learning curve with the current
+   engine fixed. Then pilot one immune child with explicit myeloid/lymphoid
+   inputs, restricted supervision, separate annotation output and end-to-end
+   routing evaluation. Expand the tree after that contract works.
+6. Compare encoder pretraining, MLP/CoE alternatives and other engine changes
+   against the same frozen benchmark. Add complexity in response to measured
+   limitations rather than changing data, labels and architecture together.
+
+These goals extend the implementation order above: define task/panel contracts
+and the training inventory first; establish a controlled baseline; add minimal
+tree execution for one child; then expand data, hierarchy and model experiments.
