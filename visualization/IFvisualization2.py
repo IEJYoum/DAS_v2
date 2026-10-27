@@ -1251,12 +1251,46 @@ def preload(bl1,bl2,bl3,path = r'D:\U54 DDR',devmode=False): #'D:\WOO' and tstem
 menu functions ^
 visu functions v
 '''
-def sortedMap(dfs, cat="", individual=None, normalize=None, manual_order=None):
-    individual = recipe.ask("individual", individual, "show each annotation category individually? (y)")
+def _prompt_heatmap_layers(obs):
+    layers = []
+    while logInput(f"add layer {len(layers) + 2}? (y): ").strip().lower() in {"y", "yes"}:
+        columns = getCats(obs, f"columns to sort layer {len(layers) + 2} by", required=False)
+        if not columns:
+            break
+        layers.append(columns)
+    return layers
+
+
+def sortedMap(dfs, cat="", individual=None, normalize=None, manual_order=None, layers=None):
+    """Each category is layer one; later layers contain alternative sorting columns."""
+    # Read old recipes without offering the retired individual/joint prompt.
+    if individual is not None:
+        individual = recipe.ask("individual", individual)
+        if layers is None:
+            layers = []
+    layers = recipe.ask("layers", layers, lambda: _prompt_heatmap_layers(dfs[1]))
     normalize = recipe.ask("normalize", normalize, "z-score data? (y)")
     manual_order = recipe.ask("manual_order", manual_order, "use manual column order? (y)")
     if recipe.collecting():
         return [], []
+    from itertools import product
+    if not isinstance(layers, list) or any(not isinstance(level, list) or not level for level in layers):
+        raise ValueError("Heatmap layers must be a list of nonempty column lists (or [] for layer one only).")
+    recipe.resolve_columns(dfs[1], [column for level in layers for column in level])
+    if individual is not None and individual != 'y':
+        if 'sortedMap' in DONE:
+            return dfs, []
+        DONE.append('sortedMap')
+        combinations = [CATS]
+    else:
+        combinations = ([cat, *columns] for columns in product(*layers))
+    for columns in combinations:
+        recipe.resolve_columns(dfs[1], columns)
+        _sorted_map_one(dfs, columns, normalize, manual_order)
+    return dfs, []
+
+
+def _sorted_map_one(dfs, allcombs, normalize, manual_order):
     import textwrap
     df, obs, dfxy = dfs
     def _measure_text_width_in(txt,fontsize='x-large'):
@@ -1321,14 +1355,7 @@ def sortedMap(dfs, cat="", individual=None, normalize=None, manual_order=None):
         plt.close(tfig)
         return(outw,outfs,ouths,gap_in)
 
-    imap, azsc, mansort = individual, normalize, manual_order
-    if imap == 'y':
-        allcombs = [cat]
-    else:
-        if 'sortedMap' in DONE:
-            return(dfs,9)
-        DONE.append('sortedMap')
-        allcombs = CATS
+    azsc, mansort = normalize, manual_order
 
     figtitle = ''
     dropNA = True
@@ -1340,8 +1367,8 @@ def sortedMap(dfs, cat="", individual=None, normalize=None, manual_order=None):
     print(allcombs,"allcombs!")
 
     sns.set(font_scale=6)
-    if dropNA:  #ONLY DROPS NAN FROM FIRST CATEGORY e.g. if tumor subtype is first, it will make a map of tumor cells only
-        col1 = CATS[0]
+    if dropNA:  # Drop missing values only from this plot's first sorting layer.
+        col1 = allcombs[0]
         nkey = oobs[col1].isna()
         nk2 = oobs[col1] == "nan"
         nkey = nkey | nk2

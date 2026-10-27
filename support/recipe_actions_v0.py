@@ -318,7 +318,8 @@ MENUS = {
                    "split_column": ("column", "Observation column to make separate figures.")}),
         Action("ifv.annotation_sorted", "annotation sorted heatmap", "IFvisualization2:sortedMap",
                "annotation sorted heatmap", {
-                   "individual": ("yes_no", "Separate map per annotation instead of the joint multi-level map."),
+                   "layers?": ("list", "Additional sorting layers, each a list of alternative observation columns; [] sorts each category alone."),
+                   "individual?": ("yes_no", "Legacy recipe compatibility only: y = separate categories, n = one joint map."),
                    "normalize": ("yes_no", "Z-score markers."),
                    "manual_order": ("yes_no", "Use the configured marker order.")}),
         Action("ifv.correlation", "correlation heatmaps", "IFvisualization2:correlationMatrix",
