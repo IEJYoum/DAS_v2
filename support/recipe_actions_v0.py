@@ -245,6 +245,16 @@ MENUS = {
                    "orientation": ("text", "markers-rows or celltypes-rows."),
                    "confidence": ("number", "Confidence cutoff, default 0.6 when collected blank."),
                    "output_column": ("text", "Output name; empty string uses the engine default.")}),
+        Action("ifp.orthotype", "OrthoType (experimental marker positivity)", "IFprocessing7:orthoType",
+               "Legacy minimum transformed-overlap partner selection and threshold objective. Inspect partners; least overlap is not biological exclusion. Raw features stay unchanged; calls go to obs and plots to zzz_old-prototypes/outputs.", {
+                   "markers": ("columns", "Marker feature columns; [] uses all current features. Exclude morphology/IDs and constant features."),
+                   "prefix": ("text", "Prefix for new marker-call and packed phenotype obs columns; existing columns cannot be overwritten."),
+                   "max_iter": ("number", "Maximum bounded threshold-fit iterations per marker, normally 300.")}),
+        Action("ifp.gaussian_type", "Two-Gaussian fit (celltyping4 experiment)", "IFprocessing7:gaussianType",
+               "Fit two Gaussian-shaped curves per marker, threshold between their centers, and append positive calls. Not a celltype classifier or calibrated mixture posterior. Plots go to zzz_old-prototypes/outputs.", {
+                   "markers": ("columns", "Marker feature columns; [] uses all current features. Constant/non-finite inputs fail."),
+                   "prefix": ("text", "Prefix for new marker-call and packed phenotype obs columns; use a new prefix to compare runs."),
+                   "max_iter": ("number", "Maximum least-squares fit evaluations per marker, normally 300.")}),
         legacy("ifp.manual_threshold", "manual threshold phenotype", "IFprocessing7:manThresh"),
         Action("ifp.sam", "SAM type", "IFprocessing7:samType",
                "SAM type", {

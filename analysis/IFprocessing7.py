@@ -1973,15 +1973,46 @@ def manThresh(dfs,com=[],cat=''):
     return([df,obs,dfxy],[])
 
 
-def orthoType(dfs,com=[],cat=''):
-    if len(com) == 0:
-        return([],[])
-    df,obs,dfxy = dfs[0],dfs[1],dfs[2]
-    df,obs,dfxy = oT.main(df,obs,dfxy,sep=CATN)
-    ncn = "orthoThresh phenotype " + CATN
-    obs = parseTypes(df,obs,dfxy,column = ncn)
-    obs = parseSecondary(df,obs,dfxy,column = ncn)
-    return([df,obs,dfxy],[])
+def orthoType(dfs, cat="", markers=None, prefix=None, max_iter=None):
+    """Experimental OrthoType7 marker calls; repeat grouping is owned by main()."""
+    markers = recipe.ask("markers", markers,
+        lambda: cm.multiObMenu(dfs[0], "marker column (blank then done for all): "))
+    prefix = recipe.ask("prefix", prefix,
+        lambda: shared_check_change("Ortho", "output annotation prefix", input_fn=logInput))
+    max_iter = recipe.ask("max_iter", max_iter,
+        lambda: int(shared_check_change("300", "maximum fit iterations", input_fn=logInput)))
+    if recipe.collecting():
+        return [], []
+    from Machine_Learning.experimental_celltyping import run
+    df, obs, dfxy = dfs
+    obs, folder = run(df, obs, method="ortho", markers=markers, prefix=prefix,
+                      max_iter=int(max_iter), print_fn=print)
+    owner = recipe.current_step()
+    if owner is not None:
+        owner.outputs.append(str(folder / "result.json"))
+    print("OrthoType diagnostics:", folder)
+    return [df, obs, dfxy], []
+
+
+def gaussianType(dfs, cat="", markers=None, prefix=None, max_iter=None):
+    """Experimental celltyping4 two-curve fitting with per-marker positive calls."""
+    markers = recipe.ask("markers", markers,
+        lambda: cm.multiObMenu(dfs[0], "marker column (blank then done for all): "))
+    prefix = recipe.ask("prefix", prefix,
+        lambda: shared_check_change("Gaussian2", "output annotation prefix", input_fn=logInput))
+    max_iter = recipe.ask("max_iter", max_iter,
+        lambda: int(shared_check_change("300", "maximum fit evaluations", input_fn=logInput)))
+    if recipe.collecting():
+        return [], []
+    from Machine_Learning.experimental_celltyping import run
+    df, obs, dfxy = dfs
+    obs, folder = run(df, obs, method="gaussian2", markers=markers, prefix=prefix,
+                      max_iter=int(max_iter), print_fn=print)
+    owner = recipe.current_step()
+    if owner is not None:
+        owner.outputs.append(str(folder / "result.json"))
+    print("Two-Gaussian diagnostics:", folder)
+    return [df, obs, dfxy], []
 
 
 def vectorType(dfs, cat="", weights_path=None, orientation=None, confidence=None, output_column=None):

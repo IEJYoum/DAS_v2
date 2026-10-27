@@ -9,7 +9,6 @@ keeps the IFanalysisPackage5 entry point and prompt style stable.
 from pathlib import Path
 import sys
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -41,16 +40,15 @@ def main(df, obs, dfxy):
     prediction_col = input("prediction output name (blank for SVM predictions): ").strip()
     if prediction_col == "":
         prediction_col = "SVM predictions"
-    op = ["train svm", "load svm to predict data"]
+    op = ["train classifier (SVC / MLP)", "load classifier to predict data"]
     fn = [trainSVM, useSVM]
     predictions = menu(op, fn, X, Y, prediction_col=prediction_col)
     if predictions is None:
         print("No SVM predictions made.")
         return(df, obs, dfxy)
     try:
-        plt.scatter(Y, predictions)
-        plt.xticks(rotation=85)
-        plt.show()
+        from Machine_Learning.experimental_celltyping import save_classifier_plot
+        print("Classifier diagnostic plot saved:", save_classifier_plot(Y, predictions))
     except Exception as exc:
         print("Could not plot SVM predictions:", exc)
     obs[prediction_col] = pd.Series(predictions, index=X.index).astype(str)
@@ -79,10 +77,15 @@ def trainSVM(X, Y, clf=None, model_path=DEFAULT_MODEL_PATH, prediction_col=""):
             model_path = path_text
         print("0 : linear_svc (recommended for large data)")
         print("1 : svc_rbf")
+        print("2 : small neural net (MLP: 100 tanh hidden units; fitted input scaling)")
         model_choice = input("number: ").strip()
         if model_choice == "1":
             model_type = "svc"
             kernel = "rbf"
+        elif model_choice == "2":
+            model_type = "mlp"
+            kernel = ""
+            print("MLP uses a StandardScaler + MLP pipeline; SVC class weights do not apply.")
         else:
             model_type = "linear_svc"
             kernel = "linear"
