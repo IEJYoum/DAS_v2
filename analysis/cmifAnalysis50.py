@@ -1116,8 +1116,16 @@ def clauto(df,obs,dfxy):
 
 
 def clag(df,obs,dfxy,ch=None,uch=None,z=False): #switched default to False 4/9/25
-    if not ch:
+    if ch is None:
         ch,uch=obMenu(obs,"obs category by which to aggregate")
+        if input("add per-unit annotation fractions (n_cells + frac columns)? (y)") == 'y':
+            import unit_aggregation as ua
+            unit = obs.columns[ch]
+            min_cells = int(input("minimum cells per unit (0 keeps all): ") or 0)
+            (df,obs,dfxy),dropped = ua.filter_small_units([df,obs,dfxy],unit,min_cells)
+            if dropped:
+                print('dropped units under',min_cells,'cells:',dropped)
+            return ua.aggregate_units(df,obs,dfxy,unit,fractions=True)
 
     if z:
         zdf,zobs,zxy = zscorev(df,obs,dfxy)

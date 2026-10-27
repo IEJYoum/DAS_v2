@@ -1,0 +1,77 @@
+{
+  "name": "05_vs17_keepY_core_fractions",
+  "description": "VS-TMA-17 | Ecad_cell>1000 cells, manual_core_exclusion keep=Y cores (107), Pin1_500 = Pin1_cell>500 (studythresholds + viewer mailbox). Aggregate to slide_scene (cores <50 cells dropped): marker means, n_cells and annotation fractions. Saves per-core triplet + one summary CSV, then boxplots and one-vs-rest Mann-Whitney volcano by Diagnosis.",
+  "steps": [
+    {
+      "do": "home.load_prepared_data",
+      "with": {
+        "folder": "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/IY_DAS_VS17_features/maxey_outputs",
+        "stem": "Ecad1000_Ecad_keepY_Pin1_500"
+      }
+    },
+    {
+      "do": "home.analysis",
+      "with": {
+        "repeat_column": "all data",
+        "key_strings": []
+      },
+      "steps": [
+        {
+          "do": "ifp.selection",
+          "steps": [
+            {
+              "do": "ifp.aggregate_units",
+              "with": {
+                "unit_column": "slide_scene",
+                "fractions": "y",
+                "max_levels": 30,
+                "min_cells": 50,
+                "min_cells_column": "",
+                "summary_csv": "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/IY_DAS_VS17_features/maxey_outputs/VS17_keepY_Pin1_per_core.csv"
+              }
+            },
+            {
+              "do": "ifp.save",
+              "with": {
+                "filename": "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/IY_DAS_VS17_features/maxey_outputs/VS17_keepY_per_core"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "do": "home.visualization",
+      "with": {
+        "save_folder": "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/IY_DAS_VS17_features/figures/pin1_core_fractions",
+        "repeat_column": "all data",
+        "key_strings": [],
+        "categories": [
+          "Diagnosis"
+        ],
+        "autoclean": "n"
+      },
+      "steps": [
+        {
+          "do": "ifv.boxplot",
+          "with": {
+            "violin": "n",
+            "outliers": "n",
+            "relevant_only": "n",
+            "color_columns": [
+              "Diagnosis"
+            ],
+            "per_row": 6
+          }
+        },
+        {
+          "do": "ifv.volcano",
+          "with": {
+            "method": "mannwhitney",
+            "label_filters": []
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1230,6 +1230,50 @@ def pick(dfs, cat="", mode=None, column=None, values=None):
 
 
 
+def aggregateUnits(dfs, cat="", unit_column=None, fractions=None, max_levels=None,
+                   min_cells=None, min_cells_column=None, summary_csv=None):
+    """Clag to one row per unit, adding per-unit annotation fractions."""
+    unit_column = recipe.ask("unit_column", unit_column,
+                             lambda: _prompt_recipe_column(dfs[1], "aggregate by which unit (core, patient...)? "))
+    fractions = recipe.ask("fractions", fractions, "add annotation fractions per unit? (y)")
+    max_levels = recipe.ask("max_levels", max_levels,
+                            lambda: int(input("annotations with fewer than how many values get fractions (30)? ") or 30))
+    min_cells = recipe.ask("min_cells", min_cells,
+                           lambda: int(input("minimum cells per unit (0 keeps all): ") or 0))
+    min_cells_column = recipe.ask("min_cells_column", min_cells_column,
+                                  "apply the minimum to which column's units (blank = aggregation unit)? ")
+    summary_csv = recipe.ask("summary_csv", summary_csv,
+                             "also write one summary CSV (path, blank = skip)? ")
+    if recipe.collecting():
+        return [], []
+    import unit_aggregation as ua
+    df, obs, dfxy = dfs
+    size_column = min_cells_column or unit_column
+    recipe.resolve_columns(obs, [unit_column, size_column])
+    (df, obs, dfxy), dropped = ua.filter_small_units([df, obs, dfxy], size_column, int(min_cells or 0))
+    if dropped:
+        print(f"dropped {len(dropped)} {size_column} units under {min_cells} cells:", dropped)
+    if obs.shape[0] == 0:
+        raise ValueError("no cells left after the minimum-cell filter")
+    adf, aobs, axy = ua.aggregate_units(df, obs, dfxy, unit_column,
+                                        fractions=str(fractions).lower() == "y",
+                                        max_levels=int(max_levels or 30))
+    frac_cols = [c for c in adf.columns if c.startswith("frac ")]
+    print(f"aggregated {obs.shape[0]} cells to {adf.shape[0]} {unit_column} units;",
+          len(frac_cols), "fraction columns")
+    if summary_csv:
+        path = str(summary_csv)
+        if cat and cat != "all data":
+            root, ext = os.path.splitext(path)
+            path = f"{root}_{cat}{ext or '.csv'}"
+        ua.summary_table(adf, aobs, unit_column).to_csv(path, index=False)
+        print("summary CSV:", path)
+        step = recipe.current_step()
+        if step is not None and hasattr(step, "outputs"):
+            step.outputs.append(os.path.abspath(path))
+    return [adf, aobs, axy], []
+
+
 def clauto(dfs, cat="", column=None, resolution=None):
     column = recipe.ask("column", column, lambda: _prompt_recipe_column(dfs[1], "obs category to auto-annotate cell types: "))
     resolution = recipe.ask("resolution", resolution, lambda: float(input("resolution:")))

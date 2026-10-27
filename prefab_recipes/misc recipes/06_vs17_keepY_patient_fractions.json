@@ -1,0 +1,54 @@
+{
+  "name": "06_vs17_keepY_patient_fractions",
+  "description": "VS-TMA-17 | same input as 05. Drop cores without a patient ID (PIN1_TMA_OPTR_Unique patient IDs.xlsx) and cores <50 cells, then pool remaining cells per patient_ID: marker means, n_cells and annotation fractions (pooled cells, not mean of core fractions). Saves per-patient triplet + one summary CSV.",
+  "steps": [
+    {
+      "do": "home.load_prepared_data",
+      "with": {
+        "folder": "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/IY_DAS_VS17_features/maxey_outputs",
+        "stem": "Ecad1000_Ecad_keepY_Pin1_500"
+      }
+    },
+    {
+      "do": "home.analysis",
+      "with": {
+        "repeat_column": "all data",
+        "key_strings": []
+      },
+      "steps": [
+        {
+          "do": "ifp.selection",
+          "steps": [
+            {
+              "do": "ifp.pick",
+              "with": {
+                "mode": "exclude",
+                "column": "patient_ID",
+                "values": [
+                  "unknown"
+                ]
+              }
+            },
+            {
+              "do": "ifp.aggregate_units",
+              "with": {
+                "unit_column": "patient_ID",
+                "fractions": "y",
+                "max_levels": 30,
+                "min_cells": 50,
+                "min_cells_column": "slide_scene",
+                "summary_csv": "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/IY_DAS_VS17_features/maxey_outputs/VS17_keepY_Pin1_per_patient.csv"
+              }
+            },
+            {
+              "do": "ifp.save",
+              "with": {
+                "filename": "//graylab/BCC_Chin_Lab_RDS/ChinData/Cyclic_Workflow/cmIF_2021-10-15_Panc/IY_DAS_VS17_features/maxey_outputs/VS17_keepY_per_patient"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

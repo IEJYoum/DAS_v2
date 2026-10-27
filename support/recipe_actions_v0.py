@@ -150,6 +150,14 @@ MENUS = {
                    "mode": ("text", "include or exclude."),
                    "column": ("column", "Observation column to filter."),
                    "values": ("list", "Exact category values; [] leaves data unchanged.")}),
+        Action("ifp.aggregate_units", "aggregate to units (clag + annotation fractions)", "IFprocessing7:aggregateUnits",
+               "One row per unit: marker means, n_cells and per-unit fractions of each annotation level.", {
+                   "unit_column": ("column", "Observation column defining units, e.g. slide_scene or patient_ID."),
+                   "fractions": ("yes_no", "y = add 'frac <column>=<value>' columns for annotations with < max_levels values that vary inside at least one unit; missing labels are excluded from denominators."),
+                   "max_levels": ("number", "Annotation level cutoff, commonly 30."),
+                   "min_cells": ("number", "Drop units with fewer cells than this before aggregating; 0 keeps all."),
+                   "min_cells_column": ("column", "Column whose units the minimum applies to (e.g. slide_scene before pooling to patient); empty string = unit_column."),
+                   "summary_csv": ("path", "Also write one CSV of unit labels, n_cells and fractions; empty string skips. Non-'all data' groups get a _<group> suffix.")}),
     ],
     "ifp.scaling": [
         Action("ifp.log2", "log2", "IFprocessing7:log2",
