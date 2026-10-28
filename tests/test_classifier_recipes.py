@@ -379,12 +379,10 @@ class ClassifierSourcePromptTests(unittest.TestCase):
         label = prompt.split(':\n')[0]
         return {
             'source path, folder, or glob':str(self.labels/'*.csv'),
-            'Registered stain-image folder':str(self.root/'images'),
-            'Segmentation-mask folder':str(self.root/'images'),
-            'Mask filename pattern':'{scene_id}/mask.tif',
-            'DAPI image filename pattern':'{scene_id}/nuclear.tif',
-            'CD45 image filename pattern':'{scene_id}/nuclear.tif',
-            'PanCK image filename pattern':'{scene_id}/nuclear.tif',
+            'Mask file pattern':str(self.root/'images'/'{scene_id}'/'mask.tif'),
+            'DAPI image file pattern':str(self.root/'images'/'{scene_id}'/'nuclear.tif'),
+            'CD45 image file pattern':str(self.root/'images'/'{scene_id}'/'nuclear.tif'),
+            'PanCK image file pattern':str(self.root/'images'/'{scene_id}'/'nuclear.tif'),
             'Source image microns per pixel (confirm acquisition metadata)':'0.5',
         }.get(label, 'use')
 
@@ -537,6 +535,32 @@ class ClassifierSourcePromptTests(unittest.TestCase):
              patch.object(run_project, 'main', side_effect=AssertionError('cancelled run started')), \
              patch.object(controler.recipe,'ask',side_effect=lambda name,value,prompt: value if value is not None else prompt()):
             self.assertFalse(controler.startup_cell_classifier(self.state))
+
+    def test_full_pattern_splits_at_first_variable_part(self):
+        (self.root/'seg'/'R1-Segmentation').mkdir(parents=True)
+        root, pattern = gui_sources.split_full_pattern(
+            str(self.root/'seg'/'{slide}_Cellpose'/'{scene_id}_Basins.tif'))
+        self.assertEqual((Path(root), pattern), (self.root/'seg', '{slide}_Cellpose/{scene_id}_Basins.tif'))
+        root, pattern = gui_sources.split_full_pattern('seg/**/x_*.tif', base_dir=self.root)
+        self.assertEqual((Path(root), pattern), (self.root/'seg', '**/x_*.tif'))
+        with self.assertRaisesRegex(ValueError, 'one fixed file'):
+            gui_sources.split_full_pattern(str(self.root/'seg'/'mask.tif'))
+
+    def test_marker_patterns_share_one_image_root(self):
+        nested = self.root/'images'/'extra'
+        for spec in self.source['scenes']:
+            (nested/spec['scene_id']).mkdir(parents=True)
+            (nested/spec['scene_id']/'cd45.tif').write_bytes((self.root/'images'/spec['scene_id']/'nuclear.tif').read_bytes())
+        def answer(prompt, **kwargs):
+            if prompt.startswith('CD45 image file pattern'):
+                return str(nested/'{scene_id}'/'cd45.tif')
+            return self.answer(prompt, **kwargs)
+        with patch.object(io, 'iget', side_effect=answer):
+            source = gui_sources.prompt_sources(self.state, 'predict', self.choose)[0]
+        self.assertEqual(Path(source['image_root']), self.root/'images')
+        self.assertEqual(source['marker_patterns']['CD45'], 'extra/{scene_id}/cd45.tif')
+        self.assertEqual(source['marker_patterns']['DAPI'], '{scene_id}/nuclear.tif')
+        self.assertEqual(Path(source['mask_root']), self.root/'images')
 
     def test_duplicate_roi_names_and_invalid_object_ids_fail_early(self):
         with self.assertRaisesRegex(ValueError,'unique nonempty'):

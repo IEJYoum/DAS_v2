@@ -118,5 +118,8 @@ def resolve_unique_source(root, pattern, tokens, *, base_dir=None) -> Path:
         raise ValueError(f'Cannot expand source pattern {pattern!r}: {exc}') from exc
     matches = expand_source_spec(str(root / expanded), want='files')
     if len(matches) != 1:
-        raise ValueError(f'Expected one file for {root / expanded}; found {len(matches)}')
+        shown = '; '.join(source_display_id(path, root) for path in matches[:5])
+        more = f' (+{len(matches) - 5} more)' if len(matches) > 5 else ''
+        raise ValueError(f'Expected one file for {root / expanded}; found {len(matches)}'
+                         + (f': {shown}{more}' if matches else ''))
     return matches[0]

@@ -22,8 +22,23 @@ def one_match(root, pattern, spec):
     root = resolve_native_path(root, must_exist=True, kind='directory')
     matches = expand_source_spec(str(root / pattern.format(**spec)), want='files')
     if len(matches) != 1:
-        raise ValueError(f"Expected one file under {root} matching {pattern.format(**spec)}; found {len(matches)}")
+        raise ValueError(f"Expected one file under {root} matching {pattern.format(**spec)}; found {len(matches)}"
+                         + match_listing(root, matches))
     return matches[0]
+
+
+def match_listing(root, matches, limit=5):
+    """Name the competing files so an ambiguous pattern can be narrowed."""
+    if not matches:
+        return ''
+    shown = []
+    for path in matches[:limit]:
+        try:
+            shown.append(str(path.relative_to(root)))
+        except ValueError:
+            shown.append(str(path))
+    more = f' (+{len(matches) - limit} more)' if len(matches) > limit else ''
+    return ': ' + '; '.join(shown) + more
 
 
 def resolve_sources(settings, spec):

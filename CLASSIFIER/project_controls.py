@@ -61,6 +61,12 @@ def controls(training=None, inference=None):
                 raise ValueError('prediction_split must be train, val, test or all')
             elif key == 'device' and (not isinstance(value, str) or not value.strip()):
                 raise ValueError('device must be a nonempty string')
+            elif key == 'device' and value.strip().lower().startswith('cuda'):
+                import torch  # check before staging, not after hours of preparation
+                if not torch.cuda.is_available():
+                    raise ValueError(f"device '{value}' requested, but this PyTorch "
+                                     f"({torch.__version__}) cannot use a GPU. Install a CUDA build "
+                                     "of PyTorch or set training.device to 'cpu'.")
     if training.get('epochs',1) is None and training.get('replay_fraction',0):
         raise ValueError('Replay fractions require epoch-based training')
     return training, inference

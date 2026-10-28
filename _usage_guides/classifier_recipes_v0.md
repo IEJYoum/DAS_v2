@@ -86,11 +86,15 @@ You do not need to author a source-profile JSON to configure a new dataset.
    Validation comes out of the development third. A saved assignment CSV must cover
    exactly the chosen ROIs; use reserved for unused ones. Optional columns supply
    filename tokens such as `{slide}` and `{roi}`.
-5. Confirm registered image/mask folders, relative filename patterns, marker groups
-   and actual source microns per pixel. `**` enables recursive matching;
-   `{scene_id}` is the selected ROI name. Patterns must resolve one file per marker
-   and mask. The setup displays the first match as you edit and checks associations
-   for all selected ROIs before returning. Single-plane marker TIFFs are currently
+5. Give the mask and each marker image as one full path pattern, e.g.
+   `//server/share/Segmentation/{slide}_CellposeSegmentation/{scene_id}_Ecad_..._Basins.tif`,
+   then the marker groups and actual source microns per pixel. `{scene_id}` and other
+   ROI tokens stand for the parts that change; `*` matches text within a name and `**`
+   any subfolders below. Each pattern must resolve one file per ROI. The setup shows
+   the first match, lists competing files when a pattern is ambiguous, and checks
+   associations for all selected ROIs before returning. Recorded sources keep a root
+   folder plus relative patterns (split at the first variable part; marker images
+   share their deepest common folder), so a moved dataset needs one root edit. Single-plane marker TIFFs are currently
    supported; multi-channel acquisitions need an adapter rather than a guessed plane.
 6. Finish source selection, or add another CSV/triplet source for a mixed run. Then
    choose the checkpoint/output folder; training also offers epochs, batch size and

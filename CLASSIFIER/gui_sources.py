@@ -238,11 +238,37 @@ def _assign_scenes(state, menu, scenes, mode):
             for s in scenes]
 
 
-def _pattern(settings, spec, default, label, marker=None):
+_PATTERN_PART = re.compile(r'[*?\[{]')
+
+
+def split_full_pattern(text, base_dir=None):
+    """Split one full file pattern into (existing literal folder, relative pattern).
+
+    The folder is everything before the first path part containing a wildcard
+    or {token}; sources keep that split so a moved dataset needs one root edit.
+    """
+    from support.path_compat import native_path_text, resolve_native_path
+    text = native_path_text(text)
+    if not text:
+        raise ValueError('Enter a full file pattern')
+    path = Path(os.path.expanduser(text))
+    if not path.is_absolute():
+        path = (resolve_native_path(base_dir) if base_dir is not None else Path.cwd()) / path
+    parts = path.parts
+    first = next((i for i, part in enumerate(parts) if _PATTERN_PART.search(part)), None)
+    if first is None:
+        raise ValueError('The pattern names one fixed file; include {scene_id} (or another ROI token) '
+                         'or * so each ROI finds its own file')
+    root = resolve_native_path(Path(*parts[:first]), must_exist=True, kind='directory')
+    return str(root), '/'.join(parts[first:])
+
+
+def _full_pattern(state, settings, spec, default, label, marker=None):
     from CLASSIFIER.adapters import one_match
     while True:
-        pattern = _text(default, label)
+        text = _text(default, label)
         try:
+            root, pattern = split_full_pattern(text, state.data_folder)
             # Reuse adapter resolution, including the existing nuclear-filename
             # token, rather than creating a second filename matching engine.
             expanded = dict(spec)
@@ -251,26 +277,35 @@ def _pattern(settings, spec, default, label, marker=None):
                 if not mask.name.startswith('label_'):
                     raise ValueError('nuclear_filename needs a label_ prefixed mask')
                 expanded['nuclear_filename'] = mask.name.removeprefix('label_')
-            root = settings['mask_root'] if marker is None else settings['image_root']
             path = one_match(root, pattern, expanded)
             io.iprint(label, '->', path)
-            return pattern
+            return root, pattern
         except (ValueError, OSError, KeyError) as exc:
-            io.iprint(str(exc), 'Use a relative pattern with {scene_id}; ** searches recursively.')
-            default = pattern
+            io.iprint(str(exc))
+            io.iprint('Give the full path with ROI tokens in place of the parts that change, e.g. '
+                      '//server/share/Segmentation/{slide}_CellposeSegmentation/{scene_id}_Ecad_..._Basins.tif. '
+                      'It must match exactly one file per ROI. ** searches every subfolder below it, '
+                      'so a same-named copy deeper down also matches; prefer naming the folders.')
+            default = text
+
+
+def _full_default(root, pattern):
+    return str(Path(root) / pattern) if root and pattern else ''
 
 
 def _images(state, menu, source, defaults, project):
     registered = Path(state.build_folder)/'registeredImages'
     image_default = defaults.get('image_root') or project.get('seg_input_folder') or (registered if registered.is_dir() else state.build_folder)
     mask_default = defaults.get('mask_root') or state.segmentation_root or project.get('segmentation_root') or image_default
-    source['image_root'] = str(_path(state, image_default, 'Registered stain-image folder', 'directory'))
-    source['mask_root'] = str(_path(state, mask_default, 'Segmentation-mask folder', 'directory'))
     example = source['scenes'][0]
-    io.iprint('Filename patterns are relative to those folders. Available ROI tokens:',
-              ', '.join('{'+k+'}='+str(v) for k,v in example.items() if k != 'labels_path'))
-    source['mask_pattern'] = _pattern(source, example, defaults.get('mask_pattern','**/{scene_id}/*mask*.tif*'), 'Mask filename pattern')
+    io.iprint('Give each file as one full path pattern. ROI tokens for the first ROI:',
+              ', '.join('{'+k+'}='+str(v) for k,v in example.items() if k != 'labels_path'),
+              '| * matches any text within a name; ** matches any subfolders.')
+    source['mask_root'], source['mask_pattern'] = _full_pattern(state, source, example,
+        _full_default(defaults.get('mask_root'), defaults.get('mask_pattern'))
+        or _full_default(mask_default, '**/{scene_id}/*mask*.tif*'), 'Mask file pattern')
     source['marker_groups'], source['marker_patterns'] = {}, {}
+    marker_roots = {}
     for group, alias in [('NUC','DAPI'),('IMMUNE','CD45'),('EPI','PanCK')]:
         known = defaults.get('marker_groups',{}).get(group,[alias])
         while True:
@@ -282,8 +317,19 @@ def _images(state, menu, source, defaults, project):
         source['marker_groups'][group] = names
         for name in names:
             if name not in source['marker_patterns']:
-                default = defaults.get('marker_patterns',{}).get(name, '**/{scene_id}/*'+name+'*.tif*')
-                source['marker_patterns'][name] = _pattern(source, example, default, f'{name} image filename pattern', marker=name)
+                default = (_full_default(defaults.get('image_root'), defaults.get('marker_patterns',{}).get(name))
+                           or _full_default(image_default, '**/{scene_id}/*'+name+'*.tif*'))
+                marker_roots[name], source['marker_patterns'][name] = _full_pattern(
+                    state, source, example, default, f'{name} image file pattern', marker=name)
+    # Sources hold one image_root: re-anchor every marker pattern at the deepest
+    # folder the markers share, so moving the dataset is still one root edit.
+    try:
+        common = Path(os.path.commonpath(list(marker_roots.values())))
+    except ValueError as exc:
+        raise ValueError('All marker images must sit under one shared top folder') from exc
+    source['image_root'] = str(common)
+    for name, root in marker_roots.items():
+        source['marker_patterns'][name] = (Path(root).relative_to(common) / source['marker_patterns'][name]).as_posix()
     # Require an explicit scale decision. A machine default is not evidence of
     # this acquisition's physical pixel grid, so do not silently adopt it.
     default_scale = defaults.get('source_um_per_px','')

@@ -44,9 +44,11 @@ It then asks, in order:
 4. **Which ROIs, and their role**: `train` (learn from), `val` (choose the best
    version), `test` (final score), `reserved` (leave alone). A whole ROI
    always stays in one role. With six or more ROIs it can split them for you.
-5. **Where the images and masks are**, as a folder plus a filename pattern
-   per marker, e.g. `{scene_id}/*CD45*.tif`. It shows the first match so you
-   can see whether the pattern is right.
+5. **Where the mask and each image are**, as one full path with the changing
+   parts replaced by ROI tokens, e.g.
+   `\\server\share\Segmentation\{slide}_CellposeSegmentation\{scene_id}_..._Basins.tif`.
+   It shows the first match. If two files match, it lists both; name the
+   folders rather than using `**`, which also finds copies in deeper folders.
 6. **Which markers go into each signal**: exactly one nuclear stain; one or
    more immune stains (e.g. CD45, CD3); one or more epithelial stains (e.g.
    PanCK, Ecad).
