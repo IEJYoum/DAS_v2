@@ -313,11 +313,11 @@ class ClassifierRecipeTests(unittest.TestCase):
         record = controler.replay_recipe(self.state,{'name':'gui_classifier','steps':[recorded]})
         self.assertEqual(record.metadata['status'],'ok')
 
-    def test_prepare_menu_classifier_slot_calls_registered_action(self):
-        with patch.object(controler,'_ensure_prepare_data_project_context'), \
-             patch.object(controler,'menu_index',side_effect=[6,None]), \
+    def test_startup_menu_classifier_slot_calls_registered_action(self):
+        with patch.object(controler,'menu_index',side_effect=[5,None]), \
+             patch.object(controler,'_confirm_quit',return_value=True), \
              patch.object(controler,'perform_action') as action:
-            controler.startup_prepare_data(self.state)
+            controler.startup_menu(self.state)
         action.assert_called_once_with(self.state,'home.classifier')
 
     def test_gui_collects_optional_export_into_existing_inference_answer(self):

@@ -28,8 +28,14 @@ the existing editable-path workflow still applies.
 
 ## What to edit
 
-All locations live in this file: `OUTPUT_ROOT`, `CHECKPOINT`, and each dataset's
-`image_root`, `mask_root`, `csv_root`. These are independent parent folders.
+The output root and checkpoint come from the project folder named by
+`PROJECT_ROOT`: `project_config.txt` on Windows, `project_config_posix.txt` on
+Linux (keys `classifier_output_root`, `classifier_checkpoint`). To move to
+another setting, edit those files or point `PROJECT_ROOT` at a new project
+folder. Write UNC paths, not drive letters; Linux cannot translate `Z:`.
+`OUTPUT_ROOT` / `CHECKPOINT` in this file are fallbacks for runs without a
+project. Each dataset's `image_root`, `mask_root`, `csv_root` live in this file
+(a project config may override them as `classifier_<dataset>_image_root` etc.). These are independent parent folders.
 The `marker_patterns`, `mask_pattern`, and `csv_pattern` are globs relative to
 their roots. `{slide}`, `{roi}`, and `{scene_id}` expand from the selected scene.
 For example, `**/V*_{slide}*CD45_{roi}.tif*` searches recursively. Prefer narrower

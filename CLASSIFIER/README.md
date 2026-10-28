@@ -20,8 +20,11 @@ conversation. The older plans are design history, not a record of what is
 implemented; `classifier_plan_v1.txt` still says no code exists.
 
 For the prepared test on this workstation and engineering takeover notes,
-read [RUN_TEST.md](RUN_TEST.md). Inputs, previews and new runs now live under
-`D:\CLASSIFIER_OUTPUT`.
+read [RUN_TEST.md](RUN_TEST.md). New runs and checkpoints live in the shared
+project `\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\Isaac_Youm\CLASSIFIER_PROJECT`
+(`/mnt/rdscoussens/...` on Linux), configured by its `project_config.txt`
+(Windows) and `project_config_posix.txt` (Linux). Older runs and staged AH08
+inputs referenced below are on the original workstation's `D:\CLASSIFIER_OUTPUT`.
 
 [ENGINE_EXPERIMENTS.md](ENGINE_EXPERIMENTS.md) records the reviewed model-swap,
 encoder-pretraining and head-comparison ideas; those are proposals, not new models.
@@ -67,8 +70,8 @@ The historical `synth.generate_scene()` function defaults differ; the launcher
 passes `CONFIG` values explicitly. `noise` is Gaussian standard deviation
 divided by stain gain; it only changes newly generated synthetic images.
 
-Outputs go to a new timestamped directory under `D:\CLASSIFIER_OUTPUT` by
-default. The launcher prints the full path and returns it. Explicit relative
+Outputs go to a new timestamped directory under `config.output_root` (the
+shared project's `runs` folder) by default. The launcher prints the full path and returns it. Explicit relative
 `output_dir` and input manifest paths resolve against `CLASSIFIER`, even when
 the terminal is elsewhere. An output directory must not already exist.
 

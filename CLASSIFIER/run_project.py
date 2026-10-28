@@ -23,10 +23,13 @@ from CLASSIFIER import project_controls, source_inputs, deployment
 # USER SETTINGS: I/O locations, selections and run controls live here.
 MODE = 'tune_test'               # 'prepare', 'predict', 'train_test', or 'tune_test'
 DATASET = 'bcc'                  # 'bcc', 'ah08', or 'manifest'
-PROJECT_ROOT = None             # optional DAS project folder (inherited filepath defaults)
+# Locations (output root, checkpoint) come from PROJECT_ROOT/project_config.txt on
+# Windows and project_config_posix.txt on Linux. Re-wire a setting by editing those
+# files or pointing PROJECT_ROOT at another project folder; do not hard-code here.
+PROJECT_ROOT = r'\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\Isaac_Youm\CLASSIFIER_PROJECT'
 INTERACTIVE_SETUP = False       # use shared use/change prompts when True
-OUTPUT_ROOT = r'D:\CLASSIFIER_OUTPUT'
-CHECKPOINT = r'D:\CLASSIFIER_OUTPUT\baseline_AH08_only_20261013_174917_436166\best.pt'
+OUTPUT_ROOT = None              # fallback only when no project config supplies classifier_output_root
+CHECKPOINT = None               # fallback only when no project config supplies classifier_checkpoint
 EPOCHS = 10                     # full primary-training tile passes; replay is extra
 TUNE_LR = 1e-4
 REPLAY_FRACTION = 0.25          # share of training samples from old TRAIN ROIs
@@ -37,14 +40,14 @@ TRAIN_SETTINGS = {'steps': 500, 'batch_size': 2, 'validate_every': 125,
                   'target_um_per_px': 0.5, 'inference_tile_px': 256, 'inference_overlap': 64,
                   'bounded_memory': True}
 
-_BCC_IMAGES = r'Z:\Multiplex_IHC_studies\BCC\BCC_matched_TMAs_and_resections\Slides\Analyzing\Lung_Liver'
+_BCC_IMAGES = r'\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\BCC\BCC_matched_TMAs_and_resections\Slides\Analyzing\Lung_Liver'
 DATASETS = {
     'bcc': {
         'adapter': 'bcc',
         'discover_for_training': True,  # all CSV-matched ROIs; save splits, reserve half
         'image_root': _BCC_IMAGES,
         'mask_root': _BCC_IMAGES,
-        'csv_root': r'Z:\Multiplex_IHC_studies\BCC\BCC_matched_TMAs_and_resections\Slides\Analyzing\Liver_Lung_Project\Analysis\LiverLung_DBT_analysis\LiverLLung_DBT_CSV\Classified_CSV',
+        'csv_root': r'\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\BCC\BCC_matched_TMAs_and_resections\Slides\Analyzing\Liver_Lung_Project\Analysis\LiverLung_DBT_analysis\LiverLLung_DBT_CSV\Classified_CSV',
         # dsDNA follows the segmentation filename because some ROIs have two cycles.
         # Other markers have different cycle/channel assignments across slides;
         # select by marker identity and require exactly one match.
@@ -60,9 +63,9 @@ DATASETS = {
     },
     'ah08': {
         'adapter': 'ah08',
-        'image_root': r'Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon',
-        'mask_root': r'Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon',
-        'csv_root': r'Z:\Multiplex_IHC_studies\AlexGuimaraes\D10\Analysis\IY\DAS\subset_001',
+        'image_root': r'\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon',
+        'mask_root': r'\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\AlexGuimaraes\D10\Slides\ColorDecon',
+        'csv_root': r'\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\AlexGuimaraes\D10\Analysis\IY\DAS\subset_001',
         'marker_patterns': {m: '{slide}/Processed/{roi}/V*_' + m + '_{roi}.tif*' for m in ['H2B', 'CD45', 'PANCK']},
         'mask_pattern': '{slide}/Processed/{roi}/label*.tif*',
         'csv_pattern': 'AH_08.1_obs - Copy.csv',
@@ -79,11 +82,22 @@ DATASETS = {
 }
 
 
+def project_default(key, fallback=None):
+    """A classifier_* location from PROJECT_ROOT's config for this OS, else fallback."""
+    if not PROJECT_ROOT:
+        return fallback
+    values, _ = load_project_settings(PROJECT_ROOT)
+    return values.get(key, fallback)
+
+
 def main(mode=None, dataset=None, *, project_root=None, interactive=None, settings=None,
          output_root=None, checkpoint=None, base_dir=None, config_changed=None,
          input_fn=None, print_fn=None, sources=None, training=None, inference=None):
     """Same standalone/DAS entry; explicit settings override project path defaults."""
     input_fn, print_fn = input_fn or io.iget, print_fn or io.iprint
+    # Only an explicitly supplied project remembers this run's choices; the default
+    # PROJECT_ROOT location files are hand-edited and read-only here.
+    remember_locations = project_root is not None
     project_root = PROJECT_ROOT if project_root is None else project_root
     interactive = INTERACTIVE_SETUP if interactive is None else interactive
     def emit(*parts, **kwargs):
@@ -300,7 +314,7 @@ def main(mode=None, dataset=None, *, project_root=None, interactive=None, settin
                                     for group in settings['marker_groups']}
             cfg['replay_fraction'] = training.get('replay_fraction',REPLAY_FRACTION)
         cfg['manifest'] = str(manifest)
-        if project_root and not explicit_sources:
+        if remember_locations and not explicit_sources:
             updates = {prefix+k: str(settings[k]) for k in ('image_root','mask_root','csv_root','manifest','mask_pattern','csv_pattern','label_column') if k in settings}
             updates.update(classifier_output_root=output_root)
             if 'marker_patterns' in settings:
@@ -310,7 +324,7 @@ def main(mode=None, dataset=None, *, project_root=None, interactive=None, settin
             if checkpoint:
                 updates['classifier_checkpoint'] = checkpoint
             save_project_settings(project_root, updates, on_update=config_changed)
-        elif project_root:
+        elif remember_locations:
             updates = {'classifier_output_root':output_root}
             if checkpoint:
                 updates['classifier_checkpoint'] = checkpoint

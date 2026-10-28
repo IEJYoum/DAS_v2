@@ -85,7 +85,7 @@ checkpoints or StarDist model packages; their formats remain task specific.
 
 ## Inside DAS
 
-Under **Prepare Data**, **CNN cell classification** asks for mode and adapter,
+On the startup menu, **CNN cell classification** asks for mode and adapter,
 then calls `run_project.main` with the active project and routed I/O. This can
 run for a long time, like other existing synchronous DAS actions.
 

@@ -1339,7 +1339,7 @@ def main_menu(state: SessionState) -> bool:
     io.flush_session_log()
     ids = ["home.data_editing", "home.analysis", "home.visualization", "home.svm",
            "home.old_tool", "home.html", "home.roi_mailbox", "home.threshold_updates",
-           "home.recipes", "home.classifier"]
+           "home.recipes"]
     idx = menu_index("Main Menu", [recipe_actions.get_action(key).label for key in ids])
     io.flush_session_log()
     if idx is None:
@@ -1539,7 +1539,6 @@ def startup_prepare_data(state: SessionState) -> None:
         startup_build_data,
         startup_import_rna_data,
         startup_spectral_flow_import,
-        lambda state: perform_action(state, 'home.classifier'),
         lambda state: perform_action(state, 'home.nimbus'),
         lambda state: perform_action(state, 'home.stain_correction'),
         lambda state: perform_action(state, 'home.feature_extraction'),
@@ -1551,7 +1550,6 @@ def startup_prepare_data(state: SessionState) -> None:
         "format tabular data (formerly import and clean data)",
         "high-plex feature reduction (RNA path)",
         "Spectral deconvolution (Spectral flow path)",
-        "CNN cell classification",
         "Nimbus marker positivity (external model; recipes)",
         "stain correction (AF subtraction; recipes)",
         "feature extraction from corrected/raw images (recipes)",
@@ -1563,7 +1561,6 @@ def startup_prepare_data(state: SessionState) -> None:
         "Build and clean a tabular dataset from raw input tables using the legacy import-and-clean path.",
         "Run the RNA / high-plex reduction path.",
         "Run the spectral flow import and deconvolution path.",
-        "Run the central classifier with project paths and an explicit experiment mode.",
         "Run Nimbus marker-expression inference from explicit image/mask scenes without changing CNN models or the live triplet.",
         "Preview explicit stain/AF pairs or subtract AF using shared recursive source discovery.",
         "Measure named corrected/raw stains using existing cell and nuclear segmentation masks.",
@@ -1799,15 +1796,17 @@ def startup_cell_classifier(state: SessionState, mode=None, sources=None, checkp
     def pick_checkpoint():
         if mode not in {'predict','tune_test'}:
             return ''
-        from CLASSIFIER.run_project import CHECKPOINT
+        from CLASSIFIER.run_project import CHECKPOINT, project_default
         from support.project_config import load_project_settings
         values, _ = load_project_settings(state.data_folder)
-        return checkChange(values.get('classifier_checkpoint',CHECKPOINT),'parent checkpoint',input_fn=io.iget)
+        default = values.get('classifier_checkpoint') or project_default('classifier_checkpoint', CHECKPOINT)
+        return checkChange(default or '','parent checkpoint',input_fn=io.iget)
     def pick_output():
-        from CLASSIFIER.run_project import OUTPUT_ROOT
+        from CLASSIFIER.run_project import OUTPUT_ROOT, project_default
         from support.project_config import load_project_settings
         values, _ = load_project_settings(state.data_folder)
-        return checkChange(values.get('classifier_output_root',OUTPUT_ROOT),'classifier output root',input_fn=io.iget)
+        default = values.get('classifier_output_root') or project_default('classifier_output_root', OUTPUT_ROOT)
+        return checkChange(default or '','classifier output root',input_fn=io.iget)
     mode = recipe.ask('mode', mode, pick_mode)
     if not mode:
         return False

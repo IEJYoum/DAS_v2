@@ -121,6 +121,7 @@ class ClassifiedAdapterTests(unittest.TestCase):
                                      'true_class': ['EPI', None], 'certainty': [.8, .7]})
                 return infer.report_correctness(rows), {scenes[0]['metadata']['scene_id']: None}
             with patch.dict(run_project.DATASETS, {'fixture': settings}), \
+                    patch.object(run_project, 'PROJECT_ROOT', None), \
                     patch.object(run_project, 'CHECKPOINT', str(checkpoint)), \
                     patch.object(run_project, 'OUTPUT_ROOT', str(root / 'outputs')), \
                     patch.object(infer, 'load_checkpoint', return_value=(object(), cfg)), \
@@ -141,6 +142,7 @@ class ClassifiedAdapterTests(unittest.TestCase):
             overrides = {**run_project.TRAIN_SETTINGS, 'inference_tile_px': 4, 'inference_overlap': 0,
                          'target_um_per_px': .25}
             with patch.dict(run_project.DATASETS, {'fixture': settings}), \
+                    patch.object(run_project, 'PROJECT_ROOT', None), \
                     patch.object(run_project, 'OUTPUT_ROOT', str(root / 'outputs')), \
                     patch.object(run_project, 'TRAIN_SETTINGS', overrides), \
                     patch.object(run_project.run, 'main', side_effect=self.fake_training) as training:

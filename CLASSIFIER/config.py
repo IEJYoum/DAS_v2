@@ -9,7 +9,8 @@ MARKER_GROUPS = {"NUC": ["DAPI"], "IMMUNE": ["CD45", "CD3"],
                  "EPI": ["PanCK", "Ecad"]}
 CONFIG = {
     "seed": 7,
-    "output_root": r"D:\CLASSIFIER_OUTPUT",  # this workstation: datasets and runs on D:
+    # run.py / infer.py / refresh_reports.py default; run_project.py uses its project config.
+    "output_root": r"\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\Isaac_Youm\CLASSIFIER_PROJECT\runs",
     "output_dir": None,             # None -> output_root/<timestamp>; explicit relative -> ROOT
     "manifest": None,               # None -> generate synthetic scenes
     "scene_px": 256,

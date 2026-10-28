@@ -60,8 +60,9 @@ ordinary analysis/plotting retain that existing startup requirement.
 
 ## GUI operation and recording
 
-**CNN cell classification** is available from the startup and loaded-data menus,
-and through **Prepare Data**. It uses the same registered `home.classifier`
+**CNN cell classification** is on the startup menu only. It reads saved
+triplets from disk, never the session's in-memory data; a forward pass can
+export a new triplet, which you then open with **load prepared data**. It uses the same registered `home.classifier`
 action in every case. Choose forward prediction, preparation, fresh training or
 tuning, then **CSV label file(s), folder or glob** or **Saved DAS triplet**.
 You do not need to author a source-profile JSON to configure a new dataset.

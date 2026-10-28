@@ -1,0 +1,53 @@
+{
+  "name": "pilot_panm_codex_colon_train_test",
+  "description": "Pilot: fresh train/validate/test on the pulled Pan-M CODEX colon subset (Hickey et al. intestine; donors B009 train, B011A val, B011B test). Labels and cleaned masks from CLASSIFIER_DATA/converted/panm_codex_colon (store_converters/panm_codex_colon.py); images read from raw/. No ARTIFACT labels in this source. Pixel size 0.3774 um/px is unverified. Throwaway model: retrain on the full store later.",
+  "steps": [{
+    "do": "home.classifier",
+    "with": {
+      "mode": "train_test",
+      "sources": [{
+        "id": "panm_codex_colon",
+        "adapter": "classified_csv",
+        "image_root": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_DATA/raw/panm_codex_colon/codex_colon/raw_structured",
+        "mask_root": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_DATA/converted/panm_codex_colon/masks",
+        "labels_csv": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_DATA/converted/panm_codex_colon/labels.csv",
+        "scene_column": "fov",
+        "object_column": "labels",
+        "label_column": "class",
+        "label_mapping": {"IMMUNE": "IMMUNE", "EPI": "EPI", "UNCLASSIFIED": "UNCLASSIFIED"},
+        "marker_patterns": {
+          "DRAQ5": "{scene_id}/DRAQ5.ome.tif",
+          "CD45": "{scene_id}/CD45.ome.tif",
+          "CD3": "{scene_id}/CD3.ome.tif",
+          "Cytokeratin": "{scene_id}/Cytokeratin.ome.tif"
+        },
+        "marker_groups": {"NUC": ["DRAQ5"], "IMMUNE": ["CD45", "CD3"], "EPI": ["Cytokeratin"]},
+        "mask_pattern": "{scene_id}.tif",
+        "source_um_per_px": 0.3774,
+        "resolution_note": "Unverified standard CODEX 20x spacing; OME files carry no physical size. Check Hickey et al. 2023 Supplementary Table 8.",
+        "scenes": [
+          {"scene_id": "B009A_reg001_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B009A_reg002_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B009A_reg003_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B009A_reg004_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B009B_reg001_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B009B_reg002_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B009B_reg003_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B009B_reg004_X01_Y01_Z01", "split": "train"},
+          {"scene_id": "B011A_reg001_X01_Y01_Z01", "split": "val"},
+          {"scene_id": "B011A_reg002_X01_Y01_Z01", "split": "val"},
+          {"scene_id": "B011A_reg003_X01_Y01_Z01", "split": "val"},
+          {"scene_id": "B011A_reg004_X01_Y01_Z01", "split": "val"},
+          {"scene_id": "B011B_reg001_X01_Y01_Z01", "split": "test"},
+          {"scene_id": "B011B_reg002_X01_Y01_Z01", "split": "test"},
+          {"scene_id": "B011B_reg003_X01_Y01_Z01", "split": "test"},
+          {"scene_id": "B011B_reg004_X01_Y01_Z01", "split": "test"}
+        ]
+      }],
+      "checkpoint": "",
+      "output_root": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_PROJECT/runs",
+      "training": {"epochs": 5, "batch_size": 16, "device": "cuda", "threads": 8, "seed": 7},
+      "inference": {"report_classes": ["IMMUNE", "EPI", "UNCLASSIFIED"]}
+    }
+  }]
+}
