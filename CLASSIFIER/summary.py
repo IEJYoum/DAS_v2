@@ -143,8 +143,8 @@ def write_debug_summary(run_directory, status="complete", phase=None, error=None
         target = folder / name
         pngs = sorted(target.rglob("*.png"))
         lines.append(f"{name} PNG count: {len(pngs)}")
-        for pattern, label in [("*__prediction_native.png", "Zoomable ROI prediction"),
-                               ("*companion*.png", "One-tile companion"),
+        for pattern, label in [("*__4_prediction_native.png", "Zoomable ROI prediction"),
+                               ("*__1_zoom__*.png", "Zoom crop"),
                                ("*predictions.csv", "Excel table")]:
             files = sorted(target.glob(pattern))
             if files:

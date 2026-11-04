@@ -31,7 +31,7 @@ Every training, preparation-preview or report-only invocation writes to a
 **new folder** under `D:\CLASSIFIER_OUTPUT`. The terminal prints `Output:` and
 `Debug summary:` with exact paths. Open that folder's `debug_summary.txt` first:
 it records status, input/training coverage, loss weights, scores, verification
-and the paths of the zoomable ROI, companion image and full predictions CSV.
+and the paths of the zoomable ROI, zoom crop and full predictions CSV.
 Training folders use a timestamp; preparation and report-only folders have
 `prepare_` and `reports_` prefixes. Existing output folders are rejected.
 The reusable input cache is separate from these output folders.
@@ -55,8 +55,8 @@ The reusable input cache is separate from these output folders.
 - Whole-ROI coverage now replaces the eight-tile mechanics sample. Training
   traverses a shuffled pool of overlapping tiles; validation/test stitch
   probabilities over every native pixel before calling original mask cells.
-- [report.py](report.py): IMMUNE magenta, EPI green, UNCLASSIFIED orange,
-  ARTIFACT red. First-batch weight previews show the combined class/area weights.
+- [report.py](report.py): IMMUNE green, EPI yellow, UNCLASSIFIED cyan,
+  ARTIFACT white. First-batch weight previews show the combined class/area weights.
 
 The small U-Net architecture is unchanged. Core data/model functions do not
 parse slide/ROI names: a source scene can represent an ROI or a whole slide.
@@ -79,8 +79,8 @@ Keep that original TIFF cache in place. No source image is resampled or recopied
 After `--prepare-only`, the new `prepare_<timestamp>` output folder's
 `ready_report.json` records support/weights and `scaling_report.csv` records
 marker statistics. Its `previews\train`, `previews\val` and `previews\test`
-contain input/scaling previews. Open `*__channels.png` to inspect the new palette
-and labelled outlines before running.
+contain input/scaling previews. Open `*__channels.png` to inspect stains and
+superstains, and `*__inputs.png` for labelled outlines, before running.
 
 | Split | Entire source scene | Training tiles / evaluation scenes | IMMUNE | EPI | UNCLASSIFIED | ARTIFACT |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -154,14 +154,12 @@ directly under `D:\CLASSIFIER_OUTPUT`. It contains:
 - `debug/training/`: small training-tile examples; these are explicitly previews
   of training inputs rather than whole-ROI evaluation images.
 
-For zooming, use `*__roi_truth_native.png`, `*__roi_predictions_native.png` and
-`*__roi_errors_native.png`. They preserve the ROI's 3983 x 3983 image pixels,
-with an 84-pixel title bar above the image. Compact `*__channels.png` files
-show overview panels. Overview imagery and label masks are resized before
-boundaries are drawn, so outlines remain continuous at display resolution.
-Very small cells can disappear in a compact overview; use native PNGs to
-inspect them. `*__companion_y1863_x1863.png` shows a 256-pixel centre
-crop with native ROI coordinates. Its cell calls are sliced from the whole-ROI
+For zooming, use the numbered `*__2_composite_native.png`,
+`*__3_truth__*_native.png`, `*__4_prediction_native.png` and
+`*__5_correctness__*_native.png`. They preserve the ROI's image pixels, with an
+84-pixel title bar above the image. Compact `*__channels.png` files show
+stain-only overview panels. `*__1_zoom__*_y*_x*.png` shows a 512-pixel native
+crop, picked for many labelled cells and class diversity, with its ROI coordinates. Its cell calls are sliced from the whole-ROI
 results, not recomputed on cut-off cell fragments.
 
 CSV `correct` is True or False for supplied truth, and blank for unlabelled

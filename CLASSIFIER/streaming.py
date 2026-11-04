@@ -75,14 +75,18 @@ class Scenes(Sequence):
                     stats=record['stats'], class_names=self.cfg['class_names'])
 
 
-def cache_manifest(manifest, cfg, directory, log=print, split=None, *, training=True):
-    """Prepare one full ROI at a time; save normalized planes, not duplicated tiles."""
+def cache_manifest(manifest, cfg, directory, log=print, split=None, *, training=True, debug_dir=None):
+    """Prepare one full ROI at a time; save normalized planes, not duplicated tiles.
+
+    With debug_dir, the first ROI of each split also gets the raw-versus-scaled
+    preview while its raw markers are still in memory (they are not cached).
+    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
     table = data.read_manifest(manifest)
     if split is not None:
         table = table.loc[table.split.eq(split)]
-    records, statistics = [], []
+    records, statistics, previewed = [], [], set()
     for ordinal, row in enumerate(table.itertuples(index=False)):
         log(f'Normalize/cache ROI {ordinal+1}/{len(table)}: {row.scene_id}')
         path = (Path(manifest).parent / row.scene_json).resolve()
@@ -123,6 +127,12 @@ def cache_manifest(manifest, cfg, directory, log=print, split=None, *, training=
         record = dict(folder=folder, meta=meta, markers=list(scene['scaled']), stats=scene['stats'], source_json=str(path))
         records.append(record)
         statistics.extend({**s, 'split': row.split} for s in scene['stats'])
+        if debug_dir is not None and row.split not in previewed and len(previewed) < cfg.get('debug_scenes', 3):
+            previewed.add(row.split)
+            report.write_debug(scene, scene, None, debug_dir, cfg['class_names'],
+                               title=f'{row.split} | {row.scene_id} | raw vs scaled',
+                               max_panel_px=cfg.get('preview_max_px', 1024))
+            gc.collect()
         del scene, values
     (directory / 'index.json').write_text(json.dumps(
         [{**r, 'folder': str(r['folder'])} for r in records], indent=2), encoding='utf-8')

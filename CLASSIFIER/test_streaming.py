@@ -62,6 +62,19 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(exported.source_class.iloc[0], 'EPI')
             del maps, eager
 
+    def test_streamed_training_writes_scaling_and_per_step_validation_images(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, cfg = self.fixture(root)
+            cfg.update(output_dir=str(root / 'run'), epochs=None, steps=2, validate_every=1, debug_scenes=3)
+            (root / 'run').mkdir()
+            train.main(cfg, None, lambda *_: None)
+            debug = {p.name for p in (root / 'run' / 'debug').glob('*__scaling.png')}
+            self.assertEqual(len(debug), 3)  # first ROI of train, val and test
+            validation = {p.name for p in (root / 'run' / 'validation').glob('*.png')}
+            for step in (1, 2):
+                self.assertTrue(any(name.startswith(f'step_{step:04d}__') for name in validation), validation)
+
     def test_epoch_primary_coverage_and_replay_share(self):
         class Pool:
             def role_indices(self, role):

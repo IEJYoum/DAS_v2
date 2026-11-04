@@ -267,13 +267,13 @@ def check_full_coverage():
         from PIL import Image
         with Image.open(paths[1]) as native:
             assert native.size == (300, 344)  # original image pixels + title bar
-        with Image.open(paths[-1]) as companion:
-            assert companion.getpixel((256, 84 + 118)) == tuple(report.COLORS[0])
+        with Image.open(paths[0]) as zoom:  # whole 300x260 scene fits the 512 crop; prediction panel starts at x=300
+            assert zoom.getpixel((300 + 10, 84 + 120)) == tuple(report.COLORS[0])
     print("PASS: full coverage, far edges, seam-cell aggregation, padding and nullable correct flags", flush=True)
 
 
 def check_preview_boundaries():
-    """A downsampled channel panel must retain a connected cell outline."""
+    """Resized label previews keep connected outlines; channel panels show stain only."""
     from scipy.ndimage import label
     from PIL import Image
     yy, xx = np.ogrid[:1024, :1024]
@@ -283,17 +283,19 @@ def check_preview_boundaries():
     old = Image.fromarray(report.overlay(plane, mask, targets)).resize((256, 256), Image.Resampling.NEAREST)
     old_boundary = np.all(np.asarray(old) == report.COLORS[0], axis=-1)
     assert label(old_boundary, np.ones((3, 3)))[1] > 1  # fixture exposes the old fragmented-outline bug
+    boundary = np.all(report.preview_overlay(plane, mask, targets, (256, 256)) == report.COLORS[0], axis=-1)
+    assert boundary.any() and label(boundary, np.ones((3, 3)))[1] == 1
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary) / "channels.png"
-        report.write_channels({"Marker": plane}, np.zeros((3, *mask.shape), np.float32),
-                              mask, targets, path, CLASS_NAMES, title="Resize regression", max_panel_px=256)
-        with Image.open(path) as image:
-            panel = np.asarray(image.crop((0, 100, 256, 356)))
-        boundary = np.all(panel == report.COLORS[0], axis=-1)
-        assert boundary.any() and label(boundary, np.ones((3, 3)))[1] == 1
+        stain = np.zeros(mask.shape, np.float32)  # black: any outline colour would show
+        report.write_channels({"Marker": stain}, np.stack([stain] * 3), path, title="Stain only", max_panel_px=256)
+        with Image.open(path) as image:  # one-line title: 52px header, then 24px label above each 256px row
+            pixels = np.asarray(image.convert("RGB"))
+            panels = [pixels[76:332, :256], pixels[356:612, :1024]]  # 1 marker, then 3 superstains + composite
+        assert all(panel.max() == 0 for panel in panels)  # no outline drawn over the stain
     np.testing.assert_array_equal(report.preview_overlay(plane, mask, targets, (1024, 1024)),
                                   report.overlay(plane, mask, targets))
-    print("PASS: resized channel panels draw connected boundaries after resizing; native overlay unchanged", flush=True)
+    print("PASS: resized previews draw connected boundaries; channel panels are stain only; native overlay unchanged", flush=True)
 
 
 def check_error_pages():

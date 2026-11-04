@@ -8,7 +8,12 @@ from pathlib import Path
 import re
 from PIL import Image, ImageDraw, ImageFont
 
-COLORS = np.array([[255, 0, 255], [0, 255, 0], [255, 165, 0], [255, 0, 0]], np.uint8)
+# Outline hues avoid every stain hue (IMMUNE red, EPI blue, their magenta overlap, NUC white).
+COLORS = np.array([[0, 255, 0], [255, 220, 0], [0, 220, 255], [255, 255, 255]], np.uint8)
+CLASS_LEGEND = 'IMMUNE green | EPI yellow | Other cyan | ARTIFACT white'
+CORRECTNESS_COLORS = np.array([[150, 150, 150], [255, 0, 0]], np.uint8)
+CORRECTNESS_LEGEND = 'Correct grey | Incorrect red | Excluded/unlabelled: no outline | no stain shown'
+DIM = .5
 
 
 def display_stain(plane, percentile=95, gamma=.7):
@@ -75,48 +80,82 @@ def write_confusion_matrix(metrics, path, *, truth_name='provided labels', predi
     return path
 
 
+def zoom_origin(mask, truth, span):
+    """Top-left of the span x span window with the most labelled cells times class diversity.
+
+    Cheap: one centroid per labelled cell, binned at span/4, summed over 4x4 bins.
+    Score is cell count times exp(class entropy), the effective number of classes.
+    """
+    h, w = mask.shape
+    keep = (mask > 0) & (truth >= 0)
+    if (h <= span and w <= span) or not keep.any():
+        return max(0, (h-span)//2), max(0, (w-span)//2)
+    flat = np.flatnonzero(keep)
+    ids, first, inverse = np.unique(mask.ravel()[flat], return_index=True, return_inverse=True)
+    ys, xs = np.divmod(flat, w)
+    pixels = np.bincount(inverse)
+    cy, cx = np.bincount(inverse, ys) / pixels, np.bincount(inverse, xs) / pixels
+    classes = truth.ravel()[flat[first]].astype(int)
+    step = max(1, span // 4)
+    by, bx = -(-h // step), -(-w // step)
+    grid = np.zeros((classes.max() + 1, by + 1, bx + 1))
+    np.add.at(grid, (classes, (cy // step).astype(int) + 1, (cx // step).astype(int) + 1), 1)
+    grid = grid.cumsum(1).cumsum(2)
+    ny, nx = max(1, min(4, by)), max(1, min(4, bx))
+    counts = grid[:, ny:, nx:] - grid[:, :-ny, nx:] - grid[:, ny:, :-nx] + grid[:, :-ny, :-nx]
+    total = counts.sum(0)
+    share = np.divide(counts, total, out=np.zeros_like(counts), where=total > 0)
+    entropy = -(share * np.log(np.where(share > 0, share, 1))).sum(0)
+    oy, ox = np.unravel_index(np.argmax(total * np.exp(entropy)), total.shape)
+    return int(min(oy * step, max(0, h-span))), int(min(ox * step, max(0, w-span)))
+
+
 def write_classification_images(image, mask, prediction, truth, directory, *, scene_id,
         truth_name='provided labels', prediction_name='model', colors=COLORS,
-        legend='IMMUNE magenta | EPI green | Other orange | ARTIFACT red',
-        prefix='', native=True, preview_max_px=1400, companion_px=256, write_prediction=True):
-    """Shared CNN/Nimbus ROI debug: reference, prediction, correctness, and crop.
+        legend=CLASS_LEGEND, prefix='', native=True, companion_px=512, write_prediction=True,
+        zoom_panels=()):
+    """Shared CNN/Nimbus ROI debug, numbered so each scene's files sort in reading order.
 
+    1 zoom: native crop chosen by zoom_origin; truth and prediction outlines on the
+      dimmed stain, correctness with no stain, then any zoom_panels (label, HxWx3 uint8).
+    2 composite, no outlines; 3 truth outlines on dimmed stain; 4 prediction outlines
+      on the same dimmed stain; 5 correctness on black. Native pixels, 84px title bar.
     -1 truth means excluded/unlabelled and never produces a correctness outline.
-    Calls are already per-object; cropping/resizing never recomputes predictions.
+    Calls are already per-object; cropping never recomputes predictions.
     """
     out=Path(directory);out.mkdir(parents=True,exist_ok=True)
     name=prefix+report_token(scene_id)
     tag=report_token(truth_name)
     correct=np.full(mask.shape,-1,np.int16)
     valid=truth>=0
-    correct[valid&(truth==prediction)]=1
-    correct[valid&(truth!=prediction)]=3
-    caption='Correct green | Incorrect red | Excluded/unlabelled: no outline'
+    correct[valid&(truth==prediction)]=0
+    correct[valid&(truth!=prediction)]=1
+    dim=np.asarray(image,dtype=np.float32)*DIM
+    black=np.zeros(mask.shape,np.float32)
+    nothing=np.full(mask.shape,-1,np.int16)
     paths=[]
-    if native:
-        paths.append(write_titled_png(out/f'{name}__truth__{tag}_native.png',overlay(image,mask,truth,colors),
-            f'TRUTH / REFERENCE: {truth_name} | {scene_id}',legend))
-        if write_prediction:
-            paths.append(write_titled_png(out/f'{name}__prediction_native.png',overlay(image,mask,prediction,colors),
-                f'PREDICTION: {prediction_name} | {scene_id}',legend))
-        paths.append(write_titled_png(out/f'{name}__correctness__{tag}_native.png',overlay(image*.75,mask,correct),
-            f'CORRECTNESS: {prediction_name} vs {truth_name} | {scene_id}',caption))
-    h,w=mask.shape
-    scale=min(1,preview_max_px/max(h,w))
-    size=(max(1,round(w*scale)),max(1,round(h*scale)))
-    panels=[preview_overlay(image*(.75 if i==2 else 1),mask,t,size,c)
-            for i,(t,c) in enumerate(((truth,colors),(prediction,colors),(correct,COLORS)))]
-    paths.append(write_titled_png(out/f'{name}__comparison__{tag}_preview.png',np.concatenate(panels,axis=1),
-        f'{scene_id} | LEFT: TRUTH ({truth_name}) | MIDDLE: PREDICTION ({prediction_name}) | RIGHT: CORRECTNESS',
-        legend+' | '+caption,'Preview only; label rasters resized before drawing boundaries.'))
     span=companion_px
-    y,x=max(0,(h-span)//2),max(0,(w-span)//2)
+    y,x=zoom_origin(mask,truth,span)
     region=np.s_[y:y+span,x:x+span]
-    panels=[overlay(image[region]*(.75 if i==2 else 1),mask[region],t[region],c)
-            for i,(t,c) in enumerate(((truth,colors),(prediction,colors),(correct,COLORS)))]
-    paths.append(write_titled_png(out/f'{name}__companion__{tag}_y{y}_x{x}.png',np.concatenate(panels,axis=1),
-        f'{scene_id} | LEFT: TRUTH | MIDDLE: PREDICTION | RIGHT: CORRECTNESS',
-        f'Reference: {truth_name} | Prediction: {prediction_name}',f'Native crop x={x}, y={y}; correct green / incorrect red; excluded unoutlined.'))
+    panels=[overlay(dim[region],mask[region],truth[region],colors),
+            overlay(dim[region],mask[region],prediction[region],colors),
+            overlay(black[region],mask[region],correct[region],CORRECTNESS_COLORS)]
+    panels+=[np.asarray(panel)[region] for _,panel in zoom_panels]
+    labels=' | '.join(['TRUTH','PREDICTION','CORRECTNESS']+[label for label,_ in zoom_panels])
+    paths.append(write_titled_png(out/f'{name}__1_zoom__{tag}_y{y}_x{x}.png',np.concatenate(panels,axis=1),
+        f'{scene_id} | LEFT TO RIGHT: {labels}',f'{legend} | {CORRECTNESS_LEGEND}',
+        f'Native crop x={x}, y={y}, picked for many labelled cells and class diversity. Reference: {truth_name}'))
+    if native:
+        if write_prediction:
+            paths.append(write_titled_png(out/f'{name}__2_composite_native.png',overlay(image,mask,nothing),
+                f'STAIN ONLY | {scene_id}','No outlines'))
+        paths.append(write_titled_png(out/f'{name}__3_truth__{tag}_native.png',overlay(dim,mask,truth,colors),
+            f'TRUTH / REFERENCE: {truth_name} | {scene_id}',legend+f' | stain dimmed to {DIM:g}'))
+        if write_prediction:
+            paths.append(write_titled_png(out/f'{name}__4_prediction_native.png',overlay(dim,mask,prediction,colors),
+                f'PREDICTION: {prediction_name} | {scene_id}',legend+f' | stain dimmed to {DIM:g}'))
+        paths.append(write_titled_png(out/f'{name}__5_correctness__{tag}_native.png',overlay(black,mask,correct,CORRECTNESS_COLORS),
+            f'CORRECTNESS: {prediction_name} vs {truth_name} | {scene_id}',CORRECTNESS_LEGEND))
     return paths
 
 

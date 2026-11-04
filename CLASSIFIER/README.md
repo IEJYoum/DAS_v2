@@ -263,7 +263,7 @@ automatic 1/3 train, 1/6 test, 1/2 reserve selection exists yet. See
 | Artifact | What to look for |
 | --- | --- |
 | `config.json`, `manifest.csv` | Effective settings and exact source scene paths. Reused manifests still reference external datasets; outputs are not self-contained archives. |
-| `debug_summary.txt` | Start here to find native ROI images, companions and all-call CSVs; includes run status, scope, weights, scores and verification. |
+| `debug_summary.txt` | Start here to find native ROI images, zoom crops and all-call CSVs; includes run status, scope, weights, scores and verification. |
 | `run_log.txt`, `timings.json` | Progress, training ETA and phase costs. Printed ETA covers training compute; validation/rendering add time. |
 | `preparation.csv` | Scaling stats, split and per-tile class counts. There is one row **per marker per tile**; deduplicate by `scene_id` before summing cell counts. |
 | Staged `ingest_report.json` | Source joins, whole-ROI labels, paths and sampled windows; lives beside the staged manifest. |
@@ -271,14 +271,14 @@ automatic 1/3 train, 1/6 test, 1/2 reserve selection exists yet. See
 | `class_weights.json` | Unique supervised training-cell counts, formula, cap and actual loss class multipliers. Also saved in each checkpoint. |
 | `best.pt`, `last.pt` | Model state and saved effective config; weights are architecture-specific. |
 | `predictions.csv`, `test_metrics.json` | Test calls, supplied truth, probability columns, per-class support and confusion matrix. |
-| `debug/*__scaling.png`, `debug/*__channels.png` | Raw/scaled stains and preparation previews. |
-| `debug/train_batch.png`, `debug/train_batch.json`, `debug/train_channels.png` | Actual first augmented batch and its loss weights; first predictions precede the first optimizer update. |
-| `validation/` | Flat per-step PNG/CSV/metrics collection. Native whole-ROI truth/prediction/error images, compact overview and one-tile companion. |
+| `debug/*__scaling.png`, `debug/*__channels.png` | Raw/scaled stains and preparation previews. Channels are stain only: scaled markers, then the superstains the model receives. |
+| `debug/train_batch.png`, `debug/train_batch.json`, `debug/train_channels.png` | Actual first augmented batch, its loss weights and the cell calls made before the first optimizer update; train_channels is that sample's stain only. |
+| `validation/` | Flat per-step PNG/CSV/metrics collection. Numbered whole-ROI images `__1_zoom` (picked crop) and `__2..5` (composite, truth, prediction, correctness); tiles keep the compact `__predictions.png`. |
 | `debug/training/`, `debug/loss_vs_time.png` | Training-tile previews and loss against elapsed wall time. |
 | `test/predictions.csv`, `test/errors0.png`, `test/errors1.png`, ... | All calls with nullable `correct`; all labelled errors across numbered pages, sorted by certainty. |
 
-Current outline colors: IMMUNE magenta, EPI green, UNCLASSIFIED orange, ARTIFACT
-red. RGB image colors are separate: immune red, epithelial blue, nucleus white.
+Current outline colors: IMMUNE green, EPI yellow, UNCLASSIFIED cyan, ARTIFACT
+white; none shares a hue with the RGB stain (immune red, epithelial blue, nucleus white).
 Palette edits affect newly rendered images, not existing PNGs.
 
 Useful failure messages identify the scene/stain: unknown label, missing mask

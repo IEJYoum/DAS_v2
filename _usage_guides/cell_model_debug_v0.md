@@ -20,18 +20,19 @@ comparison folder), new reports use:
 
 | Path | Meaning |
 |---|---|
-| `*__prediction_native.png` | Model's per-cell calls; independent of reference labels |
-| `*__truth__<reference>_native.png` | Supplied reference annotations, explicitly named |
-| `*__correctness__<reference>_native.png` | Correct green, incorrect red; excluded/unlabelled cells have no outline |
-| `*__comparison__<reference>_preview.png` | Left reference, middle prediction, right correctness |
-| `*__companion__<reference>_y*_x*.png` | Native crop in that same three-panel order |
+| `*__1_zoom__<reference>_y*_x*.png` | 512 px native crop picked for many labelled cells and class diversity: truth, prediction, correctness (no stain); the CNN adds pixel argmax |
+| `*__2_composite_native.png` | Stain composite, no outlines |
+| `*__3_truth__<reference>_native.png` | Supplied reference annotations on the stain dimmed to 0.5 |
+| `*__4_prediction_native.png` | Model's per-cell calls on the same dimmed stain |
+| `*__5_correctness__<reference>_native.png` | On black: correct grey, incorrect red; excluded/unlabelled cells have no outline |
 | `confusion*.png` | Rows = TRUTH/reference; columns = PREDICTION, with explicit axis labels |
 | `errors/*errors0.png`, `*errors1.png`, ... | Numbered error-example galleries; every caption names TRUTH and PREDICTION |
 | `predictions.csv` / prefixed variants | All per-cell predictions, including correct, incorrect and unscored rows |
 | `marker_scores/` | Nimbus-specific native continuous-score outlines |
 
-IMMUNE = magenta, EPI = green, UNCLASSIFIED/Other = orange, ARTIFACT = red.
-These class colors differ from the green/red **correctness** convention.
+IMMUNE = green, EPI = yellow, UNCLASSIFIED/Other = cyan, ARTIFACT = white.
+No outline color shares a hue with the stain (immune red, epithelial blue,
+nucleus white), and correctness (grey/red) is drawn without stain.
 "Truth" means the supplied annotation strategy, not verified biological truth.
 Metrics must be read with reference-column name, class support and exclusions.
 

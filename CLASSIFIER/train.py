@@ -120,7 +120,8 @@ def main(cfg, scenes=None, log_fn=print):
     if scenes is None:
         if cfg.get('bounded_memory'):
             from CLASSIFIER import streaming
-            records = streaming.cache_manifest(cfg['manifest'], cfg, Path(cfg['output_dir']) / 'normalized_cache', log_fn)
+            records = streaming.cache_manifest(cfg['manifest'], cfg, Path(cfg['output_dir']) / 'normalized_cache', log_fn,
+                                               debug_dir=Path(cfg['output_dir']) / 'debug')
             scenes = {split: streaming.Scenes(records, cfg, split) for split in ('train', 'val')}
         else:
             scenes = data.load_scenes(cfg['manifest'], cfg)
@@ -204,7 +205,10 @@ def main(cfg, scenes=None, log_fn=print):
                 start = time.perf_counter()
                 if cfg.get('bounded_memory'):
                     from CLASSIFIER import streaming
-                    scores = streaming.evaluate(model, validation, cfg, log=log_fn)
+                    # Render each validation ROI as it is scored, one map at a time,
+                    # so progress is visible on the same ROIs at every evaluation.
+                    scores = streaming.evaluate(model, validation, cfg, out / "validation",
+                                                prefix=f"step_{step:04d}__", render=True, log=log_fn)
                 else:
                     predictions, maps = infer.evaluate_scenes(model, validation, cfg)
                     scores = report.score_cells(predictions, infer.label_table(validation), cfg["class_names"])

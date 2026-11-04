@@ -42,13 +42,14 @@ Debug PNGs show raw/scaled channels, superstains,
 actual augmented inputs, labels, pixel predictions and errors. errors.csv
 identifies the cells in the capped confident-error gallery.
 
-channels_<scene>.png stitches the five scaled marker images and an RGB
-composite, with truth and predicted-class outlines on each panel. RGB uses
-epithelial blue, immune red, nuclear white. Outline colors: immune magenta,
-epithelial green, unclassified orange, artifact red. Small panels are
-enlarged; larger panels retain native pixels and outlines. The training
-folder shows final training-scene predictions; train_channels.png shows
-the actual first augmented input channels, with first-step predictions.
+channels_<scene>.png is stain only, with no labels: the scaled input
+markers on the top row; the NUC / IMMUNE / EPI superstains the model
+actually receives, plus an RGB composite, on the bottom row. RGB uses
+epithelial blue, immune red, nuclear white. Truth and calls are in
+the numbered *__1_zoom and *__2..5 native ROI PNGs. Outline colors: immune
+green, epithelial yellow, unclassified cyan, artifact white. train_channels.png
+shows the first augmented sample's superstains; train_batch.png shows its
+truth, loss weights and the cell calls made before the first update.
 loss_vs_time.png plots loss against elapsed training wall time, including
 validation/debug overhead. metrics.jsonl holds the underlying values.
 

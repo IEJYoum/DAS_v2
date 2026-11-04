@@ -11,7 +11,7 @@ from support import io_adapter as io
 print = io.legacy_print
 from PIL import Image, ImageDraw, ImageFont
 
-from support.cell_reporting import COLORS, score_cells, metrics_from_confusion, overlay, preview_overlay, cell_boxes, write_classification_images, write_confusion_matrix, report_subdirectory
+from support.cell_reporting import COLORS, CORRECTNESS_COLORS, score_cells, metrics_from_confusion, overlay, preview_overlay, cell_boxes, write_classification_images, write_confusion_matrix, report_subdirectory
 from support.cell_reporting import display_stain
 
 
@@ -62,41 +62,45 @@ def cell_map(probabilities, mask, class_names):
     return lut[mask]
 
 
-def write_channels(planes, x, mask, targets, path, class_names, predicted_targets=None, title="", max_panel_px=None):
-    """Stitch each scaled channel and a composite, with truth/prediction outline rows."""
-    panels = {**{name:display_stain(plane) for name,plane in planes.items()}, "RGB composite": composite(x)}
-    rows = [("Truth", targets)]
-    if predicted_targets is not None:
-        rows.append(("Prediction", predicted_targets))
-    height, width = mask.shape
+def write_channels(planes, x, path, title="", max_panel_px=None, lineages=("NUC", "IMMUNE", "EPI")):
+    """Stain only, no labels: scaled input markers, then the model's superstains and composite.
+
+    Truth and calls live in the numbered *__1..5 ROI PNGs (tiles: *__predictions.png), so no
+    outline or class colour ever hides the stain here.
+    """
+    rows = [(f"{name} (scaled marker)", display_stain(plane)) for name, plane in planes.items()]
+    model_row = [(f"{name} superstain (model input)", display_stain(plane)) for name, plane in zip(lineages, x)]
+    model_row.append(("RGB composite", composite(x)))
+    grid = ([rows] if rows else []) + [model_row]
+    height, width = np.asarray(x[0]).shape
     scale = min(1, max_panel_px / max(height, width)) if max_panel_px else 1
-    width, height = max(256, round(width * scale)), max(256, round(height * scale))
+    if max(height, width) * scale < 256:
+        scale = 256 / max(height, width)
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    resampling = Image.Resampling.BOX if scale < 1 else Image.Resampling.NEAREST
     font = ImageFont.truetype(str(Path(matplotlib.get_data_path()) / "fonts/ttf/DejaVuSans.ttf"), 14)
+    columns = max(len(row) for row in grid)
     lines, line = [], ""
     for word in title.split():
         candidate = f"{line} {word}".strip()
-        if line and font.getlength(candidate) > len(panels) * width - 16:
+        if line and font.getlength(candidate) > columns * size[0] - 16:
             lines.append(line)
             line = word
         else:
             line = candidate
     lines.append(line)
-    extra = 20 * (len(lines) - 1)
-    canvas = Image.new("RGB", (len(panels) * width, 76 + extra + len(rows)*(height+32)), (24, 24, 24))
+    header = 52 + 20 * (len(lines) - 1)
+    canvas = Image.new("RGB", (columns * size[0], header + len(grid) * (size[1] + 24)), (24, 24, 24))
     draw = ImageDraw.Draw(canvas)
     for i, text in enumerate(lines):
         draw.text((8, 4 + 20*i), text, font=font, fill="white")
-    draw.text((8, 25 + extra), "RGB: EPI blue / IMMUNE red / NUC white", font=font, fill="white")
-    offset = 8
-    for cls, color in zip(class_names, COLORS):
-        draw.text((offset, 48 + extra), cls, font=font, fill=tuple(color))
-        offset += int(draw.textlength(cls, font=font)) + 24
-    for r, (row_title, class_map) in enumerate(rows):
-        top = 76 + extra + r*(height+32)
-        for c, (name, plane) in enumerate(panels.items()):
-            draw.text((c*width+8, top), f"{row_title}: {name}", font=font, fill="white")
-            image = Image.fromarray(preview_overlay(plane, mask, class_map, (width, height)))
-            canvas.paste(image, (c*width, top+24))
+    draw.text((8, header - 24), "Stain only. RGB: EPI blue / IMMUNE red / NUC white", font=font, fill="white")
+    for r, row in enumerate(grid):
+        top = header + r * (size[1] + 24)
+        for c, (name, image) in enumerate(row):
+            draw.text((c*size[0] + 8, top), name, font=font, fill="white")
+            image = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+            canvas.paste(Image.fromarray(image).resize(size, resampling), (c*size[0], top + 24))
     path = Path(path)
     canvas.save(path)
     return path
@@ -121,16 +125,18 @@ def _save(fig, path):
 
 
 def write_native_roi(scene, probabilities, output_dir, class_names, title, prefix="", cell_targets=None):
-    """Native pixels for zoom, plus one crop using the SAME whole-scene cell calls.
+    """Numbered native ROI images plus one zoom crop using the SAME whole-scene cell calls.
 
-    PNG title bars add height only; the ROI image is never resized. The companion
+    PNG title bars add height only; the ROI image is never resized. The zoom
     slices whole-scene calls instead of recomputing decisions on partial cells.
     """
     sid = scene['metadata']['scene_id']
     calls = cell_map(probabilities, scene['mask'], class_names) if cell_targets is None else cell_targets
     truth_name = scene['metadata'].get('label_column', 'provided cell labels')
+    pixels = class_rgb(np.where(scene['mask'] > 0, probabilities.argmax(axis=0), -1))
     return write_classification_images(composite(scene['x']), scene['mask'], calls, scene['targets'], output_dir,
-        scene_id=sid, truth_name=truth_name, prediction_name='DAS CNN', prefix=prefix)
+        scene_id=sid, truth_name=truth_name, prediction_name='DAS CNN', prefix=prefix,
+        zoom_panels=[('PIXEL ARGMAX (outside cells dark)', pixels)])
 
 
 def write_debug(scene, prepared, predictions, output_dir, class_names, title=None, prefix="", max_panel_px=None):
@@ -159,42 +165,43 @@ def write_debug(scene, prepared, predictions, output_dir, class_names, title=Non
             axes[row, 1].axis("off")
         fig.suptitle(title)
         paths.append(_save(fig, out / f"{prefix}{sid}__scaling.png"))
-    columns = 5 if predictions is not None else 3
-    fig, axes = plt.subplots(1, columns, figsize=(3*columns, 3.5))
-    axes[0].imshow(composite(prepared["x"]))
-    axes[0].set_title("EPI blue / IMM red / NUC white")
-    axes[1].imshow(class_rgb(prepared["targets"]))
-    axes[1].set_title("truth (outside/unlabelled dark)")
-    if predictions is not None:
-        cell_targets = cell_map(predictions, scene["mask"], class_names)
-        axes[2].imshow(class_rgb(cell_targets))
-        axes[2].set_title("cell calls (mean probability)")
-        winners = predictions.argmax(axis=0)
-        display = np.where(scene["mask"] > 0, winners, -1)
-        axes[3].imshow(class_rgb(display))
-        axes[3].set_title("pixel predictions (outside cells grey)")
-        valid = prepared["targets"] >= 0
-        error = np.zeros((*valid.shape, 3), np.uint8)
-        error[valid] = (25, 90, 25)
-        error[valid & (cell_targets != prepared["targets"])] = (230, 50, 50)
-        axes[4].imshow(error)
-        axes[4].set_title("cell errors red / correct green")
+    if predictions is not None and "parent_scene_id" not in scene["metadata"]:
+        # Whole ROI: numbered native images replace the compact summary figure.
+        paths.extend(write_native_roi(scene, predictions, out, class_names, title, prefix))
     else:
-        h, w = scene["mask"].shape
-        scale = min(1, 256 / max(h, w))
-        size = (max(1, round(w * scale)), max(1, round(h * scale)))
-        axes[2].imshow(preview_overlay(composite(prepared["x"]), scene["mask"], prepared["targets"], size),
-                       interpolation="nearest")
-        axes[2].set_title("input + labelled outlines")
-    for ax in axes:
-        ax.axis("off")
-    fig.suptitle(title + " | " + " / ".join(class_names))
-    paths.append(_save(fig, out / f"{prefix}{sid}__{'predictions' if predictions is not None else 'inputs'}.png"))
-    paths.append(write_channels(prepared["scaled"], prepared["x"], scene["mask"], prepared["targets"],
-                                out / f"{prefix}{sid}__channels.png", class_names,
-                                cell_targets if predictions is not None else None, title, max_panel_px))
-    if predictions is not None and "parent_scene_id" not in scene["metadata"] and max(scene["mask"].shape) > 256:
-        paths.extend(write_native_roi(scene, predictions, out, class_names, title, prefix, cell_targets))
+        columns = 5 if predictions is not None else 3
+        fig, axes = plt.subplots(1, columns, figsize=(3*columns, 3.5))
+        axes[0].imshow(composite(prepared["x"]))
+        axes[0].set_title("EPI blue / IMM red / NUC white")
+        axes[1].imshow(class_rgb(prepared["targets"]))
+        axes[1].set_title("truth (outside/unlabelled dark)")
+        if predictions is not None:
+            cell_targets = cell_map(predictions, scene["mask"], class_names)
+            axes[2].imshow(class_rgb(cell_targets))
+            axes[2].set_title("cell calls (mean probability)")
+            winners = predictions.argmax(axis=0)
+            display = np.where(scene["mask"] > 0, winners, -1)
+            axes[3].imshow(class_rgb(display))
+            axes[3].set_title("pixel predictions (outside cells grey)")
+            valid = prepared["targets"] >= 0
+            error = np.zeros((*valid.shape, 3), np.uint8)
+            error[valid] = CORRECTNESS_COLORS[0]
+            error[valid & (cell_targets != prepared["targets"])] = CORRECTNESS_COLORS[1]
+            axes[4].imshow(error)
+            axes[4].set_title("cell errors red / correct grey")
+        else:
+            h, w = scene["mask"].shape
+            scale = min(1, 256 / max(h, w))
+            size = (max(1, round(w * scale)), max(1, round(h * scale)))
+            axes[2].imshow(preview_overlay(composite(prepared["x"]), scene["mask"], prepared["targets"], size),
+                           interpolation="nearest")
+            axes[2].set_title("input + labelled outlines")
+        for ax in axes:
+            ax.axis("off")
+        fig.suptitle(title + " | " + " / ".join(class_names))
+        paths.append(_save(fig, out / f"{prefix}{sid}__{'predictions' if predictions is not None else 'inputs'}.png"))
+    paths.append(write_channels(prepared["scaled"], prepared["x"], out / f"{prefix}{sid}__channels.png",
+                                title, max_panel_px))
     return paths
 
 
@@ -203,7 +210,8 @@ def write_batch(batch, output_path, class_names, probabilities=None, class_weigh
     display_weights = weights * (targets != -1)
     if class_weights is not None:
         display_weights = display_weights * np.asarray(class_weights)[np.maximum(targets, 0)]
-    fig, axes = plt.subplots(len(x), 3, figsize=(9, 2.6*len(x)), squeeze=False)
+    columns = 3 if probabilities is None else 4
+    fig, axes = plt.subplots(len(x), columns, figsize=(3*columns, 2.6*len(x)), squeeze=False)
     for i in range(len(x)):
         h, w = masks[i].shape
         scale = min(1, 256 / max(h, w))
@@ -212,13 +220,14 @@ def write_batch(batch, output_path, class_names, probabilities=None, class_weigh
         axes[i, 0].set_title("augmented input + truth")
         axes[i, 1].imshow(class_rgb(targets[i])); axes[i, 1].set_title("targets")
         axes[i, 2].imshow(display_weights[i], cmap="magma"); axes[i, 2].set_title("effective loss weights")
+        if probabilities is not None:
+            axes[i, 3].imshow(class_rgb(np.where(masks[i] > 0, cell_map(probabilities[i], masks[i], class_names), -1)))
+            axes[i, 3].set_title("cell calls before first update")
         for ax in axes[i]:
             ax.axis("off")
     path = _save(fig, Path(output_path))
-    predicted = cell_map(probabilities[0], masks[0], class_names) if probabilities is not None else None
-    write_channels(dict(zip(["NUC", "IMMUNE", "EPI"], x[0])), x[0], masks[0], targets[0],
-                   Path(output_path).with_name("train_channels.png"), class_names, predicted,
-                   "Actual first augmented sample; prediction before first optimizer update")
+    write_channels({}, x[0], Path(output_path).with_name("train_channels.png"),
+                   "Actual first augmented sample (stain only)")
     counts = {cls: int((targets == i).sum()) for i, cls in enumerate(class_names)}
     stats = {"channels": [{"min": float(x[:, i].min()), "mean": float(x[:, i].mean()),
                             "max": float(x[:, i].max()), "nonzero_fraction": float((x[:, i] > 0).mean())}

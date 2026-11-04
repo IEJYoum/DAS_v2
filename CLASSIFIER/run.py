@@ -186,7 +186,8 @@ def _execute_streamed(settings, out, timings, total_start, log):
     """Same train/test engine with disk-backed tiles and bounded image memory."""
     from CLASSIFIER import streaming, train, infer
     import shutil
-    records = streaming.cache_manifest(settings['manifest'], settings, out / 'normalized_cache', log)
+    records = streaming.cache_manifest(settings['manifest'], settings, out / 'normalized_cache', log,
+                                       debug_dir=out / 'debug')
     pools = {split: streaming.Scenes(records, settings, split) for split in ('train', 'val', 'test')}
     checkpoint = train.main(settings, pools, log)
     model, saved = infer.load_checkpoint(checkpoint, settings['device'])
