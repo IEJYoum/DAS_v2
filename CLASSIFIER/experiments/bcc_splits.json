@@ -1,0 +1,786 @@
+[
+ {
+  "scene_id": "001127ROI01",
+  "slide": "001127",
+  "roi": "ROI01",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI02",
+  "slide": "001127",
+  "roi": "ROI02",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI03",
+  "slide": "001127",
+  "roi": "ROI03",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI04",
+  "slide": "001127",
+  "roi": "ROI04",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI06",
+  "slide": "001127",
+  "roi": "ROI06",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI07",
+  "slide": "001127",
+  "roi": "ROI07",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI08",
+  "slide": "001127",
+  "roi": "ROI08",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI11",
+  "slide": "001127",
+  "roi": "ROI11",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI12",
+  "slide": "001127",
+  "roi": "ROI12",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI14",
+  "slide": "001127",
+  "roi": "ROI14",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI17",
+  "slide": "001127",
+  "roi": "ROI17",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI18",
+  "slide": "001127",
+  "roi": "ROI18",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI21",
+  "slide": "001127",
+  "roi": "ROI21",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI22",
+  "slide": "001127",
+  "roi": "ROI22",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001127ROI23",
+  "slide": "001127",
+  "roi": "ROI23",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001127\\KB_BCC_001127_D23_C13R2_DSDNA.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI01",
+  "slide": "001749",
+  "roi": "ROI01",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI03",
+  "slide": "001749",
+  "roi": "ROI03",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI06",
+  "slide": "001749",
+  "roi": "ROI06",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI10",
+  "slide": "001749",
+  "roi": "ROI10",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI13",
+  "slide": "001749",
+  "roi": "ROI13",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI14",
+  "slide": "001749",
+  "roi": "ROI14",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI15",
+  "slide": "001749",
+  "roi": "ROI15",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI17",
+  "slide": "001749",
+  "roi": "ROI17",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI18",
+  "slide": "001749",
+  "roi": "ROI18",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI19",
+  "slide": "001749",
+  "roi": "ROI19",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "001749ROI21",
+  "slide": "001749",
+  "roi": "ROI21",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\001749\\KB_BCC_001749_D23_C13R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "005966ROI02",
+  "slide": "005966",
+  "roi": "ROI02",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\005966\\KB_BCC_005966_D23_C12R3_Hem.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "006951ROI04",
+  "slide": "006951",
+  "roi": "ROI04",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "006951ROI06",
+  "slide": "006951",
+  "roi": "ROI06",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "006951ROI08",
+  "slide": "006951",
+  "roi": "ROI08",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "006951ROI10",
+  "slide": "006951",
+  "roi": "ROI10",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "006951ROI11",
+  "slide": "006951",
+  "roi": "ROI11",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "006951ROI14",
+  "slide": "006951",
+  "roi": "ROI14",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "006951ROI15",
+  "slide": "006951",
+  "roi": "ROI15",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "007080ROI02",
+  "slide": "007080",
+  "roi": "ROI02",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "007080ROI04",
+  "slide": "007080",
+  "roi": "ROI04",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "007080ROI06",
+  "slide": "007080",
+  "roi": "ROI06",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "007080ROI07",
+  "slide": "007080",
+  "roi": "ROI07",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "007080ROI09",
+  "slide": "007080",
+  "roi": "ROI09",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008049ROI02",
+  "slide": "008049",
+  "roi": "ROI02",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008049ROI06",
+  "slide": "008049",
+  "roi": "ROI06",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008049ROI07",
+  "slide": "008049",
+  "roi": "ROI07",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008049ROI10",
+  "slide": "008049",
+  "roi": "ROI10",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008122ROI01",
+  "slide": "008122",
+  "roi": "ROI01",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008122ROI04",
+  "slide": "008122",
+  "roi": "ROI04",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008122ROI08",
+  "slide": "008122",
+  "roi": "ROI08",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008122ROI09",
+  "slide": "008122",
+  "roi": "ROI09",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008122ROI10",
+  "slide": "008122",
+  "roi": "ROI10",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008122ROI13",
+  "slide": "008122",
+  "roi": "ROI13",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "008122ROI14",
+  "slide": "008122",
+  "roi": "ROI14",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "009286ROI02",
+  "slide": "009286",
+  "roi": "ROI02",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "009286ROI07",
+  "slide": "009286",
+  "roi": "ROI07",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "009286ROI08",
+  "slide": "009286",
+  "roi": "ROI08",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI01",
+  "slide": "015475",
+  "roi": "ROI01",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI02",
+  "slide": "015475",
+  "roi": "ROI02",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI05",
+  "slide": "015475",
+  "roi": "ROI05",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI10",
+  "slide": "015475",
+  "roi": "ROI10",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI13",
+  "slide": "015475",
+  "roi": "ROI13",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI16",
+  "slide": "015475",
+  "roi": "ROI16",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI17",
+  "slide": "015475",
+  "roi": "ROI17",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI18",
+  "slide": "015475",
+  "roi": "ROI18",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI19",
+  "slide": "015475",
+  "roi": "ROI19",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI22",
+  "slide": "015475",
+  "roi": "ROI22",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI24",
+  "slide": "015475",
+  "roi": "ROI24",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "015475ROI25",
+  "slide": "015475",
+  "roi": "ROI25",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "018268ROI03",
+  "slide": "018268",
+  "roi": "ROI03",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "018268ROI04",
+  "slide": "018268",
+  "roi": "ROI04",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "018268ROI08",
+  "slide": "018268",
+  "roi": "ROI08",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "018268ROI09",
+  "slide": "018268",
+  "roi": "ROI09",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "018268ROI10",
+  "slide": "018268",
+  "roi": "ROI10",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "018268ROI12",
+  "slide": "018268",
+  "roi": "ROI12",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "019234ROI01",
+  "slide": "019234",
+  "roi": "ROI01",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "019234ROI03",
+  "slide": "019234",
+  "roi": "ROI03",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "019234ROI05",
+  "slide": "019234",
+  "roi": "ROI05",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "019234ROI06",
+  "slide": "019234",
+  "roi": "ROI06",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "019234ROI08",
+  "slide": "019234",
+  "roi": "ROI08",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "019234ROI11",
+  "slide": "019234",
+  "roi": "ROI11",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "164354ROI02",
+  "slide": "164354",
+  "roi": "ROI02",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI03",
+  "slide": "164354",
+  "roi": "ROI03",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI05",
+  "slide": "164354",
+  "roi": "ROI05",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI06",
+  "slide": "164354",
+  "roi": "ROI06",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI08",
+  "slide": "164354",
+  "roi": "ROI08",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI11",
+  "slide": "164354",
+  "roi": "ROI11",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI12",
+  "slide": "164354",
+  "roi": "ROI12",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI13",
+  "slide": "164354",
+  "roi": "ROI13",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI14",
+  "slide": "164354",
+  "roi": "ROI14",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI16",
+  "slide": "164354",
+  "roi": "ROI16",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI20",
+  "slide": "164354",
+  "roi": "ROI20",
+  "split": "val",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "164354ROI22",
+  "slide": "164354",
+  "roi": "ROI22",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "MPP from \\\\rdsdcw.ohsu.edu\\Coussens-secure\\Multiplex_IHC_studies\\BCC\\BCC_matched_TMAs_and_resections\\Slides\\Analyzing\\Lung_Liver\\164354\\KB_BCC_004354_D23_C14R3_HEM.svs; assumes registered ROI retains source pixel grid."
+ },
+ {
+  "scene_id": "232215ROI02",
+  "slide": "232215",
+  "roi": "ROI02",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI04",
+  "slide": "248041",
+  "roi": "ROI04",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI05",
+  "slide": "248041",
+  "roi": "ROI05",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI06",
+  "slide": "248041",
+  "roi": "ROI06",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI07",
+  "slide": "248041",
+  "roi": "ROI07",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI09",
+  "slide": "248041",
+  "roi": "ROI09",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI10",
+  "slide": "248041",
+  "roi": "ROI10",
+  "split": "test",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI11",
+  "slide": "248041",
+  "roi": "ROI11",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ },
+ {
+  "scene_id": "248041ROI13",
+  "slide": "248041",
+  "roi": "ROI13",
+  "split": "train",
+  "source_um_per_px": 0.5028,
+  "resolution_note": "Configured source scale assumption; no unambiguous original SVS available; registered TIFF lacks physical-scale tags."
+ }
+]

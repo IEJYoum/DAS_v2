@@ -271,7 +271,10 @@ Omit `label_column` or set it to `"auto"` for the standard ingest shortcut:
    even a preferred/explicit column. `old ...` columns and functional subtype
    columns are excluded. Blanks never become Other cells.
 
-An explicit `label_column` still selects another column deliberately. Label
+An explicit `label_column` still selects another column deliberately. A list,
+e.g. `["class", "Primary Celltype: Matrix"]`, supervises only cells where every
+listed column maps to the same class; conflicting or blank cells are ignored and
+counted as disagreements in the ingest log. Label
 aliases live in `support/label_conventions.py:CELLTYPE_ALIASES`: add a name there
 once, rather than editing dataset-specific adapters. Matching lowercases, trims
 and collapses whitespace, handles DAS numeric prefixes, and uses exact aliases;
@@ -413,8 +416,9 @@ The complete named contract is available through `--action home.classifier`.
 Supported training overrides: epochs (null selects step mode), steps, lr,
 batch_size, device, threads, seed, class_weighting (none/capped_inverse_frequency),
 class_weight_cap, marker_drop (JSON boolean), gain_jitter, replay_fraction,
-log_every and validate_every. Epoch mode validates once per epoch and derives
-update count. Head/model changes are deliberately outside this interface.
+log_every, validate_every and model (`{"base_width": 32, "depth": 4}`, train_test
+only; tune_test inherits the parent architecture). Epoch mode validates once per
+epoch and derives update count. Head changes are outside this interface.
 
 Supported inference/report overrides: prediction_split (train/val/test),
 inference_tile_px, inference_overlap, target_um_per_px (fresh runs only if it
@@ -428,7 +432,8 @@ source fields override preset fields. GUI preset roots use the shared project
 config's inherited defaults. Root/checkpoint preferences save through the central
 writer and controller cache callback after successful input staging.
 
-Each invocation allocates a new output folder. `result.json` contains status,
+Each invocation allocates a new output folder, `<run_name>_<timestamp>` when the
+step sets `run_name`, else `<dataset>_<mode>_<timestamp>`. `result.json` contains status,
 run directory and actual checkpoint/predictions/metrics/verification/config
 paths. Training products are normally under results/; forward products are in
 the parent run. `_ds_manifest.jsonl` publishes the completed result pointer.
@@ -439,8 +444,10 @@ in exported predictions through their namespaced scene IDs.
 The recipe step records result.json as an output and that result points back to
 the executed recipe. Failed/interrupted runs retain failure status and debug
 summary; existing runs and the parent model remain available. Result paths are
-explicit: there is no automatic 'latest checkpoint' lookup or inter-step result
-interpolation. Prediction attachment to an active DAS triplet remains a separate
+explicit, with one exception for chaining steps: `"checkpoint": "run:NAME"` loads
+`results/best.pt` from the newest COMPLETE run named NAME under the step's
+output_root (failed or running runs are skipped; none found is an error). One
+recipe can therefore train and then predict/tune from what it trained. Prediction attachment to an active DAS triplet remains a separate
 future action; this version exports all-cell CSVs for review and later import.
 
 Standalone scripts can also call the same main with sources/training/inference

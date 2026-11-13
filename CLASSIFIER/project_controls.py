@@ -5,7 +5,7 @@ import re
 
 TRAINING_KEYS = {'epochs', 'steps', 'lr', 'batch_size', 'device', 'threads', 'seed',
                  'class_weighting', 'class_weight_cap', 'marker_drop', 'gain_jitter',
-                 'replay_fraction', 'log_every', 'validate_every'}
+                 'replay_fraction', 'log_every', 'validate_every', 'model'}
 INFERENCE_KEYS = {'prediction_split', 'inference_tile_px', 'inference_overlap',
                   'target_um_per_px', 'preview_max_px', 'error_gallery_limit', 'debug_scenes', 'report_classes',
                   'predict_all_after_training', 'export_triplet', 'deployment_reports'}
@@ -38,6 +38,11 @@ def controls(training=None, inference=None):
                     raise ValueError('report_classes needs distinct canonical class names')
                 continue
             if key == 'epochs' and value is None:
+                continue
+            if key == 'model':
+                if not isinstance(value, dict) or not value or set(value) - {'base_width', 'depth'} or any(
+                        isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in value.values()):
+                    raise ValueError('training.model takes positive integers base_width and/or depth')
                 continue
             if key in {'epochs','steps','batch_size','threads','log_every','validate_every',
                        'inference_tile_px','preview_max_px','error_gallery_limit'}:

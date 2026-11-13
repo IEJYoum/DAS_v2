@@ -6,6 +6,7 @@ only that contract. MODE: predict, prepare, train_test (fresh), tune_test (paren
 import argparse
 from copy import deepcopy
 import json
+import re
 from pathlib import Path
 import sys
 import shutil
@@ -90,9 +91,32 @@ def project_default(key, fallback=None):
     return values.get(key, fallback)
 
 
+def completed_run_checkpoint(output_root, name):
+    """best.pt of the newest COMPLETE run named `name` under output_root.
+
+    Lets one recipe chain steps: a later step loads an earlier step's model by
+    run name instead of a timestamped folder. Failed or running runs are skipped.
+    """
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
+        raise ValueError(f'run:{name} needs a plain run name')
+    complete = []
+    for folder in sorted(Path(output_root).glob(f'{name}_*')):
+        stamp = folder.name[len(name)+1:]
+        if not re.fullmatch(r'\d{8}_\d{6}_\d{6}(_\d+)?', stamp) or not (folder/'result.json').is_file():
+            continue
+        result = json.loads((folder/'result.json').read_text(encoding='utf-8'))
+        if result.get('status') == 'complete' and result.get('checkpoint'):
+            complete.append(folder/'results'/'best.pt')
+    if not complete:
+        raise ValueError(f'No complete run named {name} under {output_root}')
+    if not complete[-1].is_file():
+        raise ValueError(f'Run {complete[-1].parent.parent} is complete but has no results/best.pt')
+    return str(complete[-1])
+
+
 def main(mode=None, dataset=None, *, project_root=None, interactive=None, settings=None,
          output_root=None, checkpoint=None, base_dir=None, config_changed=None,
-         input_fn=None, print_fn=None, sources=None, training=None, inference=None):
+         input_fn=None, print_fn=None, sources=None, training=None, inference=None, run_name=None):
     """Same standalone/DAS entry; explicit settings override project path defaults."""
     input_fn, print_fn = input_fn or io.iget, print_fn or io.iprint
     # Only an explicitly supplied project remembers this run's choices; the default
@@ -159,6 +183,11 @@ def main(mode=None, dataset=None, *, project_root=None, interactive=None, settin
     output_root = str(select_project_path(output_root if output_root is not None else values.get('classifier_output_root', OUTPUT_ROOT),
         'classifier output root', base_dir=base_dir, kind='directory', interactive=interactive,
         input_fn=input_fn, print_fn=print_fn))
+    if run_name is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', str(run_name)):
+        raise ValueError('run_name must be a plain name (letters, digits, _ . -)')
+    if mode in {'predict', 'tune_test'} and isinstance(checkpoint, str) and checkpoint.startswith('run:'):
+        checkpoint = completed_run_checkpoint(output_root, checkpoint[4:])
+        emit(f'Checkpoint from completed run {checkpoint}')
     if mode in {'predict', 'tune_test'}:
         checkpoint = str(select_project_path(checkpoint if checkpoint is not None else values.get('classifier_checkpoint', CHECKPOINT),
             'classifier checkpoint', base_dir=base_dir, must_exist=True, kind='file',
@@ -185,8 +214,11 @@ def main(mode=None, dataset=None, *, project_root=None, interactive=None, settin
         cfg = deepcopy(CONFIG)
         cfg.update(TRAIN_SETTINGS)
         cfg.update(training)
+        cfg['model'] = {**CONFIG['model'], **training.get('model', {})}
         cfg['epochs'] = training.get('epochs', EPOCHS)
         if mode == 'tune_test':
+            if 'model' in training:
+                raise ValueError('tune_test inherits the parent architecture; remove training.model')
             parent_model, parent = infer.load_checkpoint(checkpoint, training.get('device', DEVICE))
             del parent_model
             # Architecture and input scaling come from the parent, not defaults.
@@ -223,7 +255,7 @@ def main(mode=None, dataset=None, *, project_root=None, interactive=None, settin
                 base_dir=base_dir, must_exist=True, kind='directory', interactive=interactive,
                 input_fn=input_fn, print_fn=print_fn))
         old['scenes'] = [{**s, 'dataset_role': 'replay'} for s in old['scenes'] if s['split'] == 'train']
-    out = new_run_folder(output_root, prefix=f'{dataset}_{mode}_')
+    out = new_run_folder(output_root, prefix=f'{run_name}_' if run_name else f'{dataset}_{mode}_')
     emit(f'Output: {out}')
     (out / 'launch_context.json').write_text(json.dumps(launch, indent=2), encoding='utf-8')
     write_json(out/'workflow_settings.json', inference)
@@ -382,7 +414,7 @@ def main(mode=None, dataset=None, *, project_root=None, interactive=None, settin
             scenes = streaming.Scenes(records, cfg, selected_split, whole_sources=True)
             reports = inference.get('deployment_reports', prediction_split!='all')
             metrics = streaming.evaluate(model, scenes, cfg, out / 'test', render=reports, galleries=reports, log=emit)
-            shutil.copy2(out / 'test' / 'predictions.csv', out / 'predictions.csv')
+            shutil.copyfile(out / 'test' / 'predictions.csv', out / 'predictions.csv')
             if settings['adapter'] == 'bcc':
                 metrics['proxy_macro_f1'] = sum(metrics['per_class'][c]['f1'] for c in ['IMMUNE', 'EPI']) / 2
                 metrics['interpretation'] = 'Agreement with workflow proxy labels including other cells; not independently verified truth.'

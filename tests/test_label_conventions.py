@@ -60,6 +60,17 @@ class LabelConventionTests(unittest.TestCase):
         self.assertEqual(result.labels.fillna('').tolist(),['IMMUNE','UNCLASSIFIED','UNCLASSIFIED','EPI','UNCLASSIFIED',''])
         self.assertEqual(canonical_celltype('Endothelial',output='primary'),'1: endothelial')
 
+    def test_listed_label_columns_keep_only_agreed_cells(self):
+        table = pd.DataFrame({'class': ['Tumor', 'Immune', 'Tumor', 'CAFs'],
+                              'Primary Celltype: Matrix': ['3: epithelial', '2: immune', '2: immune', '5: stromal'],
+                              'Celltype: Gating': ['Immune'] * 4})  # not listed, so it gets no vote
+        result = resolve_unet_labels(table, label_column=['class', 'Primary Celltype: Matrix'],
+                                     overrides={'CAFs': 'UNCLASSIFIED'})
+        self.assertEqual(result.labels.tolist(), ['EPI', 'IMMUNE', None, 'UNCLASSIFIED'])
+        self.assertEqual((result.summary['policy'], result.summary['disagreements']), ('explicit_columns', 1))
+        with self.assertRaisesRegex(ValueError, 'distinct existing'):
+            resolve_unet_labels(table, label_column=['class', 'missing'])
+
     def test_unknown_values_fail_even_when_another_convention_is_known(self):
         table = pd.DataFrame({'class':['not registered'],'Subtype: Gating':['Mac']})
         with self.assertRaisesRegex(ValueError,'Unmapped cell labels'):

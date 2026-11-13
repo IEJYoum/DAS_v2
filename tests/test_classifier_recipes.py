@@ -104,6 +104,35 @@ class ClassifierRecipeTests(unittest.TestCase):
         self.assertEqual(cfg['epochs'],1)
         self.assertEqual(cfg['initial_checkpoint'],str(self.parent))
 
+    def test_one_recipe_chains_named_runs_and_sizes_fresh_model(self):
+        payload = self.payload('train_test')
+        train = payload['steps'][0]['with']
+        train.update(checkpoint='', run_name='scratch')
+        train['training']['model'] = {'base_width': 4}
+        evaluate = deepcopy(train)
+        evaluate.update(mode='predict', checkpoint='run:scratch', run_name='scratch_eval', training={'threads': 1})
+        payload['steps'].append({'do': 'home.classifier', 'with': evaluate})
+        recipe.check(payload, project=self.root)
+        record = controler.replay_recipe(self.state, payload)
+        self.assertEqual(record.metadata['status'], 'ok')
+        trained = Path(json.loads((record.folder/'steps.jsonl').read_text().splitlines()[0])['outputs'][0])
+        trained = json.loads(trained.read_text())
+        self.assertTrue(Path(trained['run_directory']).name.startswith('scratch_2'))
+        self.assertEqual(json.loads(Path(trained['config']).read_text())['model']['base_width'], 4)
+        predicted = self.result(record)
+        self.assertTrue(Path(predicted['run_directory']).name.startswith('scratch_eval_'))
+        self.assertEqual(Path(predicted['source_checkpoint']), Path(trained['run_directory'])/'results'/'best.pt')
+        # Only complete runs count; a newer failed run of the same name is skipped.
+        failed = self.root/'outputs'/'scratch_29991231_000000_000000'
+        failed.mkdir()
+        (failed/'result.json').write_text(json.dumps({'status': 'failed', 'checkpoint': None}))
+        self.assertEqual(Path(run_project.completed_run_checkpoint(self.root/'outputs', 'scratch')),
+                         Path(trained['run_directory'])/'results'/'best.pt')
+        with self.assertRaises(ValueError):
+            run_project.completed_run_checkpoint(self.root/'outputs', 'missing')
+        with self.assertRaises(ValueError):
+            project_controls.controls({'model': {'base_width': 0}})
+
     def test_unlabelled_images_predict_and_reports_are_unscored(self):
         payload = self.payload()
         source = payload['steps'][0]['with']['sources'][0]
