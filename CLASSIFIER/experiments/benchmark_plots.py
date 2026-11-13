@@ -87,9 +87,13 @@ def dataset_label(dataset, pooled):
 
 def boxes(ax, roi, pooled, metric, tasks, datasets, colors, title):
     width = .8 / len(tasks)
+    present = {d: [t for t in tasks if ((roi.task == t) & (roi.dataset_id == d)).any()] for d in datasets}
     for t, task in enumerate(tasks):
         for d, dataset in enumerate(datasets):
-            x = d + (t - (len(tasks) - 1) / 2) * width
+            if task not in present[dataset]:
+                continue
+            slot, slots = present[dataset].index(task), len(present[dataset])
+            x = d + (slot - (slots - 1) / 2) * width
             values = roi.loc[(roi.task == task) & (roi.dataset_id == dataset), metric].dropna()
             if len(values):
                 ax.boxplot([values], positions=[x], widths=width * .8, patch_artist=True, showfliers=False,
@@ -150,7 +154,10 @@ def main():
     rank = {p: i for i, p in enumerate(PLATFORM_ORDER)}
     datasets = sorted(dict.fromkeys(cells.dataset_id), key=lambda d: (
         rank.get(DATASETS.get(d, (d, 'other'))[1], len(rank)), DATASETS.get(d, (d,))[0].lower()))
-    colors = {t: SERIES[i] for i, t in enumerate(tasks)}  # fixed order: entity -> colour, never rank
+    known = list(TASKS)  # fixed slot per task, so a task keeps its colour across figure sets
+    extra = [t for t in tasks if t not in known]
+    colors = {t: SERIES[(known + extra).index(t)] for t in tasks}
+    tasks = sorted(tasks, key=(known + extra).index)
     roi = pd.DataFrame([{'task': t, 'dataset_id': d, 'scene_id': s, **scores(g)}
                         for (t, d, s), g in cells.groupby(['task', 'dataset_id', 'scene_id'], sort=False)])
     pooled = pd.DataFrame([{'task': t, 'dataset_id': d, 'rois': g.scene_id.nunique(), **scores(g)}
@@ -160,7 +167,7 @@ def main():
 
     fig, ax = plt.subplots(figsize=(max(7, 1.6 + 1.7 * len(datasets)), 5))
     boxes(ax, roi, pooled, 'macro_f1', tasks, datasets, colors, 'Macro-F1 (IMMUNE / EPI / UNCLASSIFIED), test ROIs')
-    legend(fig, tasks, colors); fig.tight_layout(rect=(0, 0, 1, 1 - .5 * legend_rows(tasks) / 5))
+    legend(fig, tasks, colors); fig.tight_layout(rect=(0, 0, 1, 1 - (.05 + .27 * legend_rows(tasks)) / fig.get_figheight()))
     fig.savefig(out / 'fig1_macro_f1.png', dpi=200); plt.close(fig)
 
     metrics = [('macro_f1', 'Macro-F1'), ('macro_precision', 'Macro precision'),
@@ -168,14 +175,14 @@ def main():
     fig, axes = plt.subplots(2, 2, figsize=(max(9, 2 + 3 * len(datasets)), 8.5), sharey=True)
     for ax, (metric, title) in zip(axes.flat, metrics):
         boxes(ax, roi, pooled, metric, tasks, datasets, colors, title)
-    legend(fig, tasks, colors); fig.tight_layout(rect=(0, 0, 1, 1 - .5 * legend_rows(tasks) / 8.5))
+    legend(fig, tasks, colors); fig.tight_layout(rect=(0, 0, 1, 1 - (.05 + .27 * legend_rows(tasks)) / fig.get_figheight()))
     fig.savefig(out / 'fig2_overall_metrics.png', dpi=200); plt.close(fig)
 
     fig, axes = plt.subplots(len(CLASSES), 3, figsize=(max(10, 2 + 3.2 * len(datasets)), 3.4 * len(CLASSES)), sharey=True)
     for r, c in enumerate(CLASSES):
         for k, m in enumerate(('f1', 'precision', 'recall')):
             boxes(axes[r, k], roi, pooled, f'{c}_{m}', tasks, datasets, colors, f'{c} {m}')
-    legend(fig, tasks, colors); fig.tight_layout(rect=(0, 0, 1, 1 - .5 * legend_rows(tasks) / (3.4 * len(CLASSES))))
+    legend(fig, tasks, colors); fig.tight_layout(rect=(0, 0, 1, 1 - (.05 + .27 * legend_rows(tasks)) / fig.get_figheight()))
     fig.savefig(out / 'fig3_per_class.png', dpi=200); plt.close(fig)
 
     lines = ['BENCHMARK SUMMARY (pooled over all labelled test cells per dataset)',
