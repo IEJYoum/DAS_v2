@@ -130,6 +130,7 @@ def write_classification_images(image, mask, prediction, truth, directory, *, sc
     """
     out=Path(directory);out.mkdir(parents=True,exist_ok=True)
     name=prefix+report_token(scene_id)
+    token=report_token(scene_id)  # numbers lead, so a name sort groups each kind together
     tag=report_token(truth_name)
     correct=np.full(mask.shape,-1,np.int16)
     valid=truth>=0
@@ -156,19 +157,19 @@ def write_classification_images(image, mask, prediction, truth, directory, *, sc
             overlay(np.zeros(zoom_mask.shape,np.float32),zoom_mask,up(correct),CORRECTNESS_COLORS)]
     panels+=[up(panel) for _,panel in zoom_panels]
     labels=' | '.join(['TRUTH','PREDICTION','CORRECTNESS']+[label for label,_ in zoom_panels])
-    paths.append(write_titled_png(out/f'{name}__1_zoom__{tag}_y{y}_x{x}.png',np.concatenate(panels,axis=1),
+    paths.append(write_titled_png(out/f'{prefix}1_{token}__zoom__{tag}_y{y}_x{x}.png',np.concatenate(panels,axis=1),
         f'{scene_id} | LEFT TO RIGHT: {labels}',f'{legend} | {CORRECTNESS_LEGEND}',
         f'Crop x={x}, y={y} shown {k}x, picked for many labelled cells and class diversity. Reference: {truth_name}'))
     if native:
         if write_prediction:
-            paths.append(write_titled_png(out/f'{name}__2_composite_native.png',overlay(image,mask,nothing),
+            paths.append(write_titled_png(out/f'{prefix}2_{token}__composite_native.png',overlay(image,mask,nothing),
                 f'STAIN ONLY | {scene_id}','No outlines'))
-        paths.append(write_titled_png(out/f'{name}__3_truth__{tag}_native.png',overlay(dim,mask,truth,colors),
+        paths.append(write_titled_png(out/f'{prefix}3_{token}__truth__{tag}_native.png',overlay(dim,mask,truth,colors),
             f'TRUTH / REFERENCE: {truth_name} | {scene_id}',legend+f' | stain dimmed to {DIM:g}'))
         if write_prediction:
-            paths.append(write_titled_png(out/f'{name}__4_prediction_native.png',overlay(dim,mask,prediction,colors),
+            paths.append(write_titled_png(out/f'{prefix}4_{token}__prediction_native.png',overlay(dim,mask,prediction,colors),
                 f'PREDICTION: {prediction_name} | {scene_id}',legend+f' | stain dimmed to {DIM:g}'))
-        paths.append(write_titled_png(out/f'{name}__5_correctness__{tag}_native.png',overlay(black,mask,correct,CORRECTNESS_COLORS),
+        paths.append(write_titled_png(out/f'{prefix}5_{token}__correctness__{tag}_native.png',overlay(black,mask,correct,CORRECTNESS_COLORS),
             f'CORRECTNESS: {prediction_name} vs {truth_name} | {scene_id}',CORRECTNESS_LEGEND))
     return paths
 

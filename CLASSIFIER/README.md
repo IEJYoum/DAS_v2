@@ -273,7 +273,7 @@ automatic 1/3 train, 1/6 test, 1/2 reserve selection exists yet. See
 | `predictions.csv`, `test_metrics.json` | Test calls, supplied truth, probability columns, per-class support and confusion matrix. |
 | `debug/*__scaling.png`, `debug/*__channels.png` | Raw/scaled stains and preparation previews. Channels are stain only: scaled markers, then the superstains the model receives. |
 | `debug/train_batch.png`, `debug/train_batch.json`, `debug/train_channels.png` | Actual first augmented batch, its loss weights and the cell calls made before the first optimizer update; train_channels is that sample's stain only. |
-| `validation/` | Flat per-step PNG/CSV/metrics collection. Numbered whole-ROI images `__1_zoom` (picked crop) and `__2..5` (composite, truth, prediction, correctness); tiles keep the compact `__predictions.png`. |
+| `validation/` | Flat per-step PNG/CSV/metrics collection. Numbered whole-ROI images `1_*__zoom` (picked crop) and `2_*`..`5_*` (composite, truth, prediction, correctness); tiles keep the compact `__predictions.png`. |
 | `debug/training/`, `debug/loss_vs_time.png` | Training-tile previews and loss against elapsed wall time. |
 | `test/predictions.csv`, `test/errors0.png`, `test/errors1.png`, ... | All calls with nullable `correct`; all labelled errors across numbered pages, sorted by certainty. |
 

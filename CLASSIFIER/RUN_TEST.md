@@ -154,11 +154,11 @@ directly under `D:\CLASSIFIER_OUTPUT`. It contains:
 - `debug/training/`: small training-tile examples; these are explicitly previews
   of training inputs rather than whole-ROI evaluation images.
 
-For zooming, use the numbered `*__2_composite_native.png`,
-`*__3_truth__*_native.png`, `*__4_prediction_native.png` and
-`*__5_correctness__*_native.png`. They preserve the ROI's image pixels, with an
+For zooming, use the numbered `2_*__composite_native.png`,
+`3_*__truth__*_native.png`, `4_*__prediction_native.png` and
+`5_*__correctness__*_native.png`. They preserve the ROI's image pixels, with an
 84-pixel title bar above the image. Compact `*__channels.png` files show
-stain-only overview panels. `*__1_zoom__*_y*_x*.png` shows a 512-pixel native
+stain-only overview panels. `1_*__zoom__*_y*_x*.png` shows a 512-pixel native
 crop, picked for many labelled cells and class diversity, with its ROI coordinates. Its cell calls are sliced from the whole-ROI
 results, not recomputed on cut-off cell fragments.
 

@@ -40,9 +40,9 @@ class MarkerDecisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             paths=write_classification_images(np.zeros((20,30,3)),mask,pred,truth,temp,
                 scene_id='ROI',truth_name='Matrix',prediction_name='test model')
-            self.assertTrue((Path(temp)/'ROI__4_prediction_native.png').is_file())
-            self.assertTrue((Path(temp)/'ROI__3_truth__Matrix_native.png').is_file())
-            p=Path(temp)/'ROI__5_correctness__Matrix_native.png'
+            self.assertTrue((Path(temp)/'4_ROI__prediction_native.png').is_file())
+            self.assertTrue((Path(temp)/'3_ROI__truth__Matrix_native.png').is_file())
+            p=Path(temp)/'5_ROI__correctness__Matrix_native.png'
             with Image.open(p) as im:
                 self.assertEqual(im.size,(30,104))
                 self.assertEqual(im.getpixel((2,86)),(150,150,150))

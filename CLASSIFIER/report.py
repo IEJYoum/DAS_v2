@@ -68,7 +68,7 @@ def cell_map(probabilities, mask, class_names):
 def write_channels(planes, x, path, title="", max_panel_px=None, lineages=("NUC", "IMMUNE", "EPI")):
     """Stain only, no labels: scaled input markers, then the model's superstains and composite.
 
-    Truth and calls live in the numbered *__1..5 ROI PNGs (tiles: *__predictions.png), so no
+    Truth and calls live in the numbered 1_*..5_* ROI PNGs (tiles: *__predictions.png), so no
     outline or class colour ever hides the stain here.
     """
     rows = [(f"{name} (scaled marker)", display_stain(plane)) for name, plane in planes.items()]
