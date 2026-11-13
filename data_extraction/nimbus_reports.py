@@ -245,7 +245,7 @@ def write_reports(table, resolved, worker, folder, prepared):
     colors = np.array([COLORS[canonical[c]] if c in canonical else
                       np.array(plt.get_cmap('tab20')(i % 20)[:3])*255 for i, c in enumerate(classes)], dtype=np.uint8)
     palette = {c: i for i, c in enumerate(classes)}
-    color_names = {'IMMUNE':'green','EPI':'yellow','UNCLASSIFIED':'cyan','ARTIFACT':'white'}
+    color_names = {'IMMUNE':'dark green','EPI':'orange','UNCLASSIFIED':'pale blue','ARTIFACT':'white'}
     legend = ' | '.join(f'{m} -> {options["marker_classes"].get(m, m)} '
                        f'({color_names.get(options["marker_classes"].get(m,m), "palette color")})' for m in markers)
     for scene in resolved['scenes']:
@@ -271,7 +271,7 @@ def write_reports(table, resolved, worker, folder, prepared):
                 max(1, round(h*min(1, options['preview_max_px']/max(h,w)))))
         method='Nimbus thresholds (Other enabled)' if options['decision'] else 'Nimbus forced immune/epi'
         if options['decision']:
-            legend += ' | Other cyan | '+', '.join(f'{m} >= {v:.3f}' for m,v in decision['thresholds'].items())
+            legend += ' | Other pale blue | '+', '.join(f'{m} >= {v:.3f}' for m,v in decision['thresholds'].items())
         if not summary['truth_columns']:
             write_titled_png(out/f'{name}__prediction_preview.png',preview_overlay(composite,mask,winner,size,colors),
                 f'PREDICTION: {method} | {sid}',legend,'Preview: boundaries drawn after raster resizing.')

@@ -277,8 +277,9 @@ automatic 1/3 train, 1/6 test, 1/2 reserve selection exists yet. See
 | `debug/training/`, `debug/loss_vs_time.png` | Training-tile previews and loss against elapsed wall time. |
 | `test/predictions.csv`, `test/errors0.png`, `test/errors1.png`, ... | All calls with nullable `correct`; all labelled errors across numbered pages, sorted by certainty. |
 
-Current outline colors: IMMUNE green, EPI yellow, UNCLASSIFIED cyan, ARTIFACT
-white; none shares a hue with the RGB stain (immune red, epithelial blue, nucleus white).
+Current outline colors: IMMUNE dark green, EPI orange, UNCLASSIFIED pale blue, ARTIFACT
+white; chosen to stay distinct under every colour-vision deficiency. Outlines sit on
+the immune/epithelial stain without the nuclear channel.
 Palette edits affect newly rendered images, not existing PNGs.
 
 Useful failure messages identify the scene/stain: unknown label, missing mask

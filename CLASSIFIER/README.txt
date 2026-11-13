@@ -47,7 +47,7 @@ markers on the top row; the NUC / IMMUNE / EPI superstains the model
 actually receives, plus an RGB composite, on the bottom row. RGB uses
 epithelial blue, immune red, nuclear white. Truth and calls are in
 the numbered *__1_zoom and *__2..5 native ROI PNGs. Outline colors: immune
-green, epithelial yellow, unclassified cyan, artifact white. train_channels.png
+dark green, epithelial orange, unclassified pale blue, artifact white. train_channels.png
 shows the first augmented sample's superstains; train_batch.png shows its
 truth, loss weights and the cell calls made before the first update.
 loss_vs_time.png plots loss against elapsed training wall time, including

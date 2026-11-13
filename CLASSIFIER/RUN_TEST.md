@@ -55,7 +55,7 @@ The reusable input cache is separate from these output folders.
 - Whole-ROI coverage now replaces the eight-tile mechanics sample. Training
   traverses a shuffled pool of overlapping tiles; validation/test stitch
   probabilities over every native pixel before calling original mask cells.
-- [report.py](report.py): IMMUNE green, EPI yellow, UNCLASSIFIED cyan,
+- [report.py](report.py): IMMUNE dark green, EPI orange, UNCLASSIFIED pale blue,
   ARTIFACT white. First-batch weight previews show the combined class/area weights.
 
 The small U-Net architecture is unchanged. Core data/model functions do not
