@@ -62,6 +62,22 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(exported.source_class.iloc[0], 'EPI')
             del maps, eager
 
+    def test_render_cap_skips_images_but_scores_every_roi(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, cfg = self.fixture(root)
+            records = streaming.cache_manifest(manifest, cfg, root / 'cache', log=lambda _: None)
+            model = build_model(cfg['model'])
+            full = streaming.evaluate(model, streaming.Scenes(records, cfg, 'test'), cfg, root / 'full',
+                                      render=True, galleries=True, log=lambda _: None)
+            capped = streaming.evaluate(model, streaming.Scenes(records, {**cfg, 'render_per_dataset': 0}, 'test'),
+                                        {**cfg, 'render_per_dataset': 0}, root / 'capped',
+                                        render=True, galleries=True, log=lambda _: None)
+            self.assertEqual(capped, full)
+            self.assertTrue(list((root / 'full').rglob('*.png')))
+            self.assertFalse(list((root / 'capped').rglob('*.png')))
+            self.assertTrue((root / 'capped' / 'predictions.csv').is_file())
+
     def test_streamed_training_writes_scaling_and_per_step_validation_images(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

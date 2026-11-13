@@ -248,7 +248,7 @@
         "training": {
           "epochs": null,
           "steps": 1500,
-          "validate_every": 250,
+          "validate_every": 500,
           "batch_size": 16,
           "device": "cuda",
           "threads": 8,
@@ -258,6 +258,7 @@
           "prediction_split": "test",
           "inference_tile_px": 256,
           "inference_overlap": 64,
+          "render_per_dataset": 3,
           "report_classes": [
             "IMMUNE",
             "EPI",

@@ -1167,13 +1167,165 @@
                 "split": "train"
               }
             ]
+          },
+          {
+            "id": "al_pdac",
+            "preset": "ah08",
+            "image_root": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/UCSD_AndyLowey_Lustgarten/OHSU_mIHC_UCSD_Lowey/Slides",
+            "mask_root": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/UCSD_AndyLowey_Lustgarten/OHSU_mIHC_UCSD_Lowey/Slides",
+            "csv_root": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_DATA/inhouse/al_pdac_mihc",
+            "csv_pattern": "labels.csv",
+            "marker_patterns": {
+              "H2B": "{slide}/Processed/{roi}/V*_H2B_{roi}.tif*",
+              "CD45": "{slide}/Processed/{roi}/V*_CD45_{roi}.tif*",
+              "CD3": "{slide}/Processed/{roi}/V*_CD3_{roi}.tif*",
+              "PANCK": "{slide}/Processed/{roi}/V*_PANCK_{roi}.tif*"
+            },
+            "mask_pattern": "{slide}/Processed/{roi}/label*.tif*",
+            "marker_groups": {
+              "NUC": [
+                "H2B"
+              ],
+              "IMMUNE": [
+                "CD45",
+                "CD3"
+              ],
+              "EPI": [
+                "PANCK"
+              ]
+            },
+            "label_column": "parent_class",
+            "label_mapping": {
+              "Tumor": "EPI",
+              "CAFs": "UNCLASSIFIED",
+              "T cells": "IMMUNE",
+              "Immune": "IMMUNE",
+              "Neutrophils": "IMMUNE",
+              "DC": "IMMUNE",
+              "B cells": "IMMUNE",
+              "Tregs": "IMMUNE",
+              "MonoMacs": "IMMUNE",
+              "NK cells": "IMMUNE"
+            },
+            "source_um_per_px": 0.5,
+            "resolution_note": "Assumed 0.5 um/px (same lab pipeline as AG); not verified from source metadata.",
+            "scenes": [
+              {
+                "scene_id": "CTRLROI01",
+                "slide": "CTRL",
+                "roi": "ROI01",
+                "split": "test"
+              },
+              {
+                "scene_id": "CTRLROI02",
+                "slide": "CTRL",
+                "roi": "ROI02",
+                "split": "test"
+              },
+              {
+                "scene_id": "FCPDAC002ROI01",
+                "slide": "FCPDAC002",
+                "roi": "ROI01",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC002ROI02",
+                "slide": "FCPDAC002",
+                "roi": "ROI02",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC003ROI01",
+                "slide": "FCPDAC003",
+                "roi": "ROI01",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC003ROI02",
+                "slide": "FCPDAC003",
+                "roi": "ROI02",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC004ROI01",
+                "slide": "FCPDAC004",
+                "roi": "ROI01",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC004ROI02",
+                "slide": "FCPDAC004",
+                "roi": "ROI02",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC005ROI01",
+                "slide": "FCPDAC005",
+                "roi": "ROI01",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC005ROI02",
+                "slide": "FCPDAC005",
+                "roi": "ROI02",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC011ROI01",
+                "slide": "FCPDAC011",
+                "roi": "ROI01",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC011ROI02",
+                "slide": "FCPDAC011",
+                "roi": "ROI02",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC012ROI01",
+                "slide": "FCPDAC012",
+                "roi": "ROI01",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC012ROI02",
+                "slide": "FCPDAC012",
+                "roi": "ROI02",
+                "split": "train"
+              },
+              {
+                "scene_id": "FCPDAC013ROI01",
+                "slide": "FCPDAC013",
+                "roi": "ROI01",
+                "split": "val"
+              },
+              {
+                "scene_id": "FCPDAC013ROI02",
+                "slide": "FCPDAC013",
+                "roi": "ROI02",
+                "split": "val"
+              },
+              {
+                "scene_id": "TNPDAC003ROI01",
+                "slide": "TNPDAC003",
+                "roi": "ROI01",
+                "split": "test"
+              },
+              {
+                "scene_id": "TNPDAC003ROI02",
+                "slide": "TNPDAC003",
+                "roi": "ROI02",
+                "split": "test"
+              }
+            ]
           }
         ],
         "checkpoint": "",
         "output_root": "//rdsdcw.ohsu.edu/Coussens-secure/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_PROJECT/runs",
         "training": {
           "epochs": null,
-          "steps": 6000,
+          "steps": 1500,
           "validate_every": 500,
           "batch_size": 16,
           "device": "cuda",
@@ -1189,6 +1341,7 @@
           "prediction_split": "test",
           "inference_tile_px": 256,
           "inference_overlap": 64,
+          "render_per_dataset": 3,
           "report_classes": [
             "IMMUNE",
             "EPI",

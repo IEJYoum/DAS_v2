@@ -30,12 +30,13 @@ CODEX = OUTPUT_ROOT + '/panm_codex_colon_train_test_20261027_184243_299075/resul
 REPO = Path(__file__).resolve().parents[2]
 SEED = 7
 
-TUNE = {'epochs': None, 'steps': 1500, 'validate_every': 250, 'batch_size': 16,
+# Budget: the pilot ran 23.7 s/step (I/O bound), so 1500 steps ~ 10 h. Validation is
+# ~30 s/ROI unrendered; rendered ROIs cost ~7 min each, hence render_per_dataset.
+TUNE = {'epochs': None, 'steps': 1500, 'validate_every': 500, 'batch_size': 16,
         'device': 'cuda', 'threads': 8, 'seed': SEED}
-SCRATCH = {**TUNE, 'steps': 6000, 'validate_every': 500, 'lr': 1e-3,
-           'model': {'base_width': 32, 'depth': 4}}
+SCRATCH = {**TUNE, 'lr': 1e-3, 'model': {'base_width': 32, 'depth': 4}}
 INFERENCE = {'prediction_split': 'test', 'inference_tile_px': 256, 'inference_overlap': 64,
-             'report_classes': ['IMMUNE', 'EPI', 'UNCLASSIFIED']}
+             'render_per_dataset': 3, 'report_classes': ['IMMUNE', 'EPI', 'UNCLASSIFIED']}
 
 
 def slide_splits(rois_per_slide, min_test, min_val):
@@ -131,6 +132,30 @@ def be_tma_source():
     }
 
 
+def al_source():
+    slides = SHARE + '/UCSD_AndyLowey_Lustgarten/OHSU_mIHC_UCSD_Lowey/Slides'
+    labels = SHARE + '/Isaac_Youm/CLASSIFIER_DATA/inhouse/al_pdac_mihc'  # CLASSIFIER/store_converters/al_pdac_mihc.py
+    scenes = pd.read_csv(labels.replace('//rdsdcw.ohsu.edu/Coussens-secure', r'\\rdsdcw.ohsu.edu\Coussens-secure')
+                         + '/labels.csv', usecols=['slide', 'slide_scene']).drop_duplicates()
+    split = slide_splits(scenes.groupby('slide').size().to_dict(), 4, 2)
+    markers = ['H2B', 'CD45', 'CD3', 'PANCK']
+    return {
+        'id': 'al_pdac', 'preset': 'ah08',
+        'image_root': slides, 'mask_root': slides, 'csv_root': labels, 'csv_pattern': 'labels.csv',
+        'marker_patterns': {m: '{slide}/Processed/{roi}/V*_' + m + '_{roi}.tif*' for m in markers},
+        'mask_pattern': '{slide}/Processed/{roi}/label*.tif*',
+        'marker_groups': {'NUC': ['H2B'], 'IMMUNE': ['CD45', 'CD3'], 'EPI': ['PANCK']},
+        'label_column': 'parent_class',
+        'label_mapping': {'Tumor': 'EPI', 'CAFs': 'UNCLASSIFIED',
+                          **{v: 'IMMUNE' for v in ['T cells', 'Immune', 'Neutrophils', 'DC', 'B cells', 'Tregs',
+                                                   'MonoMacs', 'NK cells']}},
+        'source_um_per_px': 0.5,
+        'resolution_note': 'Assumed 0.5 um/px (same lab pipeline as AG); not verified from source metadata.',
+        'scenes': [{'scene_id': r.slide_scene, 'slide': r.slide, 'roi': r.slide_scene[len(r.slide):],
+                    'split': split[r.slide]} for r in scenes.sort_values('slide_scene').itertuples()],
+    }
+
+
 def step(name, mode, sources, checkpoint, training):
     return {'do': 'home.classifier', 'with': {
         'mode': mode, 'run_name': name, 'sources': deepcopy(sources), 'checkpoint': checkpoint,
@@ -146,14 +171,14 @@ def recipes(sources):
             f'Tune the CODEX pilot model on {source["id"]} only; test on its test split.',
             [step(f'E1_tune_{source["id"]}', 'tune_test', [source], CODEX, TUNE)])
     out['inhouse_E2_tune_all'] = ('Tune the CODEX pilot model on all in-house datasets; test on each.',
-                                  [step('E2_tune_all', 'tune_test', sources, CODEX, {**TUNE, 'steps': 3000})])
+                                  [step('E2_tune_all', 'tune_test', sources, CODEX, TUNE)])
     out['inhouse_E3_scratch_all'] = ('Train a larger model (width 32, depth 4) from scratch on all in-house data.',
                                      [step('E3_scratch_all', 'train_test', sources, '', SCRATCH)])
     return out
 
 
 def main():
-    sources = [ag_source(), bcc_source(), be_tma_source()]
+    sources = [ag_source(), bcc_source(), be_tma_source(), al_source()]
     for s in sources:
         if s.get('scenes'):
             counts = pd.Series([x['split'] for x in s['scenes']]).value_counts().to_dict()

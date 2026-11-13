@@ -199,10 +199,14 @@ def evaluate(model, scenes, cfg, directory=None, prefix='', render=False, galler
         directory.mkdir(parents=True, exist_ok=True)
     confusion = np.zeros((len(cfg['class_names']), len(cfg['class_names'])), np.int64)
     predicted = 0
+    limit, rendered = cfg.get('render_per_dataset'), {}
     for index in range(len(scenes)):
         scene = scenes[index]
         sid = scene['metadata']['scene_id']
-        log(f'Evaluate ROI {index+1}/{len(scenes)}: {sid}')
+        dataset = sid.split('__')[0]
+        draw = limit is None or rendered.get(dataset, 0) < limit  # every ROI is still scored and exported
+        rendered[dataset] = rendered.get(dataset, 0) + draw
+        log(f'Evaluate ROI {index+1}/{len(scenes)}: {sid}' + ('' if draw else ' (scored; images skipped by render_per_dataset)'))
         rows, maps = infer.evaluate_scenes(model, [scene], cfg)
         record = scenes.records[scenes.items[index][0]] if hasattr(scenes, 'records') else None
         audit_path = Path(record['source_json']).parent / 'label_audit.csv' if record else None
@@ -217,10 +221,10 @@ def evaluate(model, scenes, cfg, directory=None, prefix='', render=False, galler
             rows.to_csv(directory / f'{prefix}predictions.csv', mode='w' if index == 0 else 'a',
                         header=index == 0, index=False, encoding='utf-8-sig' if index == 0 else 'utf-8')
             rows.to_csv(directory / f'{prefix}{sid}__predictions.csv', index=False, encoding='utf-8-sig')
-            if render:
+            if render and draw:
                 report.write_debug(scene, scene, maps[sid], directory, cfg['class_names'], prefix=prefix,
                                    title=f'{prefix} | {sid}', max_panel_px=cfg['preview_max_px'])
-            if galleries:
+            if galleries and draw:
                 report.write_prediction_report([scene], rows, directory, cfg['class_names'],
                     page_size=cfg['error_gallery_limit'], prefix=f'{prefix}{sid}__', title=f'{prefix} | {sid}')
         close_scene(scene)
