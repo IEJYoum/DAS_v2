@@ -1,0 +1,6 @@
+{
+  "env": "das-nimbus",
+  "task_family": "marker_positivity",
+  "description": "Nimbus (Rumberger et al., Nature Methods 2025) via unmodified Nimbus-Inference MultiplexDataset + Nimbus.predict_fovs; one normalisation set per bundle group.",
+  "upstream": "Nimbus-Inference (angelolab/Nimbus-Inference, MIT)"
+}
