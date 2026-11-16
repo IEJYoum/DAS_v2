@@ -586,6 +586,137 @@ def run_raw_detector_import(
     return df, obs, dfxy, meta
 
 
+def call_reference_positives(
+    ref_df: pd.DataFrame,
+    strategy: str,
+    *,
+    tuning_params: dict | None = None,
+) -> dict:
+    """Call positive/negative reference cells for one single-stain file.
+
+    Returns a dict with: score_labels, score_values, score_weights,
+    cluster_labels, gmm_labels, strict_thresholds, pos_key, neg_key, pos_weight,
+    neg_weight.
+
+    The weighted-score and clustering votes are computed for EVERY strategy,
+    because the audit row records both regardless of which one the strategy
+    actually gates on -- that is what makes an "ambiguous" consensus call
+    diagnosable. gmm_labels is only computed for gmm_reference. pos_weight and
+    neg_weight are None except under soft_weighted_reference.
+
+    Extracted from run_reference_component_unmixing() so the autotune sweep in
+    data_extraction/spectral_flow_ifa.py can honour the selected strategy
+    instead of hardcoding consensus_score_and_cluster.
+    """
+    tuning_params = resolve_tuning_parameters(tuning_params)
+    strategy = str(strategy or "consensus_score_and_cluster").strip().lower()
+
+    score_labels, score_values, score_weights = weighted_score_labels(ref_df, tuning_params=tuning_params)
+    cluster_labels = cluster_positive_labels(ref_df, tuning_params=tuning_params)
+    gmm_labels = gmm_positive_labels(ref_df, tuning_params=tuning_params) if strategy == "gmm_reference" else None
+    strict_thresholds = None
+    pos_weight = None
+    neg_weight = None
+
+    if strategy == "strict_weighted_reference":
+        pos_key, neg_key, strict_thresholds = strict_weighted_score_keys(score_values, tuning_params=tuning_params)
+    elif strategy == "soft_weighted_reference":
+        pos_weight = soft_reference_weights(score_values, tuning_params=tuning_params)
+        neg_weight = 1.0 - pos_weight
+        pos_key = pos_weight >= _param_float(tuning_params, "soft_positive_weight_cutoff")
+        neg_key = pos_weight <= _param_float(tuning_params, "soft_negative_weight_cutoff")
+    elif strategy == "weighted_score":
+        pos_key = score_labels == 1
+        neg_key = score_labels == 0
+    elif strategy == "clustering":
+        pos_key = cluster_labels == 1
+        neg_key = cluster_labels == 0
+    elif strategy == "gmm_reference":
+        pos_key = gmm_labels == 1
+        neg_key = gmm_labels == 0
+    else:
+        pos_key = (score_labels == 1) & (cluster_labels == 1)
+        neg_key = (score_labels == 0) & (cluster_labels == 0)
+
+    return {
+        "score_labels": score_labels,
+        "score_values": score_values,
+        "score_weights": score_weights,
+        "cluster_labels": cluster_labels,
+        "gmm_labels": gmm_labels,
+        "strict_thresholds": strict_thresholds,
+        "pos_key": pos_key,
+        "neg_key": neg_key,
+        "pos_weight": pos_weight,
+        "neg_weight": neg_weight,
+    }
+
+
+def build_reference_matrix(
+    components: dict[str, list[pd.Series]],
+    background_frames: list[pd.DataFrame] | None,
+    detector_columns: Sequence[str],
+    *,
+    tuning_params: dict | None = None,
+    progress_fn=None,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Assemble the detector-by-marker spectral matrix from reference components.
+
+    Steps, all driven by tuning_params: average each marker's components, apply
+    either shared-negative subtraction or a pooled background column
+    (background_quantile), remove the per-detector shared floor (floor_quantile),
+    reindex onto detector_columns, then cleanup_similar_components().
+
+    Returns (matrix_used, matrix_column_names). matrix_column_names preserves the
+    pre-cleanup column order and includes BACKGROUND_COMPONENT_NAME when a
+    background column was added; that is what the audit settings record as
+    reference_markers.
+
+    Extracted verbatim from run_reference_component_unmixing() so the autotune
+    sweep in data_extraction/spectral_flow_ifa.py can score the matrix the
+    production path would actually build, instead of maintaining a local
+    reimplementation that drifts.
+    """
+    tuning_params = resolve_tuning_parameters(tuning_params)
+    frames = list(background_frames or [])
+
+    matrix_cols = {
+        marker: pd.concat(series_list, axis=1).mean(axis=1)
+        for marker, series_list in components.items()
+    }
+    bg_quantile = _clip_float(_param_float(tuning_params, "background_quantile"), 0.0, 1.0)
+    if _param_bool(tuning_params, "shared_negative_subtraction_enabled") and len(frames) > 0:
+        bg_all = pd.concat(frames, axis=0)
+        shared_neg = bg_all.quantile(bg_quantile, axis=0).clip(lower=0)
+        strength = max(_param_float(tuning_params, "reference_negative_subtraction_strength"), 1.0)
+        for marker in matrix_cols:
+            matrix_cols[marker] = (matrix_cols[marker] - strength * shared_neg).clip(lower=0)
+    elif _param_bool(tuning_params, "background_component_enabled") and len(frames) > 0:
+        bg_all = pd.concat(frames, axis=0)
+        matrix_cols[BACKGROUND_COMPONENT_NAME] = bg_all.quantile(bg_quantile, axis=0).clip(lower=0)
+
+    # --- Shared floor removal ---
+    # For each detector, compute a quantile across all marker profiles and subtract
+    # it.  This removes the shared spectral component that makes profiles look
+    # similar and causes NNLS cross-talk.  floor_quantile=0 uses the per-detector
+    # minimum (most conservative); higher values (e.g. 0.10-0.25) are more
+    # aggressive and effective when many markers are present.
+    floor_q = _clip_float(_param_float(tuning_params, "floor_quantile"), 0.0, 1.0)
+    marker_only_cols = {k: v for k, v in matrix_cols.items() if k != BACKGROUND_COMPONENT_NAME}
+    if len(marker_only_cols) >= 2:
+        profile_matrix = pd.DataFrame(marker_only_cols)
+        floor = profile_matrix.quantile(floor_q, axis=1).clip(lower=0)
+        for marker in marker_only_cols:
+            matrix_cols[marker] = (matrix_cols[marker] - floor).clip(lower=0)
+        _notify_progress(progress_fn, f"Spectral import | removed shared floor (quantile={floor_q:.2f})")
+
+    matrix_used = pd.DataFrame(matrix_cols).reindex(list(detector_columns)).fillna(0)
+    matrix_used = cleanup_similar_components(matrix_used, tuning_params=tuning_params)
+    if not np.isfinite(matrix_used.values).all():
+        raise ValueError("Generated reference matrix contains non-numeric, NaN, or infinite values.")
+    return matrix_used, list(matrix_cols.keys())
+
+
 def run_reference_component_unmixing(
     *,
     input_paths: Sequence[str | Path],
@@ -655,29 +786,17 @@ def run_reference_component_unmixing(
         if len(idx) == 0:
             continue
         ref_df = work_df.loc[idx, :]
-        score_labels, score_values, weights = weighted_score_labels(ref_df, tuning_params=tuning_params)
-        cluster_labels = cluster_positive_labels(ref_df, tuning_params=tuning_params)
-        gmm_labels = gmm_positive_labels(ref_df, tuning_params=tuning_params) if strategy == "gmm_reference" else None
-        strict_thresholds = None
-        if strategy == "strict_weighted_reference":
-            pos_key, neg_key, strict_thresholds = strict_weighted_score_keys(score_values, tuning_params=tuning_params)
-        elif strategy == "soft_weighted_reference":
-            pos_weight = soft_reference_weights(score_values, tuning_params=tuning_params)
-            neg_weight = 1.0 - pos_weight
-            pos_key = pos_weight >= _param_float(tuning_params, "soft_positive_weight_cutoff")
-            neg_key = pos_weight <= _param_float(tuning_params, "soft_negative_weight_cutoff")
-        elif strategy == "weighted_score":
-            pos_key = score_labels == 1
-            neg_key = score_labels == 0
-        elif strategy == "clustering":
-            pos_key = cluster_labels == 1
-            neg_key = cluster_labels == 0
-        elif strategy == "gmm_reference":
-            pos_key = gmm_labels == 1
-            neg_key = gmm_labels == 0
-        else:
-            pos_key = (score_labels == 1) & (cluster_labels == 1)
-            neg_key = (score_labels == 0) & (cluster_labels == 0)
+        calls = call_reference_positives(ref_df, strategy, tuning_params=tuning_params)
+        score_labels = calls["score_labels"]
+        score_values = calls["score_values"]
+        weights = calls["score_weights"]
+        cluster_labels = calls["cluster_labels"]
+        gmm_labels = calls["gmm_labels"]
+        strict_thresholds = calls["strict_thresholds"]
+        pos_key = calls["pos_key"]
+        neg_key = calls["neg_key"]
+        pos_weight = calls["pos_weight"]
+        neg_weight = calls["neg_weight"]
 
         # Retain the per-cell calls. They were previously discarded as soon as
         # the component was built, leaving only aggregate counts in the audit
@@ -747,49 +866,18 @@ def run_reference_component_unmixing(
             "or check that the reference filenames contain the intended marker names."
         )
 
-    matrix_cols = {
-        marker: pd.concat(series_list, axis=1).mean(axis=1)
-        for marker, series_list in components.items()
-    }
-    bg_quantile = _clip_float(_param_float(tuning_params, "background_quantile"), 0.0, 1.0)
-    if _param_bool(tuning_params, "shared_negative_subtraction_enabled") and len(background_frames) > 0:
-        bg_all = pd.concat(background_frames, axis=0)
-        shared_neg = bg_all.quantile(bg_quantile, axis=0).clip(lower=0)
-        strength = max(_param_float(tuning_params, "reference_negative_subtraction_strength"), 1.0)
-        for marker in matrix_cols:
-            matrix_cols[marker] = (matrix_cols[marker] - strength * shared_neg).clip(lower=0)
-    elif _param_bool(tuning_params, "background_component_enabled") and len(background_frames) > 0:
-        bg_all = pd.concat(background_frames, axis=0)
-        matrix_cols[BACKGROUND_COMPONENT_NAME] = bg_all.quantile(bg_quantile, axis=0).clip(lower=0)
-
-    # --- Shared floor removal ---
-    # For each detector, compute a quantile across all marker profiles and subtract
-    # it.  This removes the shared spectral component that makes profiles look
-    # similar and causes NNLS cross-talk.  floor_quantile=0 uses the per-detector
-    # minimum (most conservative); higher values (e.g. 0.10-0.25) are more
-    # aggressive and effective when many markers are present.
-    floor_q = _clip_float(_param_float(tuning_params, "floor_quantile"), 0.0, 1.0)
-    marker_only_cols = {k: v for k, v in matrix_cols.items() if k != BACKGROUND_COMPONENT_NAME}
-    if len(marker_only_cols) >= 2:
-        profile_matrix = pd.DataFrame(marker_only_cols)
-        floor = profile_matrix.quantile(floor_q, axis=1).clip(lower=0)
-        for marker in marker_only_cols:
-            matrix_cols[marker] = (matrix_cols[marker] - floor).clip(lower=0)
-        _notify_progress(progress_fn, f"Spectral import | removed shared floor (quantile={floor_q:.2f})")
-
-    matrix_used = pd.DataFrame(matrix_cols).reindex(raw_df.columns).fillna(0)
-    matrix_used = cleanup_similar_components(matrix_used, tuning_params=tuning_params)
-    if not np.isfinite(matrix_used.values).all():
-        raise ValueError("Generated reference matrix contains non-numeric, NaN, or infinite values.")
+    matrix_used, matrix_col_names = build_reference_matrix(
+        components,
+        background_frames,
+        list(raw_df.columns),
+        tuning_params=tuning_params,
+        progress_fn=progress_fn,
+    )
 
     _notify_progress(progress_fn, "Spectral import | solving marker coefficients")
-    _solver_mode = SOLVER_MODES.get(int(_param_float(tuning_params, "solver_mode")), "nnls")
-    if _solver_mode == "orthogonalize":
-        coefs, residuals = nnls_solve_orthogonalized(
-            work_df, matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
-        )
-    else:
-        coefs, residuals = nnls_solve(work_df, matrix_used, tuning_params=tuning_params, progress_fn=progress_fn)
+    coefs, residuals = solve_marker_coefficients(
+        work_df, matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
+    )
     coef_df = pd.DataFrame(coefs, index=work_df.index, columns=matrix_used.columns)
     marker_cols = [col for col in coef_df.columns if col != BACKGROUND_COMPONENT_NAME]
     df = coef_df.loc[:, marker_cols].copy()
@@ -814,7 +902,7 @@ def run_reference_component_unmixing(
         strategy=strategy,
         detector_columns=detector_columns,
         scatter_columns=scatter_columns or [],
-        reference_markers=list(matrix_cols.keys()),
+        reference_markers=matrix_col_names,
         output_markers=marker_cols,
         generated_matrix_columns=list(matrix_used.columns),
         event_limit_per_file=event_limit_per_file,
@@ -871,13 +959,9 @@ def run_external_matrix_unmixing(
 
     matrix_used = matrix.loc[overlap, :].copy()
     _notify_progress(progress_fn, "Spectral import | solving marker coefficients")
-    _solver_mode = SOLVER_MODES.get(int(_param_float(tuning_params, "solver_mode")), "nnls")
-    if _solver_mode == "orthogonalize":
-        coefs, residuals = nnls_solve_orthogonalized(
-            raw_df.loc[:, overlap], matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
-        )
-    else:
-        coefs, residuals = nnls_solve(raw_df.loc[:, overlap], matrix_used, tuning_params=tuning_params, progress_fn=progress_fn)
+    coefs, residuals = solve_marker_coefficients(
+        raw_df.loc[:, overlap], matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
+    )
     df = pd.DataFrame(coefs, index=raw_df.index, columns=matrix_used.columns)
 
     for source_file, idx in obs.groupby("source_file").groups.items():
@@ -1457,6 +1541,29 @@ def _orthogonalize_matrix(matrix: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarra
     Q, R = np.linalg.qr(s, mode="reduced")
     Q_df = pd.DataFrame(Q, index=matrix.index, columns=matrix.columns)
     return Q_df, R
+
+
+def solve_marker_coefficients(
+    y_df: pd.DataFrame,
+    matrix_used: pd.DataFrame,
+    *,
+    tuning_params: dict | None = None,
+    progress_fn=None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve per-event marker coefficients using the solver named by solver_mode.
+
+    Single dispatch point for the solver choice: nnls (0), lasso (1), the legacy
+    normalize variants (2, 3) and orthogonalize (5). Both unmixing entry points
+    and the autotune sweep call this, so a swept solver_mode actually changes the
+    solve instead of being silently bypassed by a direct scipy.optimize.nnls call.
+    """
+    tuning_params = resolve_tuning_parameters(tuning_params)
+    mode = SOLVER_MODES.get(int(_param_float(tuning_params, "solver_mode")), "nnls")
+    if mode == "orthogonalize":
+        return nnls_solve_orthogonalized(
+            y_df, matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
+        )
+    return nnls_solve(y_df, matrix_used, tuning_params=tuning_params, progress_fn=progress_fn)
 
 
 def nnls_solve(
