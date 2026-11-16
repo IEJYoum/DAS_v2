@@ -5,9 +5,9 @@ import re
 
 TRAINING_KEYS = {'epochs', 'steps', 'lr', 'batch_size', 'device', 'threads', 'seed',
                  'class_weighting', 'class_weight_cap', 'marker_drop', 'gain_jitter',
-                 'replay_fraction', 'log_every', 'validate_every'}
+                 'replay_fraction', 'log_every', 'validate_every', 'model'}
 INFERENCE_KEYS = {'prediction_split', 'inference_tile_px', 'inference_overlap',
-                  'target_um_per_px', 'preview_max_px', 'error_gallery_limit', 'debug_scenes', 'report_classes',
+                  'target_um_per_px', 'preview_max_px', 'error_gallery_limit', 'debug_scenes', 'render_per_dataset', 'report_classes',
                   'predict_all_after_training', 'export_triplet', 'deployment_reports'}
 WORKFLOW_KEYS = {'prediction_split', 'predict_all_after_training', 'export_triplet', 'deployment_reports'}
 SOURCE_KEYS = {'id', 'preset', 'adapter', 'image_root', 'mask_root', 'csv_root', 'manifest',
@@ -39,11 +39,16 @@ def controls(training=None, inference=None):
                 continue
             if key == 'epochs' and value is None:
                 continue
+            if key == 'model':
+                if not isinstance(value, dict) or not value or set(value) - {'base_width', 'depth'} or any(
+                        isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in value.values()):
+                    raise ValueError('training.model takes positive integers base_width and/or depth')
+                continue
             if key in {'epochs','steps','batch_size','threads','log_every','validate_every',
                        'inference_tile_px','preview_max_px','error_gallery_limit'}:
                 if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                     raise ValueError(f'{key} must be a positive integer')
-            elif key in {'seed','inference_overlap','debug_scenes'}:
+            elif key in {'seed','inference_overlap','debug_scenes','render_per_dataset'}:
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError(f'{key} must be a nonnegative integer')
             elif key in {'lr','class_weight_cap','gain_jitter','replay_fraction','target_um_per_px'}:

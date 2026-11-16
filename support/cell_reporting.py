@@ -8,9 +8,11 @@ from pathlib import Path
 import re
 from PIL import Image, ImageDraw, ImageFont
 
-# Outline hues avoid every stain hue (IMMUNE red, EPI blue, their magenta overlap, NUC white).
-COLORS = np.array([[0, 255, 0], [255, 220, 0], [0, 220, 255], [255, 255, 255]], np.uint8)
-CLASS_LEGEND = 'IMMUNE green | EPI yellow | Other cyan | ARTIFACT white'
+# Outline hues avoid the stain hues (IMMUNE red, EPI blue, their magenta overlap) and
+# differ in lightness, so every pair stays >= 10 OKLab Delta E under deutan, protan,
+# tritan and achromat simulation (Machado 2009, full severity).
+COLORS = np.array([[40, 140, 40], [255, 150, 0], [170, 220, 255], [255, 255, 255]], np.uint8)
+CLASS_LEGEND = 'IMMUNE dark green | EPI orange | Other pale blue | ARTIFACT white'
 CORRECTNESS_COLORS = np.array([[150, 150, 150], [255, 0, 0]], np.uint8)
 CORRECTNESS_LEGEND = 'Correct grey | Incorrect red | Excluded/unlabelled: no outline | no stain shown'
 DIM = .5
@@ -113,11 +115,14 @@ def zoom_origin(mask, truth, span):
 def write_classification_images(image, mask, prediction, truth, directory, *, scene_id,
         truth_name='provided labels', prediction_name='model', colors=COLORS,
         legend=CLASS_LEGEND, prefix='', native=True, companion_px=512, write_prediction=True,
-        zoom_panels=()):
+        zoom_panels=(), outline_image=None, zoom_scale=2):
     """Shared CNN/Nimbus ROI debug, numbered so each scene's files sort in reading order.
 
-    1 zoom: native crop chosen by zoom_origin; truth and prediction outlines on the
+    1 zoom: native crop chosen by zoom_origin, drawn zoom_scale x larger (stain smoothly
+      upscaled, 1px outlines on the larger grid); truth and prediction outlines on the
       dimmed stain, correctness with no stain, then any zoom_panels (label, HxWx3 uint8).
+    outline_image is the stain behind outlines (e.g. without the nuclear channel);
+      it defaults to image, which image 2 always shows.
     2 composite, no outlines; 3 truth outlines on dimmed stain; 4 prediction outlines
       on the same dimmed stain; 5 correctness on black. Native pixels, 84px title bar.
     -1 truth means excluded/unlabelled and never produces a correctness outline.
@@ -125,36 +130,46 @@ def write_classification_images(image, mask, prediction, truth, directory, *, sc
     """
     out=Path(directory);out.mkdir(parents=True,exist_ok=True)
     name=prefix+report_token(scene_id)
+    token=report_token(scene_id)  # numbers lead, so a name sort groups each kind together
     tag=report_token(truth_name)
     correct=np.full(mask.shape,-1,np.int16)
     valid=truth>=0
     correct[valid&(truth==prediction)]=0
     correct[valid&(truth!=prediction)]=1
-    dim=np.asarray(image,dtype=np.float32)*DIM
+    dim=np.asarray(image if outline_image is None else outline_image,dtype=np.float32)*DIM
     black=np.zeros(mask.shape,np.float32)
     nothing=np.full(mask.shape,-1,np.int16)
     paths=[]
     span=companion_px
     y,x=zoom_origin(mask,truth,span)
     region=np.s_[y:y+span,x:x+span]
-    panels=[overlay(dim[region],mask[region],truth[region],colors),
-            overlay(dim[region],mask[region],prediction[region],colors),
-            overlay(black[region],mask[region],correct[region],CORRECTNESS_COLORS)]
-    panels+=[np.asarray(panel)[region] for _,panel in zoom_panels]
+    k=max(1,int(zoom_scale))
+    def up(labels):
+        return np.repeat(np.repeat(np.asarray(labels)[region],k,0),k,1)
+    crop=dim[region]
+    size=(crop.shape[1]*k,crop.shape[0]*k)
+    channels=[crop] if crop.ndim==2 else [crop[...,c] for c in range(crop.shape[-1])]
+    stain=np.stack([np.asarray(Image.fromarray(c).resize(size,Image.Resampling.BILINEAR)) for c in channels],-1)
+    stain=stain[...,0] if crop.ndim==2 else stain
+    zoom_mask=up(mask)
+    panels=[overlay(stain,zoom_mask,up(truth),colors),
+            overlay(stain,zoom_mask,up(prediction),colors),
+            overlay(np.zeros(zoom_mask.shape,np.float32),zoom_mask,up(correct),CORRECTNESS_COLORS)]
+    panels+=[up(panel) for _,panel in zoom_panels]
     labels=' | '.join(['TRUTH','PREDICTION','CORRECTNESS']+[label for label,_ in zoom_panels])
-    paths.append(write_titled_png(out/f'{name}__1_zoom__{tag}_y{y}_x{x}.png',np.concatenate(panels,axis=1),
+    paths.append(write_titled_png(out/f'{prefix}1_{token}__zoom__{tag}_y{y}_x{x}.png',np.concatenate(panels,axis=1),
         f'{scene_id} | LEFT TO RIGHT: {labels}',f'{legend} | {CORRECTNESS_LEGEND}',
-        f'Native crop x={x}, y={y}, picked for many labelled cells and class diversity. Reference: {truth_name}'))
+        f'Crop x={x}, y={y} shown {k}x, picked for many labelled cells and class diversity. Reference: {truth_name}'))
     if native:
         if write_prediction:
-            paths.append(write_titled_png(out/f'{name}__2_composite_native.png',overlay(image,mask,nothing),
+            paths.append(write_titled_png(out/f'{prefix}2_{token}__composite_native.png',overlay(image,mask,nothing),
                 f'STAIN ONLY | {scene_id}','No outlines'))
-        paths.append(write_titled_png(out/f'{name}__3_truth__{tag}_native.png',overlay(dim,mask,truth,colors),
+        paths.append(write_titled_png(out/f'{prefix}3_{token}__truth__{tag}_native.png',overlay(dim,mask,truth,colors),
             f'TRUTH / REFERENCE: {truth_name} | {scene_id}',legend+f' | stain dimmed to {DIM:g}'))
         if write_prediction:
-            paths.append(write_titled_png(out/f'{name}__4_prediction_native.png',overlay(dim,mask,prediction,colors),
+            paths.append(write_titled_png(out/f'{prefix}4_{token}__prediction_native.png',overlay(dim,mask,prediction,colors),
                 f'PREDICTION: {prediction_name} | {scene_id}',legend+f' | stain dimmed to {DIM:g}'))
-        paths.append(write_titled_png(out/f'{name}__5_correctness__{tag}_native.png',overlay(black,mask,correct,CORRECTNESS_COLORS),
+        paths.append(write_titled_png(out/f'{prefix}5_{token}__correctness__{tag}_native.png',overlay(black,mask,correct,CORRECTNESS_COLORS),
             f'CORRECTNESS: {prediction_name} vs {truth_name} | {scene_id}',CORRECTNESS_LEGEND))
     return paths
 

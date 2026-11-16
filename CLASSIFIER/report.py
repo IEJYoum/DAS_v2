@@ -47,11 +47,14 @@ def class_rgb(targets):
     return rgb
 
 
-def composite(x):
+def composite(x, nuclear=True):
     # Display only: stretch each available plane independently, using all pixels.
     # Disk-backed scenes supply normalized cached planes; no model arrays change.
+    # nuclear=False drops NUC: every mask already holds a nucleus, so behind
+    # outlines it only adds white haze.
     nuc,immune,epi=(display_stain(plane) for plane in x)
-    return np.clip(np.stack([immune, np.zeros_like(nuc), epi], axis=-1) + nuc[..., None], 0, 1)
+    rgb = np.stack([immune, np.zeros_like(nuc), epi], axis=-1)
+    return np.clip(rgb + nuc[..., None], 0, 1) if nuclear else rgb
 
 
 def cell_map(probabilities, mask, class_names):
@@ -65,7 +68,7 @@ def cell_map(probabilities, mask, class_names):
 def write_channels(planes, x, path, title="", max_panel_px=None, lineages=("NUC", "IMMUNE", "EPI")):
     """Stain only, no labels: scaled input markers, then the model's superstains and composite.
 
-    Truth and calls live in the numbered *__1..5 ROI PNGs (tiles: *__predictions.png), so no
+    Truth and calls live in the numbered 1_*..5_* ROI PNGs (tiles: *__predictions.png), so no
     outline or class colour ever hides the stain here.
     """
     rows = [(f"{name} (scaled marker)", display_stain(plane)) for name, plane in planes.items()]
@@ -136,7 +139,8 @@ def write_native_roi(scene, probabilities, output_dir, class_names, title, prefi
     pixels = class_rgb(np.where(scene['mask'] > 0, probabilities.argmax(axis=0), -1))
     return write_classification_images(composite(scene['x']), scene['mask'], calls, scene['targets'], output_dir,
         scene_id=sid, truth_name=truth_name, prediction_name='DAS CNN', prefix=prefix,
-        zoom_panels=[('PIXEL ARGMAX (outside cells dark)', pixels)])
+        zoom_panels=[('PIXEL ARGMAX (outside cells dark)', pixels)],
+        outline_image=composite(scene['x'], nuclear=False))
 
 
 def write_debug(scene, prepared, predictions, output_dir, class_names, title=None, prefix="", max_panel_px=None):

@@ -27,7 +27,7 @@ def main(run_directory, scope="source", output_dir=None):
                output_dir=str(out), run_type="report_only", report_source_run=str(source))
     (out / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     if (source / "class_weights.json").is_file():
-        shutil.copy2(source / "class_weights.json", out / "class_weights.json")
+        shutil.copyfile(source / "class_weights.json", out / "class_weights.json")
     summary.write_debug_summary(out, status="reporting; no training")
     info = {"source_run": str(source), "checkpoint": str(checkpoint), "checkpoint_step": step,
             "evaluation_scope": scope, "note": "Inference only; source run was not modified or retrained.", "splits": {}}

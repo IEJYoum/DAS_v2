@@ -44,5 +44,6 @@ CONFIG = {
     "log_every": 10,
     "validate_every": 50,
     "debug_scenes": 3,
+    "render_per_dataset": None,     # per evaluation pass: images/error pages for the first N ROIs of each dataset; None = all
     "error_gallery_limit": 12,      # cells PER PAGE; all errors are rendered (legacy key name)
 }

@@ -20,19 +20,21 @@ comparison folder), new reports use:
 
 | Path | Meaning |
 |---|---|
-| `*__1_zoom__<reference>_y*_x*.png` | 512 px native crop picked for many labelled cells and class diversity: truth, prediction, correctness (no stain); the CNN adds pixel argmax |
-| `*__2_composite_native.png` | Stain composite, no outlines |
-| `*__3_truth__<reference>_native.png` | Supplied reference annotations on the stain dimmed to 0.5 |
-| `*__4_prediction_native.png` | Model's per-cell calls on the same dimmed stain |
-| `*__5_correctness__<reference>_native.png` | On black: correct grey, incorrect red; excluded/unlabelled cells have no outline |
+| `1_*__zoom__<reference>_y*_x*.png` | 512 px crop drawn 2x, picked for many labelled cells and class diversity: truth, prediction, correctness (no stain); the CNN adds pixel argmax |
+| `2_*__composite_native.png` | Stain composite, no outlines |
+| `3_*__truth__<reference>_native.png` | Supplied reference annotations on the stain dimmed to 0.5 |
+| `4_*__prediction_native.png` | Model's per-cell calls on the same dimmed stain |
+| `5_*__correctness__<reference>_native.png` | On black: correct grey, incorrect red; excluded/unlabelled cells have no outline |
 | `confusion*.png` | Rows = TRUTH/reference; columns = PREDICTION, with explicit axis labels |
 | `errors/*errors0.png`, `*errors1.png`, ... | Numbered error-example galleries; every caption names TRUTH and PREDICTION |
 | `predictions.csv` / prefixed variants | All per-cell predictions, including correct, incorrect and unscored rows |
 | `marker_scores/` | Nimbus-specific native continuous-score outlines |
 
-IMMUNE = green, EPI = yellow, UNCLASSIFIED/Other = cyan, ARTIFACT = white.
-No outline color shares a hue with the stain (immune red, epithelial blue,
-nucleus white), and correctness (grey/red) is drawn without stain.
+IMMUNE = dark green, EPI = orange, UNCLASSIFIED/Other = pale blue, ARTIFACT = white.
+Every pair differs in lightness as well as hue (>= 10 OKLab Delta E under deutan,
+protan, tritan and achromat simulation). Outlines sit on the stain without the
+nuclear channel (every mask holds a nucleus); correctness (grey/red) has no stain.
+The zoom crop is drawn 2x so 1px outlines cover less of each cell.
 "Truth" means the supplied annotation strategy, not verified biological truth.
 Metrics must be read with reference-column name, class support and exclusions.
 

@@ -197,7 +197,7 @@ def _execute_streamed(settings, out, timings, total_start, log):
     (out / 'validation' / 'best__metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
     log('Held-out test: whole ROIs, one probability map at a time')
     metrics = streaming.evaluate(model, pools['test'], saved, out / 'test', render=True, galleries=True, log=log)
-    shutil.copy2(out / 'test' / 'predictions.csv', out / 'predictions.csv')
+    shutil.copyfile(out / 'test' / 'predictions.csv', out / 'predictions.csv')
     (out / 'test_metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
     timings.update(json.loads((out / 'training_summary.json').read_text(encoding='utf-8')))
     timings['total_seconds'] = time.perf_counter() - total_start

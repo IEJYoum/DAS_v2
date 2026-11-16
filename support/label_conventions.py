@@ -105,6 +105,11 @@ def recognized_label_columns(columns):
 def selected_label_columns(columns, label_column=None):
     """Explicit choice, preferred DAS_unet_labels, or intersection of known sources."""
     columns = list(columns)
+    if isinstance(label_column, (list, tuple)):
+        # Explicit agreement: a cell is supervised only where every listed column agrees.
+        if not label_column or len(set(label_column)) != len(label_column) or set(label_column) - set(columns):
+            raise ValueError(f'Label columns must be distinct existing columns: {list(label_column)}')
+        return list(label_column), 'explicit_columns' if len(label_column) > 1 else 'explicit_column'
     if label_column is not None and str(label_column).strip().casefold() not in {'','auto'}:
         if label_column not in columns:
             raise ValueError(f'Missing label column: {label_column}')

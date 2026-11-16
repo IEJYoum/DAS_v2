@@ -60,7 +60,7 @@ def main(obs_csv, label_column, scenes, output_dir, marker_tokens=("H2B", "CD45"
         for key, source in {**sources, "mask": mask_source}.items():
             target = destination / f"{key}{source.suffix}" if cache_images else source.resolve()
             if cache_images:
-                shutil.copy2(source, target)
+                shutil.copyfile(source, target)
             paths[key] = str(target.resolve())
         mask = tifffile.imread(paths["mask"])
         if mask.ndim != 2 or not np.issubdtype(mask.dtype, np.integer) or mask.min() < 0:
@@ -133,7 +133,7 @@ def retile_manifest(source_manifest, output_dir, tile_px=256, overlap=64):
         windows = sample_windows(mask, labels, tile_px, None, np.random.default_rng(0), overlap)
         destination = out / row.scene_id
         destination.mkdir()
-        shutil.copy2(cells_path, destination / "cells.csv")
+        shutil.copyfile(cells_path, destination / "cells.csv")
         updated = {**meta, "markers": {m: str((source_path.parent / p).resolve())
                     for m, p in meta["markers"].items()}, "mask": str(mask_path), "cells": "cells.csv",
                    "windows": windows, "tile_overlap": overlap,

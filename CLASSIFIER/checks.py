@@ -267,8 +267,9 @@ def check_full_coverage():
         from PIL import Image
         with Image.open(paths[1]) as native:
             assert native.size == (300, 344)  # original image pixels + title bar
-        with Image.open(paths[0]) as zoom:  # whole 300x260 scene fits the 512 crop; prediction panel starts at x=300
-            assert zoom.getpixel((300 + 10, 84 + 120)) == tuple(report.COLORS[0])
+        with Image.open(paths[0]) as zoom:  # whole 300x260 scene fits the 512 crop, drawn 2x; prediction panel at x=600
+            assert zoom.size == (4 * 600, 84 + 520)
+            assert zoom.getpixel((600 + 20, 84 + 240)) == tuple(report.COLORS[0])
     print("PASS: full coverage, far edges, seam-cell aggregation, padding and nullable correct flags", flush=True)
 
 

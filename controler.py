@@ -1785,7 +1785,7 @@ def _classifier_inference_prompt(mode, sources):
 
 
 def startup_cell_classifier(state: SessionState, mode=None, sources=None, checkpoint=None,
-                            output_root=None, training=None, inference=None):
+                            output_root=None, training=None, inference=None, run_name=None):
     """Recipe and GUI bind the same six answers, then call the central launcher."""
     def pick_mode():
         modes = ['predict','prepare','train_test','tune_test']
@@ -1817,13 +1817,15 @@ def startup_cell_classifier(state: SessionState, mode=None, sources=None, checkp
     output_root = recipe.ask('output_root', output_root, pick_output)
     training = recipe.ask('training', training, lambda: _classifier_training_prompt(mode))
     inference = recipe.ask('inference', inference, lambda: _classifier_inference_prompt(mode, sources))
+    if run_name is not None:  # recipe-only; the GUI keeps <dataset>_<mode> folder names
+        run_name = recipe.ask('run_name', run_name)
     if recipe.collecting():
         return state
     if mode in {'predict','tune_test'} and not checkpoint:
         raise recipe.RecipeError('Classifier predict/tune_test requires an explicit checkpoint')
     project = importlib.import_module('CLASSIFIER.run_project')
     out = project.main(mode=mode, sources=sources, checkpoint=checkpoint,
-        output_root=output_root, training=training, inference=inference,
+        output_root=output_root, training=training, inference=inference, run_name=run_name,
         project_root=state.data_folder, base_dir=state.data_folder, interactive=False,
         config_changed=invalidate_project_config, input_fn=io.iget, print_fn=io.iprint)
     product = Path(out)/'result.json'
