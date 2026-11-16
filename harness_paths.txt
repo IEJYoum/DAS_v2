@@ -1,0 +1,5 @@
+# Windows locations. harness_paths_posix.txt overrides these on Linux.
+data_root=\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\Isaac_Youm\CLASSIFIER_DATA\eval_only
+runs_root=\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\Isaac_Youm\CLASSIFIER_PROJECT\benchmarks\runs
+results_root=\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\Isaac_Youm\CLASSIFIER_PROJECT\benchmarks\results
+methods_root=C:\Users\youm\Desktop\src\cell_classification_repos

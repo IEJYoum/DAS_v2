@@ -3,8 +3,8 @@
 Uses the archive listings already saved in the data store (raw/<source>/remote_listing.csv).
 Per gold FoV: every raw_structured / image_data file + its label mask. Skips nimbus_predictions
 (published pixel maps; per-cell published scores are already in the consolidated table).
-Writes _data/panm_gold/fetch/<subset>.txt; fetch with the store's remote_zip.py:
-  python remote_zip.py fetch JLrumberger/Pan-Multiplex <subset>.zip <list> <repos>/_data/panm_gold/images
+Writes <data_root>/panm_gold/fetch/<subset>.txt; fetch with the store's remote_zip.py:
+  python remote_zip.py fetch JLrumberger/Pan-Multiplex <subset>.zip <list> <data_root>/panm_gold/images
 """
 import sys
 from pathlib import Path
@@ -14,7 +14,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness.paths import DATA_ROOT  # noqa: E402
 
-STORE_RAW = Path(r"\\rdsdcw.ohsu.edu\Coussens-secure\Multiplex_IHC_studies\Isaac_Youm\CLASSIFIER_DATA\raw")
+STORE_RAW = DATA_ROOT.parent / "raw"  # CLASSIFIER_DATA/raw (data_root is CLASSIFIER_DATA/eval_only)
 SOURCES = {"codex_colon": "panm_codex_colon", "vectra_colon": "panm_vectra_colon",
            "vectra_pancreas": "panm_vectra_pancreas", "mibi_decidua": "panm_mibi_decidua"}
 

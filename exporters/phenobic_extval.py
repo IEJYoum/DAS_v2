@@ -1,8 +1,8 @@
 """PhenoBIC external-validation TMA cores -> bundle phenobic_extval_v1.
 
-Inputs: phenobic/external_val_TMA_cores/<SET>/<core>/{cell_segmentations/<core>.tif*,
+Inputs: <data_root>/phenobic_extval/external_val_TMA_cores/<SET>/<core>/{cell_segmentations/<core>.tif*,
 multiplex_images/<core>/<marker>.tif} and the published ground truth
-_data/phenobic_ext_val/ground_truth/<SET>.csv (Patch, <marker> pos/neg, label).
+<data_root>/phenobic_extval/ground_truth/<SET>.csv (Patch, <marker> pos/neg, label).
 One group per marker set (= PhenoBIC's normalisation batch). No images are copied.
 """
 import sys
@@ -12,10 +12,10 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness import bundle  # noqa: E402
-from harness.paths import REPOS_ROOT, DATA_ROOT, rel  # noqa: E402
+from harness.paths import DATA_ROOT, rel  # noqa: E402
 
-CORES = REPOS_ROOT / "phenobic" / "external_val_TMA_cores"
-TRUTH = DATA_ROOT / "phenobic_ext_val" / "ground_truth"
+CORES = DATA_ROOT / "phenobic_extval" / "external_val_TMA_cores"
+TRUTH = DATA_ROOT / "phenobic_extval" / "ground_truth"
 PLATFORM = {"TMA1": "Vectra", "TMA2": "Vectra", "TMA3": "PhenoCycler (CODEX)"}
 
 

@@ -79,7 +79,7 @@ def main():
                       f"{len(stems)} files; unmatched gold channels {unmatched or 'none'}")
     scenes = scenes.merge(pd.DataFrame(extra), on="scene_id")
     meta = {k: v for k, v in meta.items() if k not in ("id", "created", "counts")}
-    meta["notes"] += " Images: gold FoVs pulled evaluation-only to _data/panm_gold/images (exporters/panm_gold_images.py)."
+    meta["notes"] += " Images: gold FoVs pulled evaluation-only to <data_root>/panm_gold/images (exporters/panm_gold_images.py)."
     bundle.write("panm_gold_v1", meta, scenes, labels, pd.DataFrame(image_rows))
     print("\n".join(report))
 

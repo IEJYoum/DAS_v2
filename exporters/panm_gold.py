@@ -1,6 +1,6 @@
 """Pan-M gold-standard test set (Nimbus paper) -> bundle panm_gold_v1.
 
-Input: _data/panm_gold/gt_pred_ie_consolidated.csv (huggingface JLrumberger/Pan-Multiplex):
+Input: <data_root>/panm_gold/gt_pred_ie_consolidated.csv (huggingface JLrumberger/Pan-Multiplex):
 one row per cell x channel with gt_proofread (gold), gt_noisy (silver), nimbus (published
 score), ie (mean intensity), cell_size. Score-only bundle for now: no images.csv until the
 gold FoV images are pulled (evaluation-only).

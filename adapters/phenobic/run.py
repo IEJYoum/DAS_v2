@@ -17,9 +17,9 @@ from pathlib import Path
 HARNESS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(HARNESS))
 from harness import bundle  # noqa: E402
-from harness.paths import REPOS_ROOT, resolve  # noqa: E402
+from harness.paths import METHODS, resolve  # noqa: E402
 
-PHENOBIC = REPOS_ROOT / "phenobic"
+PHENOBIC = METHODS / "phenobic"
 MODEL = PHENOBIC / "PhenoBIC_model1.h5"
 
 
