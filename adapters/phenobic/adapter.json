@@ -1,0 +1,7 @@
+{
+  "env": "phenobic-clean",
+  "task_family": "marker_positivity",
+  "description": "PhenoBIC (Sankaranarayanan et al., bioRxiv 2026), unmodified upstream mask workflow; one normalisation batch per bundle group.",
+  "upstream": "phenobic (Shachi-Mittal-Lab/PhenoBIC, non-commercial licence)",
+  "model": "phenobic/PhenoBIC_model1.h5"
+}
