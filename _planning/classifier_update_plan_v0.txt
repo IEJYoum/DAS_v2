@@ -1,0 +1,268 @@
+CLASSIFIER UPDATE PLAN v0  (draft 2026-11-13)
+Proposed improvements to training/tuning after the in-house proof of concept.
+Nothing here is implemented unless marked DONE. Companion documents:
+CLASSIFIER/classifier_plan_v1.txt (original design), CLASSIFIER/future_experiments_plan_v0.md
+(learning curves, model comparison), CLASSIFIER_DATA/README.md (data store, pull queue).
+
+=====================================================================
+0. WHERE WE ARE
+=====================================================================
+Model: small U-Net (GroupNorm, ~30k parameters: base_width 8, depth 2), inputs are three
+superstains (NUC, IMMUNE = max(CD45, CD3), EPI), resampled to 0.5 um/px, pixel
+cross-entropy weighted by 1/cell area and capped inverse class frequency, per-cell calls
+by averaging pixel probabilities over the mask. Scores are 3-class macro-F1
+(IMMUNE / EPI / UNCLASSIFIED); ARTIFACT has no labels yet.
+
+Pilot (Pan-M CODEX colon, trained on donor B009, validated B011A, tested B011B):
+test macro-F1 0.862, accuracy 0.872. 3,065 steps (~24 s/step).
+
+In-house runs, pooled macro-F1 on fixed slide-level test regions:
+  dataset                 E0 untuned   E1 tuned on own   E2 tuned on all in-house
+  BCC (mIHC, n=32)          0.78         not run           0.91
+  D10_Guimaraes (n=10)      0.68         0.77              0.76
+  UCSD_Lowey (n=4)          0.86         not run           0.81
+  BE-TMA CycIF (n=4)        0.39         not run           0.73
+  mean of the four          0.68         -                 0.80
+Not run (died at start: recipes asked for GPUs 2-6, the Linux box has 0 and 1):
+E1 for BCC, BE-TMA, UCSD_Lowey, and E3 (larger model from scratch, in-house only).
+
+Tuning as done: start from the pilot weights, architecture inherited, fresh AdamW,
+constant lr 1e-4, 1,500 steps, batch 16, validate every 500 steps, keep best checkpoint
+on validation macro-F1. All training tiles from all datasets in ONE pool.
+
+=====================================================================
+1. LIMITATIONS OF THE CURRENT TRAINING (what the proposals address)
+=====================================================================
+1. No dataset balancing. Tiles are drawn from one shuffled pool, so a dataset's influence
+   scales with its tile count (BCC, D10_Guimaraes dominate; BE-TMA has 14 training cores,
+   UCSD_Lowey 12 regions). Class weights are computed once over the pooled training cells,
+   not per dataset.
+2. Constant learning rate, no warmup, no decay, no gradient clipping, no weight averaging.
+3. Fine-tuning moves every layer at one rate, with no pull back toward the parent and no
+   parent-domain (CODEX) replay data. Forgetting is not controlled.
+4. Labels are the lab's workflow labels, not ground truth. The residual "Other" class means
+   different things per dataset (stroma, aSMA+, CAFs, endothelial...). Part of the UCSD_Lowey
+   drop after pooled tuning (0.86 -> 0.81, Other F1 0.68 -> 0.61) is plausibly the model
+   absorbing another lab's convention.
+5. Label tables omit cells the mask contains. BCC: ~11% of mask cells have no label row;
+   missing cells are small (median 44 px vs 90 px; 90th percentile 51 px vs present-cell 10th
+   percentile 59 px), consistent with a minimum-size filter around 52-58 px, but not all of
+   it (018268ROI12 also lacks larger cells). UCSD_Lowey: parent_class blank for 141k of 320k
+   cells. Unlabelled cells get zero loss and are excluded from scoring, so scores describe
+   only labelled (mostly larger) cells.
+6. Evidence is thin: one seed; 4 test regions for UCSD_Lowey and BE-TMA; hyperparameters
+   chosen once; BE-TMA test/val cores picked at random (possible same-patient leakage).
+7. Capacity untested: 30k parameters; E3 (width 32, depth 4) has not run.
+8. Input assumptions: pixel size 0.5 um/px assumed for D10_Guimaraes and UCSD_Lowey;
+   0.3774 um/px for CODEX unverified. BE-TMA IMMUNE precision is 0.09 untuned, a pattern
+   that suggests a CD45 input problem (bright almost everywhere, or channel mix-up).
+
+=====================================================================
+2. PROPOSED CHANGES (ordered; each states how it is tested)
+=====================================================================
+Tier A - cheap, do first (they tell us whether the rest are worth doing)
+
+A1. Finish the queue. Re-run E1 (BCC, BE-TMA, UCSD_Lowey) and E3 on GPUs 0 and 1.
+    Commands are in section 6.
+A2. Check the BE-TMA CD45 input before reading any BE-TMA result as a model result:
+    open a *__channels.png, confirm which file is "CD45" in the R3 round, confirm the
+    channel is not saturated/diffuse. Cheap, possibly large effect on E1/E2/E3 for BE-TMA.
+A3. Seeds and uncertainty. Repeat each experiment with 3+ seeds; bootstrap over regions
+    for the pooled score. Add error bars to benchmark_plots.py. Differences like 0.77 vs
+    0.76 are currently within noise.
+A4. Unlabelled-cell report. For BCC/D10/AL: model calls on unlabelled cells by object size
+    and by call class. Decide whether small objects should be UNCLASSIFIED/ARTIFACT, or
+    filtered to the lab's size cutoff before prediction.
+
+Tier B - sampling and optimisation (small code changes, config-level)
+
+B1. Per-dataset balanced sampling: each batch draws equally from each dataset (or by
+    sqrt of size). Compute class weights per dataset, then average. New recipe E2b vs E2.
+    Directly tests the dominance problem; expect gains on BE-TMA/UCSD_Lowey, small loss on BCC.
+B2. Learning-rate schedule: linear warmup (~5-10% of steps) then cosine decay to ~1% of
+    peak; gradient clipping (norm 1.0). Currently constant 1e-4 (tune) / 1e-3 (scratch).
+B3. Discriminative tuning rates: lower lr (e.g. 0.1x) for encoder, full lr for decoder/head;
+    optionally freeze the encoder for the first N steps.
+B4. Weight averaging (EMA of weights, decay ~0.999) and evaluating the EMA model; reduces
+    checkpoint-selection noise on small validation sets.
+B5. Regularise toward the parent during tuning (L2 to parent weights, "L2-SP"), or replay
+    10-25% CODEX tiles. Test: does the CODEX in-domain test score hold while in-house improves?
+B6. Early stopping with patience and best-checkpoint selection on a pooled-then-per-dataset
+    validation average (so a large dataset does not decide the checkpoint alone).
+B7. Step budgets: 1,500 steps was a time budget, not a tuned value. Run 500/1500/4500 on one
+    dataset to see the curve before changing it.
+
+Tier C - robustness across labs and platforms
+
+C1. Stain/intensity augmentation beyond gain jitter: gamma, per-channel offsets, blur,
+    noise, and mild scale jitter (0.8-1.25x) to absorb wrong pixel-size assumptions.
+C2. Dataset/platform conditioning: a small embedding (or per-dataset final 1x1 head) so the
+    model can learn lab-specific conventions for "Other" without distorting shared features.
+C3. Marker dropout is already available (marker_drop); test it for panel differences.
+C4. Normalisation experiments recorded in _planning/classifier_normalization_experiments_v0.txt
+    still apply (per-ROI vs per-slide scaling, percentile choice).
+
+Tier D - label noise (model side; label fixes are YOURS, see section 3)
+
+D1. Train on agreed cells only where several label columns exist (supported now via
+    label_column lists; used for neither AL nor D10 yet).
+D2. Label smoothing / bootstrapped loss; down-weight cells where the model is confident
+    and the label disagrees (needs a first-pass model; use E2 as the teacher).
+D3. Review loop: export the highest-confidence disagreements per dataset (error galleries
+    already exist) for hand review; fixed labels go back through the converter.
+D4. ARTIFACT as its own top-level binary model (artifact vs not) feeding the
+    IMMUNE/EPI/UNCLASSIFIED model, as decided; currently ARTIFACT has no support.
+
+Tier E - capacity and data scale
+
+E1. E3: width 32, depth 4 from scratch on in-house data. Then width/depth sweeps if
+    capacity matters (compare with the E2 tuned small model).
+E2. Train on the larger public set once converted: Vectra colon/pancreas, MIBI decidua
+    (listed, not yet fetched; marker-positivity labels, keep only cells with no conflicting
+    labels), then Schurch CRC CODEX (tumour version of the pilot data).
+E3. Learning-curve study (future_experiments_plan_v0.md section 1) once labels settle.
+
+Tier F - evaluation hygiene
+
+F1. Patient-level splits wherever patients are known (BE-TMA cores, AG slides per mouse).
+F2. More/larger test sets for UCSD_Lowey and BE-TMA, or leave-one-slide-out CV there.
+F3. Report per-class precision/recall and the confusion matrix, not only macro-F1.
+F4. Small independent hand-labelled set per lab (see 3.7), scored separately from the lab's
+    workflow labels, so label noise can be separated from model error.
+F5. Calibration: confidence vs accuracy per dataset, to support later "unclassified by
+    low confidence" rules.
+
+=====================================================================
+3. WHAT I NEED FROM YOU (better labels are your job - prompts)
+=====================================================================
+3.1  UCSD_Lowey v5: "Primary Celltype: Matrix" is "2: immune" for ALL 319,838 cells in
+     AL_05_obs.csv (including 53k tumour-epithelium cells). The matrix step needs fixing and
+     re-saving. Until then labels come from parent_class (blank = unlabelled).
+3.2  UCSD_Lowey: what does class == "NL" mean (140,824 cells)? Probably "no label"; confirm.
+3.3  BCC: why 11% of mask cells have no label row? Find the size/QC filter in the CellProfiler
+     or DAS step and give me the cutoff, or the list of removal reasons.
+3.4  Harmonise "Other"/UNCLASSIFIED across labs: write down per dataset which lineages it
+     contains (stroma, endothelial, aSMA+, CAFs...). The model currently pools them.
+3.5  Review the worst regions by eye: the four BCC test regions below 0.5 macro-F1, and
+     the BE-TMA regions. Are labels wrong, is segmentation wrong, or is the model wrong?
+3.6  Pixel sizes: D10_Guimaraes and UCSD_Lowey are assumed 0.5 um/px (you are following up
+     with your boss). BE-TMA 0.325 is user-verified.
+3.7  A small gold set per lab (200-500 cells, hand-classified, spread over regions and
+     classes) would give a noise-free evaluation target and tell us how much of the gap
+     to 1.0 is label error.
+3.8  BE-TMA: core-to-patient mapping for patient-level splits; confirm the R3 CD45/Ecad
+     channel assignment; review the "Primary Celltype: Matrix" labels (strong imbalance:
+     epithelial 48%, fibroblast 24%, endothelial 18%, immune 8%).
+3.9  AG (D10_Guimaraes) is mouse KPC tissue: confirm it should count as in-house epithelial
+     tumour data alongside the human sets, or be reported separately.
+3.10 Public-data decisions: panm_gold licence, CODEX pixel size 0.3774 (Hickey et al.
+     Supplementary Table 8), Vectra slide-hash vs patient identity, decidua first number
+     = participant. All unverified in the data store README.
+3.11 More in-house labelled data (CycIF and mIHC, normal epithelium in scope) whenever
+     agreed labels exist; the BE-TMA and AL sets are small.
+
+=====================================================================
+4. PROPOSED EXPERIMENT QUEUE
+=====================================================================
+  id     question                                          change from baseline
+  E1*    does per-dataset tuning beat pooled tuning?       finish BCC, BE-TMA, UCSD_Lowey
+  E3     does a bigger model from scratch beat tuning?     width 32, depth 4, 1,500 steps
+  E2b    does balanced sampling help small datasets?       B1 (per-dataset sampling+weights)
+  E2c    do schedule + warmup + EMA help?                  B2 + B4
+  E2d    does parent regularisation/replay help?           B5
+  E2e    does conditioning help "Other"?                   C2
+  S      how large is seed noise?                          3 seeds of E2 and E1
+  Steps  is 1,500 enough?                                  B7 curve on one dataset
+Run order: A1, A2, A3 (seeds on E2), then B1, B2+B4, B5, C1, C2, E3 variants. Change one
+thing per experiment; the recipe generator (CLASSIFIER/experiments/make_inhouse_recipes.py)
+makes this a config edit.
+
+=====================================================================
+5. SMALL CODE TASKS (for whoever implements)
+=====================================================================
+- benchmark_plots.py: add seeds/bootstrap error bars; per-class summary table.
+- Sampling: per-dataset balanced sampler in train.py (steps mode); per-dataset class weights.
+- Optimiser: scheduler with warmup, gradient clipping, EMA, discriminative lr.
+- Parent regularisation (L2-SP) and CODEX replay in tune_test (replay_fraction exists but is
+  wired for the legacy BCC preset path only; verify it for explicit sources).
+- Augmentation: gamma/noise/blur/scale jitter in data.augment_scene.
+- Dataset embedding/head conditioning (model.py).
+- Generator: seeds as a loop; E2b-E2e recipes; E1 recipes that cap at the right GPU index.
+- render_per_dataset already caps image output; keep it at 3 for multi-run sweeps.
+- Pre-flight (experiments/check_inhouse_sources.py) should also check the GPU count on the
+  run host, since the cuda check on this Windows machine is skipped.
+
+=====================================================================
+6. NOTES (operations, decisions, gotchas)
+=====================================================================
+Machines and storage
+- Linux box: 2 GPUs (indices 0 and 1). CUDA_VISIBLE_DEVICES=2+ makes PyTorch see no GPU and
+  the run dies at its device check before doing any work. No local disk on Linux; it reads
+  the share (/mnt/rdscoussens). Windows shares the same data via \\rdsdcw.ohsu.edu\Coussens-secure.
+- Linux cannot see \\fortera-smb (EmiliLab). BE-TMA classifier inputs (4.3 GB: DAPI R3 / CD45 /
+  Ecad, nuc30 masks, 03_cols-cleaned triplet) were copied to
+  CLASSIFIER_DATA/inhouse/be_tma_cycif with the original layout. The original is untouched.
+- The share refuses utime/chmod: shutil.copy2 failed after the pilot's test pass (the run was
+  marked failed though predictions were fine). All classifier copies now use copyfile.
+- Do not git pull on Linux while runs are going; modules load lazily and a run could mix code.
+- Step time: pilot ran 23.7 s/step (reading its cache from the share); D10_Guimaraes tuning ran
+  ~9 s/step. Validation ~30 s/region unrendered; rendering one region's images + error pages
+  is ~7 min, hence render_per_dataset=3.
+
+Run commands (Linux, P = .../Isaac_Youm/CLASSIFIER_PROJECT; set P in EACH terminal)
+  A: CUDA_VISIBLE_DEVICES=0 python run_recipe.py --project $P --run inhouse_E1_tune_bcc;
+     CUDA_VISIBLE_DEVICES=0 python run_recipe.py --project $P --run inhouse_E1_tune_be_tma
+  B: CUDA_VISIBLE_DEVICES=1 python run_recipe.py --project $P --run inhouse_E1_tune_al_pdac;
+     CUDA_VISIBLE_DEVICES=1 python run_recipe.py --project $P --run inhouse_E3_scratch_all
+  Plots: python CLASSIFIER/experiments/benchmark_plots.py --runs-root $P/runs --tasks
+     E0_codex_forward E1_tune_ag_kpc E1_tune_bcc E1_tune_be_tma E1_tune_al_pdac E2_tune_all
+     E3_scratch_all --extra codex_in_domain=<pilot results/test/predictions.csv> --out $P/benchmarks/<name>
+
+Framework features added in this round (DONE, committed)
+- run_name on classifier steps; checkpoint "run:NAME" loads the newest COMPLETE run.
+- training.model {base_width, depth} for train_test (tune_test inherits the parent).
+- label_column may be a list: only cells where every listed column agrees are supervised.
+- render_per_dataset cap on evaluation images; all regions still scored and exported.
+- Debug images: numbered 1_..5_ whole-region images (number first, so a name sort groups
+  each kind), 2x zoom crop chosen for cell count and class diversity, stain-only
+  channels.png, outlines on stain without the nuclear channel, colour-vision-safe outline
+  palette (dark green / orange / pale blue / white; every pair >= 10 OKLab Delta E under
+  deutan, protan, tritan and achromat simulation).
+- AL converter (CLASSIFIER/store_converters/al_pdac_mihc.py): AL cell ids are strings
+  ("cell9178"); the number is the mask label (checked for all 18 regions).
+
+Splits
+- All in-house splits fixed in the recipes by CLASSIFIER/experiments/make_inhouse_recipes.py,
+  by whole slide (BE-TMA: random 2 test + 1 val core per TMA, no patient info yet).
+- BCC's preset allocates ROIs, which put 12 of 14 slides into both train and test; it is now
+  frozen in CLASSIFIER/experiments/bcc_splits.json and re-split by slide (49/17/32 regions).
+  Delete the file to re-run discovery.
+- Forward-pass (predict) mode ignores the BCC preset's discovery; that is why the splits are
+  written into every recipe as explicit scenes.
+
+Scoring conventions
+- Primary benchmark: pooled macro-F1 over IMMUNE/EPI/UNCLASSIFIED per dataset; boxplots show
+  spread over test regions; diamonds mark the pooled score. Accuracy and per-class
+  precision/recall are supplements. The logged macro-F1 in run logs includes ARTIFACT (zero
+  support) and reads ~0.65 where the 3-class figure is ~0.86; ignore it.
+- ARTIFACT calls on labelled cells count as errors; no rows reassigned.
+
+Data store
+- CLASSIFIER_DATA: 20 GB per source, 200 GB total, 22.7 GB used (4.3 GB of that is the
+  BE-TMA copy; in-house copies are tracked but unbudgeted). Unpulled data is the true holdout.
+- Pulled and converted: panm_codex_colon (18 GB). Listed but NOT fetched: panm_vectra_colon,
+  panm_vectra_pancreas, panm_mibi_decidua. Candidates: schurch_crc_codex, hoch_melanoma_imc,
+  melanoma_ln_mibi, and (later, immune subclass) maps_chl_codex / maps_chl_mibi from Zenodo
+  10067010 (single-patient CODEX cHL: split spatially, not by cell, to avoid leakage).
+- HTAN sources are forward-pass comparison only, never truth.
+
+Known issues
+- tests/test_nimbus_workflow.py::test_cancel_terminates_child_and_marks_interrupted fails on
+  the unmodified tree (not caused by classifier changes).
+- PowerShell Export-Csv writes a BOM and quotes; edit MANIFEST.csv with Python. Excel may
+  rewrite dates in US format.
+- 'Primary Celltype: Matrix' in UCSD_Lowey is unusable until re-saved (3.1).
+
+Later (not this plan)
+- Immune subclass models (cHL data above), FB/ENDO classes, hierarchical label tree from the
+  manifest's stain/label columns, HTAN forward pass to show replaceable labels.

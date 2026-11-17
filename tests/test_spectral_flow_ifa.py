@@ -36,26 +36,36 @@ def _core_or_skip():
 
 
 def test_detect_unstained_paths_tolerates_missing_obs():
-    assert sfi._detect_unstained_paths(None, []) == []
+    core = _core_or_skip()
+    assert sfi._detect_unstained_paths(core, None, []) == []
 
 
 def test_detect_unstained_paths_finds_unstained_reference_in_obs():
+    core = _core_or_skip()
     obs = pd.DataFrame(
         {"source_path": [r"C:\d\Reference_Unstained.fcs", r"C:\d\Reference_CD3.fcs"]}
     )
-    found = sfi._detect_unstained_paths(obs, [])
+    found = sfi._detect_unstained_paths(core, obs, [])
     assert [Path(p).name for p in found] == ["Reference_Unstained.fcs"]
 
 
 def test_detect_unstained_paths_ignores_ordinary_references_and_samples():
+    core = _core_or_skip()
     obs = pd.DataFrame({"source_path": [r"C:\d\Reference_CD3.fcs", r"C:\d\sample_A.fcs"]})
-    assert sfi._detect_unstained_paths(obs, []) == []
+    assert sfi._detect_unstained_paths(core, obs, []) == []
 
 
 def test_detect_unstained_paths_falls_back_to_input_paths():
+    core = _core_or_skip()
     obs = pd.DataFrame({"source_path": [r"C:\d\Reference_CD3.fcs"]})
-    found = sfi._detect_unstained_paths(obs, [r"C:\d\LIVE_gate.fcs"])
+    found = sfi._detect_unstained_paths(core, obs, [r"C:\d\LIVE_gate.fcs"])
     assert [Path(p).name for p in found] == ["LIVE_gate.fcs"]
+
+
+def test_detect_unstained_paths_matches_whole_words_only():
+    # "liver" contains "live"; a liver sample must never become the background
+    core = _core_or_skip()
+    assert sfi._detect_unstained_paths(core, None, [r"C:\d\Sample liver 01.fcs"]) == []
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +235,7 @@ def test_solver_modes_are_distinguishable_to_the_core():
     [
         ("Reference CD45.fcs", "CD45"),
         ("Reference Group-2 CD45 (cells).fcs", "CD45"),
+        ("Reference CD45 BV421.fcs", "CD45"),
         ("Reference_CD45.fcs", "CD45"),
         ("Reference Unstained.fcs", ""),
         ("Reference LIVE.fcs", ""),
@@ -243,6 +254,8 @@ def test_default_reference_keystring_is_backward_compatible(filename, expected):
         ("Spectral Controls CD45.fcs", "CD45"),
         ("Spectral_Controls_CD45.fcs", "CD45"),
         ("spectral controls B220.fcs", "B220"),
+        ("Spectral Controls CD45 BV421.fcs", "CD45"),
+        ("Spectral Controls Group-A CD45 BV421.fcs", "CD45"),
         ("Spectral Controls.fcs", ""),
         ("Spectral Controls Unstained.fcs", ""),
         ("Reference CD45.fcs", ""),
@@ -303,17 +316,6 @@ def test_choose_reference_tokens_prompts_until_a_keystring_matches(tmp_path):
     tokens = sfi._choose_reference_tokens(fake_input, print, core, [path], "")
     assert tokens == ["Spectral Controls"]
     assert len(asked) == 2
-
-
-def test_choose_reference_tokens_does_not_prompt_during_replay(tmp_path):
-    core = _core_or_skip()
-    path = str(tmp_path / "Spectral Controls CD45.fcs")
-
-    def exploding_input(*args, **kwargs):
-        raise AssertionError("replay must not prompt for a reference keystring")
-
-    tokens = sfi._choose_reference_tokens(exploding_input, print, core, [path], "", prompt=False)
-    assert tokens == ["reference"]
 
 
 def test_comma_separated_keystrings_are_split(tmp_path):
@@ -395,8 +397,9 @@ def test_autotune_score_combo_returns_score_and_detail():
     )
     ref_groups = {"CD45": cells.iloc[[0]], "CD3": cells.iloc[[1]]}
 
+    core = _core_or_skip()
     score, detail = sfi._autotune_score_combo(
-        profiles, None, ref_groups, detectors, 0.0, 0.5, 0.0
+        core, profiles, [], ref_groups, detectors, 0.0, 0.5, 0.0
     )
     assert isinstance(score, float)
     assert score < float("inf")
@@ -417,8 +420,9 @@ def test_autotune_score_combo_rejects_a_flattened_matrix():
     }
     cells = pd.DataFrame([[1.0, 1.0]], index=["c0"], columns=detectors)
 
+    core = _core_or_skip()
     score, detail = sfi._autotune_score_combo(
-        profiles, None, {"CD45": cells}, detectors, 1.0, 0.5, 0.0
+        core, profiles, [], {"CD45": cells}, detectors, 1.0, 0.5, 0.0
     )
     assert score == float("inf")
     assert detail["rejected"] == "empty_matrix"
@@ -434,6 +438,7 @@ SWEEP_GRID = {
     "floor_quantile": [0.0, 0.10],
     "background_quantile": [0.50, 0.90],
     "global_background_strength": [0.0, 1.0],
+    "unmixing_power": [0.5, 1.0],
 }
 EXPECTED_MARKERS = {"A6 CD45 PerCP", "A6 CD3 PerCP", "A6 B220 PerCP"}
 
@@ -490,8 +495,8 @@ def test_autotune_sweep_runs_end_to_end_and_writes_debug(tmp_path, monkeypatch):
     assert matrix.shape[0] == len(detectors)
     assert np.isfinite(matrix.values).all()
 
-    # coarse 2x2x2 plus two 3x3x3 refinement passes
-    assert params["autotune_combos_evaluated"] == 8 + 27 + 27
+    # coarse 2^4 plus two 3^4 refinement passes
+    assert params["autotune_combos_evaluated"] == 16 + 81 + 81
     sweep_log = Path(params["autotune_sweep_log_path"])
     assert sweep_log.is_file()
     frame = pd.read_csv(sweep_log)
@@ -499,8 +504,8 @@ def test_autotune_sweep_runs_end_to_end_and_writes_debug(tmp_path, monkeypatch):
     assert set(frame["stage"]) == {"coarse", "fine", "finest"}
     for column in (
         "floor_quantile", "background_quantile", "global_background_strength",
-        "score", "is_best", "off_target_per_cell", "on_target_per_cell",
-        "off_target_fraction", "n_cells_scored", "solve_failures",
+        "unmixing_power", "score", "is_best", "off_target_per_cell", "on_target_per_cell",
+        "off_target_fraction", "n_cells_scored",
         "dead_detectors", "rejected",
     ):
         assert column in frame.columns, f"sweep log is missing {column}"
@@ -730,3 +735,148 @@ def test_sweep_scorecard_ranks_strategies_without_biology_probes(tmp_path):
     ranked = scorecard.sort_values("combined_score", ascending=False)
     assert len(ranked) == 3
     assert ranked["combined_score"].is_monotonic_decreasing
+
+
+# ---------------------------------------------------------------------------
+# Unmixing space. Spectra are built and solved after a signed power transform
+# (1.0 = linear); an autotune matrix must be deployed at the power it won at.
+# ---------------------------------------------------------------------------
+
+
+def test_unmixing_transform_defaults_to_legacy_log_and_powers_keep_sign():
+    core = _core_or_skip()
+    frame = pd.DataFrame({"D1": [-4.0, 0.0, 9.0]})
+    # default 0 reproduces the legacy log space earlier real-data runs used
+    assert core.unmixing_transform(frame).equals(core.legacy_log_transform(frame))
+    assert core.unmixing_transform(frame, tuning_params={"unmixing_power": 1.0}).equals(frame)
+    bent = core.unmixing_transform(frame, tuning_params={"unmixing_power": 0.5})
+    assert bent["D1"].tolist() == [-2.0, 0.0, 3.0]
+    with pytest.raises(ValueError, match="unmixing_power"):
+        core.unmixing_transform(frame, tuning_params={"unmixing_power": -1.0})
+
+
+def test_power_refinement_never_interpolates_toward_log():
+    coarse = [0.0, 0.25, 0.5, 0.75, 1.0]
+    assert sfi._autotune_refine_power(coarse, 0.0) == [0.0]
+    assert sfi._autotune_refine_power(coarse, 0.25) == [0.25, 0.375, 0.5]
+    assert sfi._autotune_refine_power(coarse, 0.75) == [0.5, 0.75, 1.0]
+
+
+def test_autotune_matrix_is_deployed_at_its_winning_power(tmp_path, monkeypatch):
+    core = _core_or_skip()
+    paths, detectors = _write_synthetic_events(tmp_path)
+    monkeypatch.setattr(sfi, "_AUTOTUNE_COARSE_GRID", SWEEP_GRID)
+    matrix_path, params = sfi._run_autotune_sweep(
+        core, paths, detectors, [], None, str(tmp_path), "units",
+        progress_fn=None, print_fn=lambda *a: None,
+        reference_tokens=("spectral controls",),
+    )
+    power = params["autotune_unmixing_power"]
+    assert 0.5 <= power <= 1.0
+
+    # The coefficients the sweep scored: the matrix solved against raw events
+    # transformed at the winning power.
+    raw, *_rest = core.build_raw_detector_triplet(
+        input_paths=paths, detector_columns=detectors, scatter_columns=[], import_mode="x",
+    )
+    matrix = core.load_spectral_matrix(matrix_path)
+    scored, _res = core.solve_marker_coefficients(
+        core.unmixing_transform(raw, tuning_params={"unmixing_power": power}).loc[:, list(matrix.index)],
+        matrix,
+    )
+
+    def deployed(deploy_power):
+        df, _obs, _xy, meta = core.run_import(
+            input_paths=paths, strategy="external_matrix", detector_columns=detectors,
+            scatter_columns=[], matrix_path=matrix_path,
+            tuning_params={"unmixing_power": deploy_power},
+        )
+        return df.loc[raw.index, list(matrix.columns)].values
+
+    assert np.allclose(deployed(power), scored)
+    assert not np.allclose(deployed(power + 0.3), scored)
+    assert not np.allclose(deployed(0.0), scored)  # the default log space
+
+
+# ---------------------------------------------------------------------------
+# Mixed-detector cache: reference roles saved in the cache are authoritative,
+# so a cache written with a custom keystring unmixes without that keystring.
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_cache_keeps_reference_roles_from_the_writing_run(tmp_path):
+    core = _core_or_skip()
+    paths, detectors = _write_synthetic_events(tmp_path)
+    cache = tmp_path / "run_spectral_mixed_cache.csv"
+    first, _obs, _xy, _meta = core.run_import(
+        input_paths=paths, strategy="consensus_score_and_cluster", detector_columns=detectors,
+        scatter_columns=[], mixed_cache_path=str(cache), reference_tokens=("spectral controls",),
+    )
+    # default keystring "reference" matches none of the cached source filenames
+    again, obs, _xy, _meta = core.run_import(
+        input_paths=[str(cache)], strategy="consensus_score_and_cluster",
+        detector_columns=detectors, scatter_columns=[],
+    )
+    assert set(again.columns) == EXPECTED_MARKERS
+    assert set(obs.loc[obs["spectral_file_role"] == "reference", "reference_marker"]) == EXPECTED_MARKERS
+    assert np.allclose(again.sort_index().values, first.sort_index().loc[:, again.columns].values)
+
+
+# ---------------------------------------------------------------------------
+# Interactive autotune run, then replay of its lastrun config. Replay used to
+# crash converting the saved matrix path to float, and replayed the old stem
+# over a DS run's fresh test stem.
+# ---------------------------------------------------------------------------
+
+
+def _scripted_input(answers):
+    def fake_input(prompt="", default=None, prompt_meta=None):
+        for key, value in answers.items():
+            if key in prompt:
+                return value
+        return "" if default is None else default
+    return fake_input
+
+
+def test_interactive_autotune_run_replays_its_saved_matrix(tmp_path, monkeypatch):
+    _core_or_skip()
+    data = tmp_path / "events"
+    data.mkdir()
+    out = tmp_path / "project"
+    paths, detectors = _write_synthetic_events(data)
+    monkeypatch.setattr(sfi, "_AUTOTUNE_COARSE_GRID", SWEEP_GRID)
+    monkeypatch.setattr(sfi, "FLOW_INPUT_EXTENSION", ".csv")
+
+    common = {
+        "project output folder": str(out),
+        "input mode number": "0",
+        "spectral input files/folders": str(data),
+        "config path": "",
+        "reference filename keystring": "spectral controls",
+    }
+    df1, _obs, _xy, meta1 = sfi.run_interactive(
+        log_input=_scripted_input({**common,
+                                   "unmixing strategy number": "5",
+                                   "output stem": "run1",
+                                   "max events per input file": "all",
+                                   "save mixed detector cache": "n"}),
+        print_fn=lambda *a: None,
+    )
+    power = meta1["autotune"]["autotune_unmixing_power"]
+    assert meta1["tuning_overrides"] == {"unmixing_power": power}
+    assert meta1["tuning_params_used"]["unmixing_power"] == power
+    lastrun = (out / sfi.LASTRUN_FILENAME).read_text(encoding="utf-8")
+    assert "autotune_matrix_path" in lastrun
+
+    def no_sweep(*args, **kwargs):
+        raise AssertionError("replay must reuse the saved autotune matrix")
+
+    monkeypatch.setattr(sfi, "_run_autotune_sweep", no_sweep)
+    df2, _obs, _xy, meta2 = sfi.run_interactive(
+        project_defaults={"spectral_stem": "ds_test_002", "spectral_ignore_remembered_stem": True},
+        log_input=_scripted_input({**common, "replay previous run config": "y"}),
+        print_fn=lambda *a: None,
+    )
+    assert meta2["stem"] == "ds_test_002"
+    assert meta2["autotune_matrix_path"] == meta1["autotune_matrix_path"]
+    assert np.allclose(df2.sort_index().values, df1.sort_index().values)

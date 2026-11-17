@@ -108,6 +108,7 @@ DEFAULT_TUNING_PARAMETERS = {
     "normalize_columns": 0.0,
     "background_quantile": 0.50,
     "floor_quantile": 0.0,
+    "unmixing_power": 0.0,
 }
 STARTER_SWEEP_GRID = {
     "weighted_score_threshold": [2.5, 3.0, 3.5],
@@ -604,9 +605,8 @@ def call_reference_positives(
     diagnosable. gmm_labels is only computed for gmm_reference. pos_weight and
     neg_weight are None except under soft_weighted_reference.
 
-    Extracted from run_reference_component_unmixing() so the autotune sweep in
-    data_extraction/spectral_flow_ifa.py can honour the selected strategy
-    instead of hardcoding consensus_score_and_cluster.
+    Shared with the autotune sweep in data_extraction/spectral_flow_ifa.py,
+    which calls it with consensus_score_and_cluster.
     """
     tuning_params = resolve_tuning_parameters(tuning_params)
     strategy = str(strategy or "consensus_score_and_cluster").strip().lower()
@@ -658,6 +658,7 @@ def build_reference_matrix(
     detector_columns: Sequence[str],
     *,
     tuning_params: dict | None = None,
+    shared_negative_strength: float | None = None,
     progress_fn=None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Assemble the detector-by-marker spectral matrix from reference components.
@@ -672,10 +673,11 @@ def build_reference_matrix(
     background column was added; that is what the audit settings record as
     reference_markers.
 
-    Extracted verbatim from run_reference_component_unmixing() so the autotune
-    sweep in data_extraction/spectral_flow_ifa.py can score the matrix the
-    production path would actually build, instead of maintaining a local
-    reimplementation that drifts.
+    shared_negative_strength: None (production) reads
+    reference_negative_subtraction_strength clamped to >= 1.0, because the
+    "mean" noise mode sets that parameter to 0 to switch off per-marker
+    subtraction while still wanting the shared profile removed once. The
+    autotune sweep passes its swept value explicitly (0.0-2.0, unclamped).
     """
     tuning_params = resolve_tuning_parameters(tuning_params)
     frames = list(background_frames or [])
@@ -688,7 +690,10 @@ def build_reference_matrix(
     if _param_bool(tuning_params, "shared_negative_subtraction_enabled") and len(frames) > 0:
         bg_all = pd.concat(frames, axis=0)
         shared_neg = bg_all.quantile(bg_quantile, axis=0).clip(lower=0)
-        strength = max(_param_float(tuning_params, "reference_negative_subtraction_strength"), 1.0)
+        if shared_negative_strength is None:
+            strength = max(_param_float(tuning_params, "reference_negative_subtraction_strength"), 1.0)
+        else:
+            strength = float(shared_negative_strength)
         for marker in matrix_cols:
             matrix_cols[marker] = (matrix_cols[marker] - strength * shared_neg).clip(lower=0)
     elif _param_bool(tuning_params, "background_component_enabled") and len(frames) > 0:
@@ -742,13 +747,16 @@ def run_reference_component_unmixing(
         tuning_params=tuning_params,
         progress_fn=progress_fn,
     )
-    work_df = legacy_log_transform(raw_df, tuning_params=tuning_params)
+    # Two spaces: positive/negative calling gates populations on the log
+    # transform its thresholds were tuned for; spectra are built and solved in
+    # the unmixing space (unmixing_transform; identical to call_df at the
+    # default unmixing_power=0).
+    call_df = legacy_log_transform(raw_df, tuning_params=tuning_params)
+    unmix_df = unmixing_transform(raw_df, tuning_params=tuning_params)
     _notify_progress(progress_fn, "Spectral import | calling reference-positive cells")
 
     include_tokens = _clean_reference_tokens(reference_tokens)
-    reference_map = _reference_marker_by_obs(obs, include_tokens=include_tokens)
-    if len(reference_map) == 0:
-        reference_map = _reference_marker_by_path(input_paths, include_tokens=include_tokens)
+    reference_map = resolve_reference_map(obs, input_paths, include_tokens=include_tokens)
     if len(reference_map) == 0:
         raise ValueError(
             "No reference single-stain files were found. This workflow learns marker spectra from reference files, "
@@ -785,8 +793,8 @@ def run_reference_component_unmixing(
         idx = obs.index[obs["source_path"].astype(str) == source_path]
         if len(idx) == 0:
             continue
-        ref_df = work_df.loc[idx, :]
-        calls = call_reference_positives(ref_df, strategy, tuning_params=tuning_params)
+        ref_df = unmix_df.loc[idx, :]
+        calls = call_reference_positives(call_df.loc[idx, :], strategy, tuning_params=tuning_params)
         score_labels = calls["score_labels"]
         score_values = calls["score_values"]
         weights = calls["score_weights"]
@@ -876,14 +884,14 @@ def run_reference_component_unmixing(
 
     _notify_progress(progress_fn, "Spectral import | solving marker coefficients")
     coefs, residuals = solve_marker_coefficients(
-        work_df, matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
+        unmix_df, matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
     )
-    coef_df = pd.DataFrame(coefs, index=work_df.index, columns=matrix_used.columns)
+    coef_df = pd.DataFrame(coefs, index=unmix_df.index, columns=matrix_used.columns)
     marker_cols = [col for col in coef_df.columns if col != BACKGROUND_COMPONENT_NAME]
     df = coef_df.loc[:, marker_cols].copy()
 
     for source_file, idx in obs.groupby("source_file").groups.items():
-        locs = work_df.index.get_indexer(idx)
+        locs = unmix_df.index.get_indexer(idx)
         valid = locs[locs >= 0]
         vals = residuals[valid] if len(valid) > 0 else np.array([], dtype=float)
         audit_rows.append(
@@ -929,6 +937,13 @@ def run_external_matrix_unmixing(
     tuning_params: dict | None = None,
     progress_fn=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+    """Unmix with a supplied detector-by-marker matrix.
+
+    Events are solved after unmixing_transform(), so the matrix must have been
+    built at the same unmixing_power: 1.0 (linear) for vendor/compensation
+    matrices, the swept winner for an autotune matrix. The default (0, legacy
+    log) suits neither a vendor matrix; set unmixing_power explicitly.
+    """
     tuning_params = resolve_tuning_parameters(tuning_params)
     raw_df, obs, dfxy, audit_rows, warnings = build_raw_detector_triplet(
         input_paths=input_paths,
@@ -958,9 +973,13 @@ def run_external_matrix_unmixing(
         raise ValueError("No selected detector columns overlap the spectral matrix detector rows.")
 
     matrix_used = matrix.loc[overlap, :].copy()
-    _notify_progress(progress_fn, "Spectral import | solving marker coefficients")
+    power = _param_float(tuning_params, "unmixing_power")
+    _notify_progress(progress_fn, f"Spectral import | solving marker coefficients (unmixing_power={power:g})")
+    # Transform the full detector frame before selecting overlap: at power 0
+    # the legacy log's pooled minimum and outlier clipping use every column.
     coefs, residuals = solve_marker_coefficients(
-        raw_df.loc[:, overlap], matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
+        unmixing_transform(raw_df, tuning_params=tuning_params).loc[:, overlap],
+        matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
     )
     df = pd.DataFrame(coefs, index=raw_df.index, columns=matrix_used.columns)
 
@@ -1554,8 +1573,7 @@ def solve_marker_coefficients(
 
     Single dispatch point for the solver choice: nnls (0), lasso (1), the legacy
     normalize variants (2, 3) and orthogonalize (5). Both unmixing entry points
-    and the autotune sweep call this, so a swept solver_mode actually changes the
-    solve instead of being silently bypassed by a direct scipy.optimize.nnls call.
+    and the autotune scorer in spectral_flow_ifa.py call this.
     """
     tuning_params = resolve_tuning_parameters(tuning_params)
     mode = SOLVER_MODES.get(int(_param_float(tuning_params, "solver_mode")), "nnls")
@@ -1672,7 +1690,34 @@ def nnls_solve_orthogonalized(
     return coefs, residuals
 
 
+def unmixing_transform(df: pd.DataFrame, *, tuning_params: dict | None = None) -> pd.DataFrame:
+    """Detector values in the space spectra are built and solved in.
+
+    unmixing_power selects the transform, following the Box-Cox convention that
+    0 means log:
+      0 (default)  legacy_log_transform: log2 after a pooled-minimum shift, with
+                   outlier clipping. Breaks additivity but evens out detector
+                   noise that grows with signal; it is what earlier real-data
+                   results used.
+      p > 0        signed power sign(y)*|y|**p. 1.0 is the identity, where linear
+                   mixing holds exactly; p < 1 compresses bright values. Not
+                   Box-Cox (y**p - 1)/p: its -1/p shift adds a constant to every
+                   detector, which an intercept-free NNLS can only fit with
+                   marker coefficients. Per-event, no clipping.
+    """
+    power = _param_float(tuning_params, "unmixing_power")
+    if power < 0:
+        raise ValueError(f"unmixing_power must be 0 (log) or > 0 (signed power), got {power}.")
+    if power == 0:
+        return legacy_log_transform(df, tuning_params=tuning_params)
+    values = df.astype(float)
+    if power == 1.0:
+        return values.copy()
+    return np.sign(values) * np.abs(values) ** power
+
+
 def legacy_log_transform(df: pd.DataFrame, *, tuning_params: dict | None = None) -> pd.DataFrame:
+    """Space for positive/negative calling, and for unmixing at unmixing_power=0."""
     tuning_params = resolve_tuning_parameters(tuning_params)
     out = df.astype(float).copy()
     min_value = float(np.nanmin(out.values)) if out.size else 0.0
@@ -2008,6 +2053,42 @@ def _reference_marker_by_obs(
     return out
 
 
+def is_excluded_reference_name(path: str | Path) -> bool:
+    """True when the filename stem contains an unstained/live word.
+
+    Whole words only, split on anything non-alphanumeric: "LIVE_gate" and
+    "Unstained (Cells)" match, "liver" and "olive" do not.
+    """
+    words = set(re.split(r"[^0-9a-z]+", Path(str(path)).stem.lower()))
+    return any(token in words for token in REFERENCE_EXCLUDE_TOKENS)
+
+
+def resolve_reference_map(
+    obs: pd.DataFrame,
+    input_paths: Sequence[str | Path],
+    *,
+    include_tokens: Sequence[str] = REFERENCE_INCLUDE_TOKENS,
+) -> dict[str, str]:
+    """Map source_path -> marker for every single-stain reference file.
+
+    Roles carried in a mixed-detector cache (obs["reference_marker"], filled by
+    build_raw_detector_triplet from __spectral_reference_marker) are
+    authoritative: they were resolved with the keystring of the run that wrote
+    the cache. Otherwise filenames are matched against include_tokens.
+    """
+    if isinstance(obs, pd.DataFrame) and {"source_path", "reference_marker"} <= set(obs.columns):
+        cached = obs.loc[:, ["source_path", "reference_marker"]].fillna("").astype(str)
+        cached = cached[cached["reference_marker"].str.strip() != ""].drop_duplicates()
+        if len(cached) > 0:
+            if cached["source_path"].duplicated().any():
+                raise ValueError("Mixed-detector cache assigns more than one reference marker to one source file.")
+            return dict(zip(cached["source_path"], cached["reference_marker"]))
+    reference_map = _reference_marker_by_obs(obs, include_tokens=include_tokens)
+    if len(reference_map) == 0:
+        reference_map = _reference_marker_by_path(input_paths, include_tokens=include_tokens)
+    return reference_map
+
+
 def _infer_reference_marker(path: Path, include_tokens: Sequence[str] = REFERENCE_INCLUDE_TOKENS) -> str:
     """Infer the marker name from a single-stain reference filename.
 
@@ -2027,7 +2108,7 @@ def _infer_reference_marker(path: Path, include_tokens: Sequence[str] = REFERENC
     stem = str(path.stem)
     clean = stem.replace("_", " ")
     lowered_stem = clean.lower()
-    if any(token in lowered_stem for token in REFERENCE_EXCLUDE_TOKENS):
+    if is_excluded_reference_name(path):
         return ""
 
     matched = ""
@@ -2059,8 +2140,12 @@ def _infer_reference_marker(path: Path, include_tokens: Sequence[str] = REFERENC
         return ""
     skip = set(REFERENCE_SKIP_TOKENS) | set(matched_words)
 
-    for token in tokens[idx + span + 1 :] or tokens[idx + span :]:
-        if token.lower() in skip:
+    # The marker is the first non-noise word after the keystring. Plate/group
+    # labels ("Group-2") are noise; a fluorochrome after the marker
+    # ("CD45 BV421") is not reached.
+    for token in tokens[idx + span :]:
+        lowered_token = token.lower()
+        if lowered_token in skip or lowered_token.startswith("group-"):
             continue
         return token
 
