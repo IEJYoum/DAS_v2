@@ -244,41 +244,32 @@ def run_interactive(
         input_sources, input_folder = _choose_input_sources(log_input, input_default, print_fn=print_fn, get_file_fn=get_file_fn)
         input_suffixes = [FLOW_INPUT_EXTENSION]
 
-    # --- Replay from previous run config ---
+    # --- Replay a saved run config ---
+    # Every run writes <project>/spectral_lastrun.json. Replay applies one to the
+    # files selected above: strategy, keystring, noise/solver, tuning overrides
+    # and, for autotune, the saved matrix. Stem and event limit are re-asked so
+    # a subset-tuned run can be applied to the full set.
     lastrun_default = str(Path(data_folder) / LASTRUN_FILENAME)
-    lastrun_exists = Path(lastrun_default).is_file()
-    replay_config = None
-    if lastrun_exists:
-        print_fn("")
-        print_fn("A previous run config was found: " + lastrun_default)
+    replay_path = ""
+    print_fn("")
+    print_fn("Replay: apply a previous run's settings (spectral_lastrun.json) to the selected files and skip setup.")
+    print_fn("Use it to tune on a subset or another dataset, then apply the result here. An autotune run's saved matrix is reused.")
+    if Path(lastrun_default).is_file():
+        print_fn("Last run config in this project folder: " + lastrun_default)
         if _choose_yes_no(log_input, "replay previous run config? (y/N): ", default="n"):
-            replay_config = _load_lastrun(lastrun_default)
-            if replay_config:
-                print_fn("Loaded run config. Replaying settings:")
-                for key in ("strategy", "reference_tokens", "noise_mode", "solver_mode", "normalize_columns", "stem", "event_limit_per_file"):
-                    if key in replay_config:
-                        print_fn(f"  {key}: {replay_config[key]}")
-                if replay_config.get("tuning_overrides"):
-                    print_fn("  tuning overrides:", len(replay_config["tuning_overrides"]))
-                    for k, v in replay_config["tuning_overrides"].items():
-                        print_fn(f"    {k} = {v}")
-            else:
-                print_fn("Could not parse run config, continuing with manual setup.")
-                replay_config = None
+            replay_path = _choose_path(log_input, lastrun_default, "run config path", must_exist=True, must_be_file=True, print_fn=print_fn)
     else:
-        print_fn("")
-        print_fn("Replay from config: provide a path to a spectral_lastrun.json to skip setup, or send blank to configure manually.")
-        replay_path_raw = str(_call_input(log_input, "config path (blank to skip): ", default="")).strip().strip('"')
-        if replay_path_raw:
-            replay_config = _load_lastrun(replay_path_raw)
-            if replay_config:
-                print_fn("Loaded run config from:", replay_path_raw)
-                for key in ("strategy", "reference_tokens", "noise_mode", "solver_mode", "normalize_columns", "stem", "event_limit_per_file"):
-                    if key in replay_config:
-                        print_fn(f"  {key}: {replay_config[key]}")
-            else:
-                print_fn("Could not parse config, continuing with manual setup.")
-                replay_config = None
+        replay_path = str(_call_input(log_input, "config path (blank to skip): ", default="")).strip().strip('"')
+    replay_config = _load_lastrun(replay_path) if replay_path else None
+    if replay_path and not replay_config:
+        print_fn("Could not parse run config, continuing with manual setup:", replay_path)
+    if replay_config:
+        print_fn("Loaded run config from:", replay_path)
+        for key in ("strategy", "reference_tokens", "noise_mode", "solver_mode", "normalize_columns", "stem", "event_limit_per_file", "autotune_matrix_path"):
+            if key in replay_config:
+                print_fn(f"  {key}: {replay_config[key]}")
+        for k, v in dict(replay_config.get("tuning_overrides") or {}).items():
+            print_fn(f"  tuning override {k} = {v}")
 
     if replay_config:
         strategy = str(replay_config.get("strategy", "consensus_score_and_cluster"))
@@ -295,18 +286,6 @@ def run_interactive(
             for k, v in dict(replay_config.get("tuning_overrides") or {}).items()
             if k in core.DEFAULT_TUNING_PARAMETERS
         }
-        # When replaying an autotune run, use the saved matrix if it exists,
-        # otherwise re-run the sweep.
-        if strategy == "autotune":
-            saved_matrix = replay_config.get("autotune_matrix_path", "")
-            if saved_matrix and Path(saved_matrix).is_file():
-                print_fn(f"Replaying autotune with saved matrix: {saved_matrix}")
-                # The sweep will be skipped; we set autotune_matrix_path directly
-                # after tuning_params are built (see below).
-            else:
-                print_fn("Replaying autotune — matrix not found, sweep will re-run.")
-        event_limit_raw = replay_config.get("event_limit_per_file")
-        event_limit = int(event_limit_raw) if event_limit_raw not in (None, "", "all") else None
     else:
         print_fn("")
         print_fn("Step 3: choose how detector channels should become output marker values.")
@@ -361,6 +340,7 @@ def run_interactive(
                 core,
                 input_paths,
                 remembered,
+                allow_none=bool(replay_config) and strategy == "autotune",
             )
 
         if not replay_config:
@@ -429,9 +409,11 @@ def run_interactive(
             else:
                 print_fn("Event loading: random subset, up to", event_limit, "events per input file.")
         else:
-            stem = stem_default
+            print_fn("")
+            print_fn("Replay: choose the output stem and event loading for THIS run (defaults are the replayed run's).")
+            stem = _prompt_with_default(log_input, stem_default, "output stem").strip() or stem_default
             print_fn("Output stem:", stem)
-            event_limit = int(replay_config.get("event_limit_per_file")) if replay_config.get("event_limit_per_file") not in (None, "", "all") else None
+            event_limit = _choose_event_limit(log_input, print_fn, str(replay_config.get("event_limit_per_file") or "all"))
 
         tuning_params = {}
         tuning_params.update(NOISE_MODES.get(noise_mode, {}))
@@ -470,36 +452,44 @@ def run_interactive(
         print_fn("detectors:", ",".join(detector_columns))
         print_fn("dfxy scatter:", ",".join(scatter_columns) or "[none]")
         # --- Autotune: run parameter sweep BEFORE the main import ---
+        autotune_deploy = ""
         if strategy == "autotune":
-            # Autotune is a UI-level concept: the sweep builds a matrix at its
-            # winning unmixing_power, then the import runs external_matrix at
-            # that same power (carried in tuning_overrides, so replay keeps it).
-            core_strategy = "external_matrix"
-            saved_matrix = (replay_config or {}).get("autotune_matrix_path", "")
-            if saved_matrix and Path(saved_matrix).is_file():
-                autotune_matrix_path = saved_matrix
-                autotune_params = dict((replay_config or {}).get("autotune") or {})
-                print_fn(f"Reusing saved autotune matrix: {autotune_matrix_path}")
+            # Autotune is a UI-level concept. A fresh run sweeps and deploys the
+            # winning matrix. A replay either rebuilds the matrix from the
+            # selected files' own controls with the saved settings (consensus
+            # with consensus_overrides) or reuses the saved matrix.
+            if replay_config:
+                autotune_params = dict(replay_config.get("autotune") or {})
+                autotune_deploy = _choose_autotune_deploy(
+                    log_input, print_fn, core, input_paths, reference_tokens, autotune_params, input_mode,
+                )
             else:
                 print_fn("")
                 print_fn("Running autotune parameter sweep...")
-                autotune_matrix_path, autotune_params = _run_autotune_sweep(
+                _matrix, autotune_params = _run_autotune_sweep(
                     core, input_paths, detector_columns, scatter_columns,
                     event_limit, data_folder, stem,
                     progress_fn=lambda phase: _tick_progress(progress_tick_fn, phase),
                     print_fn=print_fn,
                     reference_tokens=reference_tokens,
                 )
-                tuning_overrides["unmixing_power"] = float(autotune_params["autotune_unmixing_power"])
-                tuning_params["unmixing_power"] = tuning_overrides["unmixing_power"]
+                autotune_deploy = "reuse"
                 print_fn("")
                 print_fn("Autotune winning parameters:")
                 for k in sorted(autotune_params):
                     print_fn(f"  {k} = {autotune_params[k]}")
-            print_fn(
-                f"Using external matrix (unmixing_power={tuning_params.get('unmixing_power', 1.0):g}): "
-                f"{autotune_matrix_path}"
-            )
+            if autotune_deploy == "rebuild":
+                core_strategy = "consensus_score_and_cluster"
+                tuning_params.update(autotune_params["consensus_overrides"])
+                print_fn("Rebuilding the matrix from these files' controls with the saved autotune settings.")
+            else:
+                core_strategy = "external_matrix"
+                autotune_matrix_path = str(autotune_params["autotune_matrix_path"])
+                tuning_params["unmixing_power"] = float(autotune_params["autotune_unmixing_power"])
+                print_fn(
+                    f"Using saved autotune matrix (unmixing_power={tuning_params['unmixing_power']:g}): "
+                    f"{autotune_matrix_path}"
+                )
             print_fn("")
 
         print_fn("Running spectral import now.")
@@ -543,6 +533,7 @@ def run_interactive(
             "tuning_params_used": tuning_params,
             "autotune_matrix_path": autotune_matrix_path or "",
             "autotune": autotune_params,
+            "autotune_deploy": autotune_deploy,
         }
     )
     for warning in list(meta.get("warnings") or []):
@@ -578,8 +569,7 @@ def run_interactive(
         "tuning_overrides": tuning_overrides,
         "tuning_params_used": tuning_params,
     }
-    if autotune_matrix_path:
-        lastrun_config["autotune_matrix_path"] = autotune_matrix_path
+    if autotune_params:
         lastrun_config["autotune"] = autotune_params
     lastrun_path = _save_lastrun(data_folder, lastrun_config)
     print_fn("saved run config:", lastrun_path)
@@ -740,163 +730,176 @@ def _choose_path(log_input, current_value: str, label: str, *, mkdir: bool = Fal
 # ---------------------------------------------------------------------------
 # Autotune: 3-level parameter sweep -> exports a cleaned spectral matrix CSV
 #
-# Cheap proxy sweep. Positive/negative calls are made once (log space, like
-# every reference strategy); per unmixing_power the components, background
-# pool and sampled reference cells are rebuilt once and cached; each combo then
-# rebuilds only the matrix (core build_reference_matrix) and solves the sampled
-# reference cells (core solve_marker_coefficients). The winning matrix is
-# deployed through external_matrix with the winning unmixing_power.
+# Every swept name is a core tuning parameter, and the fixed choices below are
+# too, so a consensus_score_and_cluster run with the winner's overrides
+# (autotune_params["consensus_overrides"]) builds the same matrix.
 #
-# floor_quantile: per detector, quantile ACROSS marker profiles subtracted from
-#   every marker (core parameter of the same name).
+# Positive/negative calls are made once (log space, consensus). Per
+# unmixing_power the components, background pool and sampled cells are built
+# once and cached; each combo rebuilds only the matrix (core
+# build_reference_matrix) and solves the sampled cells (core
+# solve_marker_coefficients).
+#
+# floor_quantile: per detector, a quantile ACROSS marker spectra subtracted
+#   from every marker. 0 = the per-detector minimum; -1 = off (single point,
+#   never refined toward).
 # background_quantile: per detector, quantile ACROSS CELLS of the background
-#   pool (unstained file when found, else consensus-negative reference cells).
-# global_background_strength: multiplier on that background profile before it
-#   is subtracted from every marker; 0.0 disables it. Passed to
-#   build_reference_matrix as shared_negative_strength, unclamped.
-# unmixing_power: transform applied to detector values before building and
-#   solving (core unmixing_transform). 0 = legacy log (default; what earlier
-#   real-data results used), 1 = linear, between = signed power compressing
-#   bright values. 0 is a single point: refinement never interpolates between
-#   log and a power, since values just above 0 are a poor imitation of log.
+#   pool (unstained cells when present, else reference negatives).
+# background_subtraction_strength: multiplier on that background profile
+#   before it is subtracted from every marker; 0 disables it. With the floor
+#   on, an equal subtraction is cancelled by the floor except where it clips
+#   values to zero, so its effect is clearest with the floor off.
+# unmixing_power: 0 = legacy log (single point), else signed power; 1 = linear.
 #
-# Score: off-target FRACTION of the coefficient mass in reference cells. It is
-# scale-free, so combos at different unmixing_power are comparable (per-cell
-# coefficients are not).
+# Score (lower is better), from control cells only, each term scale-free
+# (masses are divided by the mean on-target amount of positive cells):
+#   positive off-target fraction  share of positive cells' coefficient mass on
+#                                 markers other than the file's stain
+#   + negative off-target leak    negatives' mass on other markers
+#   + unstained leak              unstained cells' mass on any marker
+#   + 0.1 x negative own leak     negatives' mass on their own file's marker;
+#                                 weak because real dim background is likely
+# All terms are written to the sweep log so a different weighting can be
+# applied to an existing sweep without re-running it.
 #
-# Not swept, though the core exposes them (see STRATEGY_TUNABLE_PARAMS and
-# SHARED_TUNABLE_PARAMS for the human-tunable set): positive-calling settings
-# (weighted_score_*, strict_weighted_*, cluster_*, soft_weight_*,
-# legacy_outlier_sd), noise mode (reference_negative_subtraction_strength,
-# background_component_enabled, shared_negative_subtraction_enabled), matrix
-# cleanup (component_tail_*, component_similarity_*), bright-event weighting
-# (global_bright_*) and solver (solver_mode, lasso_alpha, normalize_columns).
-# Never sweep marker_*, pair_note_*, crosstalk_warning_score or score_*: they
-# configure the evaluation ruler, so sweeping them optimises the metric.
+# Range history: first real run (A_01, 2026-11) had the off-target fraction
+# falling monotonically from log (0.82) to power 1.0 (0.15), optimum at the old
+# upper edge; floor_quantile best at 0, worse above it.
 # ---------------------------------------------------------------------------
 
 _AUTOTUNE_COARSE_GRID = {
-    "floor_quantile": [0.0, 0.05, 0.10, 0.20, 0.35],
+    "floor_quantile": [-1.0, 0.0, 0.025, 0.05, 0.10],
     "background_quantile": [0.50, 0.75, 0.90, 0.95, 0.99],
-    "global_background_strength": [0.0, 0.5, 1.0, 1.5, 2.0],
-    "unmixing_power": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "background_subtraction_strength": [0.0, 0.5, 1.0, 1.5, 2.0],
+    "unmixing_power": [0.0, 0.75, 1.0, 1.25, 1.5],
 }
 _AUTOTUNE_PARAMS = tuple(_AUTOTUNE_COARSE_GRID)
-_AUTOTUNE_MAX_CELLS_PER_MARKER = 200   # reference cells sampled per marker when scoring
-_AUTOTUNE_ON_TARGET_FLOOR = 0.01       # below this mean on-target coefficient, combo is rejected
+# Values that are modes, not points on a scale: kept alone when they win, and
+# never interpolated toward during refinement.
+_AUTOTUNE_POINT_VALUES = {"floor_quantile": -1.0, "unmixing_power": 0.0}
+# Fixed by autotune: spectra are raw positive means; background is subtracted,
+# not added as a solver column.
+_AUTOTUNE_FIXED = {
+    "reference_negative_subtraction_strength": 0.0,
+    "shared_negative_subtraction_enabled": 1.0,
+    "background_component_enabled": 0.0,
+}
+_AUTOTUNE_CELLS_PER_GROUP = 200        # sampled positives, negatives (per marker) and unstained cells
+_AUTOTUNE_ON_TARGET_FLOOR = 0.01       # mean on-target amount of positives below this -> rejected
+_AUTOTUNE_NEG_OWN_WEIGHT = 0.1
 _EPS = 1.0e-9
 
 
-def _autotune_refine_grid(original_values: list[float], best: float, n_points: int = 3) -> list[float]:
-    """Create a refined grid around *best* using the nearest neighbours."""
-    import numpy as _np
+def _autotune_refine_grid(original_values: list[float], best: float) -> list[float]:
+    """Refine around *best*: best itself plus the midpoints toward its neighbours.
+
+    (An evenly spaced lo..hi grid drops best whenever the neighbours are
+    unevenly spaced, e.g. 0.75 between 0.5 and 0.9.)
+    """
     vals = sorted(set(original_values))
     idx = min(range(len(vals)), key=lambda i: abs(vals[i] - best))
     lo = vals[max(0, idx - 1)]
     hi = vals[min(len(vals) - 1, idx + 1)]
-    return [round(v, 6) for v in _np.linspace(lo, hi, n_points).tolist()]
+    return sorted({round(v, 6) for v in ((lo + best) / 2.0, best, (best + hi) / 2.0)})
 
 
-def _autotune_refine_power(values: list[float], best: float) -> list[float]:
-    """Refine unmixing_power: log (0) stays a single point; powers refine among powers."""
-    if best == 0.0:
-        return [0.0]
-    return _autotune_refine_grid([v for v in values if v > 0.0], best)
+def _autotune_refine_axis(name: str, values: list[float], best: float) -> list[float]:
+    """Refine one axis; a point value (off / log) stays alone and is never interpolated toward."""
+    point = _AUTOTUNE_POINT_VALUES.get(name)
+    if point is None:
+        return _autotune_refine_grid(values, best)
+    if best == point:
+        return [point]
+    return _autotune_refine_grid([v for v in values if v != point], best)
 
 
-def _autotune_build_matrix(
-    core,
-    mean_profiles: dict,
-    background_frames: list,
-    detector_columns: list[str],
-    floor_q: float,
-    bg_q: float,
-    bg_strength: float,
-):
+def _autotune_overrides(combo: dict) -> dict:
+    """Core tuning overrides that reproduce one combo in a consensus run."""
+    return {**_AUTOTUNE_FIXED, **{name: float(combo[name]) for name in _AUTOTUNE_PARAMS}}
+
+
+def _autotune_build_matrix(core, mean_profiles: dict, background_frames: list, detector_columns: list[str], combo: dict):
     """Build the matrix for one combo with the core's production builder."""
-    params = core.resolve_tuning_parameters({
-        "floor_quantile": floor_q,
-        "background_quantile": bg_q,
-        "shared_negative_subtraction_enabled": 1.0,
-        "background_component_enabled": 0.0,
-    })
     matrix_df, _names = core.build_reference_matrix(
         {marker: [profile] for marker, profile in mean_profiles.items()},
         background_frames,
         detector_columns,
-        tuning_params=params,
-        shared_negative_strength=bg_strength,
+        tuning_params=core.resolve_tuning_parameters(_autotune_overrides(combo)),
     )
     return matrix_df
 
 
-def _autotune_score_combo(
-    core,
-    mean_profiles: dict,
-    background_frames: list,
-    ref_groups: dict,
-    detector_columns: list[str],
-    floor_q: float,
-    bg_q: float,
-    bg_strength: float,
-) -> tuple[float, dict]:
-    """Score one combo; lower is better.
-
-    Score = off-target fraction: of all coefficient mass the solver assigns to
-    sampled reference cells, the share given to markers other than the one the
-    file was stained with. A combo whose mean on-target coefficient falls below
-    _AUTOTUNE_ON_TARGET_FLOOR is rejected (+1e6), so flattening all signal
-    cannot win. It measures cross-talk only; it cannot tell a good matrix from
-    an over-subtracted one that still clears the floor.
-    """
-    matrix_df = _autotune_build_matrix(core, mean_profiles, background_frames, detector_columns,
-                                       floor_q, bg_q, bg_strength)
+def _autotune_score_combo(core, space: dict, detector_columns: list[str], combo: dict) -> tuple[float, dict]:
+    """Score one combo on control cells; lower is better. See the section header."""
+    matrix_df = _autotune_build_matrix(core, space["profiles"], space["background"], detector_columns, combo)
     s = matrix_df.values.astype(float)
+    nan = float("nan")
     detail = {
-        "off_target_per_cell": float("nan"),
-        "on_target_per_cell": float("nan"),
-        "off_target_fraction": float("nan"),
-        "n_cells_scored": 0,
+        "positive_off_fraction": nan,
+        "negative_off_leak": nan,
+        "unstained_leak": nan,
+        "negative_own_leak": nan,
+        "on_target_per_positive": nan,
+        "n_positive": 0,
+        "n_negative": 0,
+        "n_unstained": int(len(space["unstained"])),
         "n_markers_in_matrix": int(matrix_df.shape[1]),
         "matrix_total": float(s.sum()),
         "dead_detectors": int((s.sum(axis=1) <= _EPS).sum()),
         "rejected": "",
     }
-
     if s.sum() < _EPS:
         detail["rejected"] = "empty_matrix"
         return float("inf"), detail
 
     markers = list(matrix_df.columns)
     solve_params = core.resolve_tuning_parameters({})
-    total_off = 0.0
-    total_on = 0.0
-    n_cells = 0
-    for expected_marker, ref_df in ref_groups.items():
-        if expected_marker not in markers:
-            continue
-        on_idx = markers.index(expected_marker)
-        coefs, _residuals = core.solve_marker_coefficients(
-            ref_df.loc[:, list(matrix_df.index)], matrix_df, tuning_params=solve_params,
-        )
-        on = float(coefs[:, on_idx].sum())
-        total_on += on
-        total_off += float(coefs.sum()) - on
-        n_cells += int(coefs.shape[0])
+    detectors = list(matrix_df.index)
 
-    detail["n_cells_scored"] = n_cells
-    total = total_off + total_on
-    if n_cells == 0 or total <= _EPS:
-        detail["rejected"] = "no_cells_scored" if n_cells == 0 else "no_signal"
+    def _solve(frame):
+        coefs, _residuals = core.solve_marker_coefficients(frame.loc[:, detectors], matrix_df, tuning_params=solve_params)
+        return coefs
+
+    pos_on = pos_off = neg_own = neg_off = 0.0
+    n_pos = n_neg = 0
+    for marker in markers:
+        own = markers.index(marker)
+        for kind, frame in (("pos", space["positives"].get(marker)), ("neg", space["negatives"].get(marker))):
+            if frame is None or len(frame) == 0:
+                continue
+            coefs = _solve(frame)
+            on = float(coefs[:, own].sum())
+            off = float(coefs.sum()) - on
+            if kind == "pos":
+                pos_on, pos_off, n_pos = pos_on + on, pos_off + off, n_pos + len(frame)
+            else:
+                neg_own, neg_off, n_neg = neg_own + on, neg_off + off, n_neg + len(frame)
+    detail["n_positive"] = n_pos
+    detail["n_negative"] = n_neg
+    if n_pos == 0 or pos_on + pos_off <= _EPS:
+        detail["rejected"] = "no_positive_signal"
         return float("inf"), detail
 
-    detail["off_target_per_cell"] = total_off / n_cells
-    detail["on_target_per_cell"] = total_on / n_cells
-    detail["off_target_fraction"] = total_off / total
-    penalty = 1e6 if detail["on_target_per_cell"] < _AUTOTUNE_ON_TARGET_FLOOR else 0.0
-    if penalty:
+    on_per_pos = pos_on / n_pos
+    detail["on_target_per_positive"] = on_per_pos
+    if on_per_pos < _AUTOTUNE_ON_TARGET_FLOOR:
         detail["rejected"] = "on_target_below_floor"
-    return detail["off_target_fraction"] + penalty, detail
+        return float("inf"), detail
+
+    detail["positive_off_fraction"] = pos_off / (pos_on + pos_off)
+    detail["negative_off_leak"] = (neg_off / n_neg) / on_per_pos if n_neg else 0.0
+    detail["negative_own_leak"] = (neg_own / n_neg) / on_per_pos if n_neg else 0.0
+    detail["unstained_leak"] = (
+        float(_solve(space["unstained"]).sum()) / len(space["unstained"]) / on_per_pos
+        if len(space["unstained"]) else 0.0
+    )
+    score = (
+        detail["positive_off_fraction"]
+        + detail["negative_off_leak"]
+        + detail["unstained_leak"]
+        + _AUTOTUNE_NEG_OWN_WEIGHT * detail["negative_own_leak"]
+    )
+    return score, detail
 
 
 def _detect_unstained_paths(core, obs, input_paths, include_tokens=None):
@@ -927,21 +930,19 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
     """Build components, sweep matrix params, save the winning matrix CSV.
 
     Returns (matrix_path, autotune_params); raises when no matrix can be built.
-    autotune_params["autotune_unmixing_power"] must be used when the matrix is
-    deployed (external_matrix solves after unmixing_transform).
+    Deploy the matrix with external_matrix at autotune_params' unmixing_power,
+    or run consensus_score_and_cluster with autotune_params["consensus_overrides"]
+    to rebuild the same matrix from these (or other) controls.
 
-    Stages: coarse grid, then two refinements (3 points per parameter) around
-    the best combo. Components use consensus_score_and_cluster positive calls
-    with per-marker negative subtraction off. For a faithful (and far slower)
-    comparison of strategies with the full scorecard, use
-    core.run_parameter_sweep().
+    Stages: coarse grid, then two refinements (3 points per axis) around the
+    best combo. For a faithful but far slower strategy comparison with the full
+    scorecard, use core.run_parameter_sweep().
     """
     import numpy as _np
     import pandas as _pd
     from itertools import product as _product
 
-    # Use strength=0 so components are raw positive means (no per-marker sub)
-    tp = core.resolve_tuning_parameters({"reference_negative_subtraction_strength": 0.0})
+    tp = core.resolve_tuning_parameters(_AUTOTUNE_FIXED)
 
     print_fn("Autotune | building raw detector data and reference components...")
     raw_df, obs, dfxy, audit_rows, warnings = core.build_raw_detector_triplet(
@@ -965,24 +966,17 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
             + ". No unmixing strategy can run without reference files."
         )
 
-    obs["spectral_file_role"] = "sample"
-    obs["reference_marker"] = ""
-    for source_path, marker in reference_map.items():
-        key = obs["source_path"].astype(str) == source_path
-        obs.loc[key, "spectral_file_role"] = "reference"
-        obs.loc[key, "reference_marker"] = marker
-
-    # --- Background source: unstained files when present ---
+    # --- Unstained cells: background pool and leak scoring ---
     unstained_idx = []
     for sp in _detect_unstained_paths(core, obs, input_paths, include_tokens):
         idx = obs.index[obs["source_path"].astype(str) == sp]
         if len(idx) > 0:
             unstained_idx.append(idx)
-            print_fn(f"Autotune | unstained background source: {Path(sp).name} ({len(idx)} cells)")
+            print_fn(f"Autotune | unstained control: {Path(sp).name} ({len(idx)} cells)")
 
-    # --- Positive/negative calls, once (they do not depend on unmixing_power) ---
+    # --- Positive/negative calls, once (independent of every swept setting) ---
     keys: dict[str, list] = {}
-    consensus_neg_idx: list = []
+    neg_idx_all: list = []
     for source_path, marker in reference_map.items():
         idx = obs.index[obs["source_path"].astype(str) == source_path]
         if len(idx) == 0:
@@ -991,7 +985,7 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
         pos_key = calls["pos_key"]
         neg_key = calls["neg_key"]
         if int(neg_key.sum()) > 0:
-            consensus_neg_idx.append(idx[neg_key.values])
+            neg_idx_all.append(idx[neg_key.values])
         if int(pos_key.sum()) == 0:
             # Consensus needs the weighted score AND KMeans to agree, and
             # replace_outliers() clips on the POOLED frame, so a detector bright
@@ -1013,31 +1007,36 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
 
     if unstained_idx:
         background_idx, background_source = unstained_idx, "unstained"
-    elif consensus_neg_idx:
-        background_idx, background_source = consensus_neg_idx, "consensus_negative"
+    elif neg_idx_all:
+        background_idx, background_source = neg_idx_all, "reference_negatives"
     else:
         background_idx, background_source = [], "none"
     print_fn(
-        f"Autotune | global background: {sum(len(i) for i in background_idx)} cells "
+        f"Autotune | background pool: {sum(len(i) for i in background_idx)} cells "
         f"(source={background_source})"
     )
 
-    # Sampled reference cells per marker, fixed across every combo
-    ref_idx: dict[str, _pd.Index] = {}
-    for marker in keys:
-        mask = (obs["spectral_file_role"] == "reference") & (obs["reference_marker"] == marker)
-        idx = obs.index[mask]
-        if len(idx) > _AUTOTUNE_MAX_CELLS_PER_MARKER:
-            idx = _pd.Index(_pd.Series(idx).sample(n=_AUTOTUNE_MAX_CELLS_PER_MARKER, random_state=0))
-        ref_idx[marker] = idx
-    total_ref = sum(len(i) for i in ref_idx.values())
-    print_fn(f"Autotune | {total_ref} reference cells across {len(ref_idx)} markers")
+    # Scored cells, fixed across every combo
+    def _sample(index):
+        index = _pd.Index(index)
+        if len(index) > _AUTOTUNE_CELLS_PER_GROUP:
+            index = _pd.Index(_pd.Series(index).sample(n=_AUTOTUNE_CELLS_PER_GROUP, random_state=0))
+        return index
+
+    pos_sample = {m: _sample(_np.concatenate([idx[p.values] for idx, p, _n in e])) for m, e in keys.items()}
+    neg_sample = {m: _sample(_np.concatenate([idx[n.values] for idx, _p, n in e])) for m, e in keys.items()}
+    unstained_sample = _sample(_np.concatenate(unstained_idx)) if unstained_idx else _pd.Index([])
+    print_fn(
+        f"Autotune | scoring cells: {sum(len(i) for i in pos_sample.values())} positive, "
+        f"{sum(len(i) for i in neg_sample.values())} negative, {len(unstained_sample)} unstained, "
+        f"across {len(keys)} markers"
+    )
 
     detector_cols = list(raw_df.columns)
-    space_cache: dict[float, tuple] = {}
+    space_cache: dict[float, dict] = {}
 
-    def _space(power: float) -> tuple:
-        """(mean_profiles, background_frames, ref_groups) at one unmixing_power."""
+    def _space(power: float) -> dict:
+        """Spectra, background pool and scored cells at one unmixing_power."""
         if power not in space_cache:
             unmix_df = core.unmixing_transform(raw_df, tuning_params={"unmixing_power": power})
             profiles = {}
@@ -1049,16 +1048,18 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
                         series.append(component)
                 if series:
                     profiles[marker] = _pd.concat(series, axis=1).mean(axis=1)
-            space_cache[power] = (
-                profiles,
-                [unmix_df.loc[idx, :] for idx in background_idx],
-                {marker: unmix_df.loc[idx, :] for marker, idx in ref_idx.items()},
-            )
+            space_cache[power] = {
+                "profiles": profiles,
+                "background": [unmix_df.loc[idx, :] for idx in background_idx],
+                "positives": {m: unmix_df.loc[i, :] for m, i in pos_sample.items()},
+                "negatives": {m: unmix_df.loc[i, :] for m, i in neg_sample.items()},
+                "unstained": unmix_df.loc[unstained_sample, :],
+            }
         return space_cache[power]
 
     # --- Sweep stages ----------------------------------------------------
     best_score = float("inf")
-    best_combo = tuple(_AUTOTUNE_COARSE_GRID[name][0] for name in _AUTOTUNE_PARAMS)
+    best_combo = {name: _AUTOTUNE_COARSE_GRID[name][0] for name in _AUTOTUNE_PARAMS}
     best_detail: dict = {}
     sweep_rows: list = []
 
@@ -1066,28 +1067,25 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
         import time as _time
 
         nonlocal best_score, best_combo, best_detail
-        combo_list = list(_product(*(grid[name] for name in _AUTOTUNE_PARAMS)))
+        combo_list = [dict(zip(_AUTOTUNE_PARAMS, values)) for values in _product(*(grid[n] for n in _AUTOTUNE_PARAMS))]
         print_fn(f"Autotune | {stage} sweep: {len(combo_list)} combos")
         started = _time.perf_counter()
         improvements = 0
         for step, combo in enumerate(combo_list, 1):
-            fq, bq, gs, power = combo
-            profiles, background_frames, ref_groups = _space(power)
-            score, detail = _autotune_score_combo(
-                core, profiles, background_frames, ref_groups, detector_cols, fq, bq, gs
-            )
+            score, detail = _autotune_score_combo(core, _space(combo["unmixing_power"]), detector_cols, combo)
             is_best = score < best_score
             if is_best:
                 best_score, best_combo, best_detail = score, combo, detail
                 improvements += 1
-                suffix = f" REJECTED({detail['rejected']})" if detail.get("rejected") else ""
                 print_fn(
-                    f"Autotune | {stage} new best: floor_q={fq:.4f} bg_q={bq:.4f} "
-                    f"bg_str={gs:.4f} power={power:.4f} "
-                    f"off-fraction={detail['off_target_fraction']:.4f}{suffix}"
+                    f"Autotune | {stage} new best: "
+                    + " ".join(f"{name}={combo[name]:g}" for name in _AUTOTUNE_PARAMS)
+                    + f" score={score:.4f} (pos-off={detail['positive_off_fraction']:.4f} "
+                    f"neg-off={detail['negative_off_leak']:.4f} unstained={detail['unstained_leak']:.4f} "
+                    f"neg-own={detail['negative_own_leak']:.4f})"
                 )
             row = {"stage": stage, "combo_index": step}
-            row.update(dict(zip(_AUTOTUNE_PARAMS, combo)))
+            row.update(combo)
             row.update({"score": score, "is_best": is_best})
             row.update(detail)
             sweep_rows.append(row)
@@ -1103,11 +1101,15 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
 
     grid = dict(_AUTOTUNE_COARSE_GRID)
     _evaluate("coarse", grid)
+    for name in _AUTOTUNE_PARAMS:
+        scale = [v for v in grid[name] if v != _AUTOTUNE_POINT_VALUES.get(name)]
+        if len(scale) > 1 and best_combo[name] in (min(scale), max(scale)):
+            print_fn(
+                f"Autotune | NOTE {name} best at the edge of its range ({best_combo[name]:g} of "
+                f"{min(scale):g}-{max(scale):g}); the optimum may lie outside it. Extend the range to check."
+            )
     for stage in ("fine", "finest"):
-        grid = {
-            name: (_autotune_refine_power if name == "unmixing_power" else _autotune_refine_grid)(grid[name], best)
-            for name, best in zip(_AUTOTUNE_PARAMS, best_combo)
-        }
+        grid = {name: _autotune_refine_axis(name, grid[name], best_combo[name]) for name in _AUTOTUNE_PARAMS}
         _evaluate(stage, grid)
 
     if not best_detail or best_detail.get("rejected"):
@@ -1117,28 +1119,32 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
             "No matrix kept enough on-target signal; see the sweep lines above."
         )
 
-    best_fq, best_bq, best_gs, best_power = best_combo
+    consensus_overrides = _autotune_overrides(best_combo)
     print_fn(
-        f"Autotune | WINNER: floor_q={best_fq:.4f} bg_q={best_bq:.4f} "
-        f"bg_str={best_gs:.4f} power={best_power:.4f} off-fraction={best_score:.4f}"
+        "Autotune | WINNER: "
+        + " ".join(f"{name}={best_combo[name]:g}" for name in _AUTOTUNE_PARAMS)
+        + f" score={best_score:.4f}"
     )
     print_fn(
-        f"Autotune | winner detail: off/cell={best_detail['off_target_per_cell']:.4f} "
-        f"on/cell={best_detail['on_target_per_cell']:.4f} "
-        f"cells={best_detail['n_cells_scored']} "
-        f"markers={best_detail['n_markers_in_matrix']} "
-        f"dead-detectors={best_detail['dead_detectors']}"
+        f"Autotune | winner detail: positive off-target={best_detail['positive_off_fraction']:.4f} "
+        f"negative off-target leak={best_detail['negative_off_leak']:.4f} "
+        f"unstained leak={best_detail['unstained_leak']:.4f} "
+        f"negative own leak={best_detail['negative_own_leak']:.4f} "
+        f"markers={best_detail['n_markers_in_matrix']} dead-detectors={best_detail['dead_detectors']}"
+    )
+    print_fn(
+        "Autotune | equivalent consensus_score_and_cluster tuning overrides: "
+        + ", ".join(f"{k}={v:g}" for k, v in consensus_overrides.items())
     )
 
-    profiles, background_frames, _groups = _space(best_power)
-    matrix_df = _autotune_build_matrix(core, profiles, background_frames, detector_cols,
-                                       best_fq, best_bq, best_gs)
+    space = _space(best_combo["unmixing_power"])
+    matrix_df = _autotune_build_matrix(core, space["profiles"], space["background"], detector_cols, best_combo)
     matrix_path = str(Path(data_folder) / f"{stem}_autotune_matrix.csv")
     matrix_df.to_csv(matrix_path)
-    print_fn(f"Autotune | saved spectral matrix (unmixing_power={best_power:g}): {matrix_path}")
+    print_fn(f"Autotune | saved spectral matrix (unmixing_power={best_combo['unmixing_power']:g}): {matrix_path}")
 
     # Every combo scored, in evaluation order, so a sweep can be re-examined
-    # without re-running it.
+    # (or re-weighted) without re-running it.
     sweep_frame = _pd.DataFrame(sweep_rows)
     sweep_path = str(Path(data_folder) / f"{stem}_autotune_sweep.csv")
     sweep_frame.to_csv(sweep_path, index=False)
@@ -1169,20 +1175,19 @@ def _run_autotune_sweep(core, input_paths, detector_columns, scatter_columns,
         f"{rejected_total} rejected, background source={background_source}"
     )
 
-    autotune_params = {
-        "autotune_floor_quantile": best_fq,
-        "autotune_background_quantile": best_bq,
-        "autotune_global_background_strength": best_gs,
-        "autotune_unmixing_power": best_power,
-        "autotune_off_target_fraction": best_score,
+    autotune_params = {f"autotune_{name}": best_combo[name] for name in _AUTOTUNE_PARAMS}
+    autotune_params.update({
+        "autotune_score": best_score,
+        "autotune_score_detail": {k: best_detail[k] for k in (
+            "positive_off_fraction", "negative_off_leak", "unstained_leak", "negative_own_leak")},
+        "consensus_overrides": consensus_overrides,
         "autotune_matrix_path": matrix_path,
         "autotune_sweep_log_path": sweep_path,
         "autotune_combos_evaluated": len(sweep_rows),
         "autotune_combos_rejected": rejected_total,
         "autotune_background_source": background_source,
-        "autotune_n_markers": len(profiles),
-        "autotune_n_reference_cells_scored": total_ref,
-    }
+        "autotune_n_markers": len(space["profiles"]),
+    })
     return matrix_path, autotune_params
 
 
@@ -1236,7 +1241,7 @@ def _choose_input_mode(log_input, print_fn, current_value: str) -> str:
     return _normalize_input_mode(raw)
 
 
-def _choose_reference_tokens(log_input, print_fn, core, input_paths, current_value) -> list[str]:
+def _choose_reference_tokens(log_input, print_fn, core, input_paths, current_value, *, allow_none: bool = False) -> list[str]:
     """Resolve the filename keystring that identifies single-stain reference files.
 
     Reference files are how the workflow learns each marker's spectrum, so the
@@ -1245,6 +1250,9 @@ def _choose_reference_tokens(log_input, print_fn, core, input_paths, current_val
     the marker name must follow it ('Spectral Controls CD45.fcs'). Several
     keystrings can be given comma-separated. A matching keystring returns
     without asking; only a stale or absent one prompts.
+
+    allow_none: replaying an autotune run can reuse its saved matrix on files
+    with no controls, so a blank answer accepts that no file matches.
     """
     defaults = [str(token) for token in getattr(core, "REFERENCE_INCLUDE_TOKENS", ("reference",))]
     tokens = _split_list(current_value) or defaults
@@ -1267,10 +1275,49 @@ def _choose_reference_tokens(log_input, print_fn, core, input_paths, current_val
         print_fn("Enter the text that identifies them in the filename, for example 'Spectral Controls'.")
         print_fn("The marker name must follow it, as in 'Spectral Controls CD45.fcs'.")
         print_fn("Separate several keystrings with commas. Unstained/LIVE files are never treated as references.")
-        raw = str(_call_input(log_input, "reference filename keystring: ", default=tokens[0])).strip().strip('"')
+        if allow_none:
+            print_fn("Send blank if these files have no single-stain controls; the saved autotune matrix will be reused.")
+        raw = str(_call_input(log_input, "reference filename keystring: ", default="" if allow_none else tokens[0])).strip().strip('"')
+        if raw == "" and allow_none:
+            return tokens
         if raw == "":
             continue
         tokens = _split_list(raw) or tokens
+
+
+def _choose_autotune_deploy(log_input, print_fn, core, input_paths, reference_tokens, autotune_params, input_mode) -> str:
+    """Replayed autotune: 'rebuild' from these files' controls, or 'reuse' the saved matrix.
+
+    Rebuilding learns spectra from the selected files' own controls with the
+    tuned settings, so it tracks instrument/reagent drift and is preferred when
+    controls exist. Reusing applies the tuning run's matrix unchanged, for data
+    without controls.
+    """
+    matrix = str(autotune_params.get("autotune_matrix_path") or "")
+    has_matrix = matrix != "" and Path(matrix).is_file()
+    has_settings = isinstance(autotune_params.get("consensus_overrides"), dict)
+    if input_mode == "mixed_cache":
+        has_controls = True  # roles are read from the cache when it loads
+    else:
+        has_controls = len(core._reference_marker_by_path(input_paths, include_tokens=reference_tokens)) > 0
+    print_fn("")
+    print_fn("Replaying an autotune run.")
+    if has_controls and has_settings and has_matrix:
+        print_fn("r : rebuild the matrix from these files' single-stain controls using the tuned settings (better when controls exist)")
+        print_fn("u : reuse the tuning run's saved matrix unchanged: " + matrix)
+        raw = str(_call_input(log_input, "rebuild or reuse? (R/u): ", default="r")).strip().lower()
+        return "reuse" if raw.startswith("u") else "rebuild"
+    if has_controls and has_settings:
+        print_fn("Saved matrix not found; rebuilding from these files' controls with the tuned settings.")
+        return "rebuild"
+    if has_matrix:
+        print_fn("No single-stain controls in these files; reusing the tuning run's saved matrix: " + matrix)
+        return "reuse"
+    raise ValueError(
+        "This autotune run config cannot be replayed here: its saved matrix was not found "
+        f"({matrix or 'none recorded'}), and "
+        + ("it has no saved settings to rebuild from." if has_controls else "the selected files have no single-stain controls to rebuild from.")
+    )
 
 
 def _choose_strategy(log_input, print_fn, current_value: str) -> str:
@@ -1317,8 +1364,8 @@ def _choose_strategy(log_input, print_fn, current_value: str) -> str:
                 "description": (
                     "Automatic 3-level parameter sweep. Builds components with consensus "
                     "strategy, then sweeps floor_quantile, background_quantile, global "
-                    "background subtraction strength and unmixing_power (0 = log, 0.25-1 = "
-                    "signed power, 1 = linear) "
+                    "background subtraction strength and unmixing_power (0 = log, "
+                    "0.75-1.5 = signed power, 1 = linear) "
                     "to minimise the off-target fraction in reference cells. All noise/solver/"
                     "tuning choices are set automatically. The winning matrix is saved and "
                     "reused on replay."

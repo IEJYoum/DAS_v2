@@ -109,6 +109,8 @@ DEFAULT_TUNING_PARAMETERS = {
     "background_quantile": 0.50,
     "floor_quantile": 0.0,
     "unmixing_power": 0.0,
+    "biology_probes_enabled": 0.0,
+    "background_subtraction_strength": 1.0,
 }
 STARTER_SWEEP_GRID = {
     "weighted_score_threshold": [2.5, 3.0, 3.5],
@@ -442,6 +444,7 @@ def run_import(
             random_seed=random_seed,
             mixed_cache_path=mixed_cache_path,
             tuning_params=tuning_params,
+            reference_tokens=reference_tokens,
             progress_fn=progress_fn,
         )
     raise ValueError(f"Unknown spectral import strategy: {strategy}")
@@ -658,26 +661,20 @@ def build_reference_matrix(
     detector_columns: Sequence[str],
     *,
     tuning_params: dict | None = None,
-    shared_negative_strength: float | None = None,
     progress_fn=None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Assemble the detector-by-marker spectral matrix from reference components.
 
-    Steps, all driven by tuning_params: average each marker's components, apply
-    either shared-negative subtraction or a pooled background column
-    (background_quantile), remove the per-detector shared floor (floor_quantile),
-    reindex onto detector_columns, then cleanup_similar_components().
+    Steps, all driven by tuning_params: average each marker's components; apply
+    either shared background subtraction (background_subtraction_strength x the
+    background_quantile profile of the background pool) or a pooled background
+    column; remove the per-detector shared floor (floor_quantile; < 0 = off);
+    reindex onto detector_columns; then cleanup_similar_components().
 
     Returns (matrix_used, matrix_column_names). matrix_column_names preserves the
     pre-cleanup column order and includes BACKGROUND_COMPONENT_NAME when a
     background column was added; that is what the audit settings record as
     reference_markers.
-
-    shared_negative_strength: None (production) reads
-    reference_negative_subtraction_strength clamped to >= 1.0, because the
-    "mean" noise mode sets that parameter to 0 to switch off per-marker
-    subtraction while still wanting the shared profile removed once. The
-    autotune sweep passes its swept value explicitly (0.0-2.0, unclamped).
     """
     tuning_params = resolve_tuning_parameters(tuning_params)
     frames = list(background_frames or [])
@@ -690,10 +687,7 @@ def build_reference_matrix(
     if _param_bool(tuning_params, "shared_negative_subtraction_enabled") and len(frames) > 0:
         bg_all = pd.concat(frames, axis=0)
         shared_neg = bg_all.quantile(bg_quantile, axis=0).clip(lower=0)
-        if shared_negative_strength is None:
-            strength = max(_param_float(tuning_params, "reference_negative_subtraction_strength"), 1.0)
-        else:
-            strength = float(shared_negative_strength)
+        strength = _param_float(tuning_params, "background_subtraction_strength")
         for marker in matrix_cols:
             matrix_cols[marker] = (matrix_cols[marker] - strength * shared_neg).clip(lower=0)
     elif _param_bool(tuning_params, "background_component_enabled") and len(frames) > 0:
@@ -705,10 +699,11 @@ def build_reference_matrix(
     # it.  This removes the shared spectral component that makes profiles look
     # similar and causes NNLS cross-talk.  floor_quantile=0 uses the per-detector
     # minimum (most conservative); higher values (e.g. 0.10-0.25) are more
-    # aggressive and effective when many markers are present.
-    floor_q = _clip_float(_param_float(tuning_params, "floor_quantile"), 0.0, 1.0)
+    # aggressive and effective when many markers are present. Negative = off.
+    floor_raw = _param_float(tuning_params, "floor_quantile")
+    floor_q = _clip_float(floor_raw, 0.0, 1.0)
     marker_only_cols = {k: v for k, v in matrix_cols.items() if k != BACKGROUND_COMPONENT_NAME}
-    if len(marker_only_cols) >= 2:
+    if floor_raw >= 0 and len(marker_only_cols) >= 2:
         profile_matrix = pd.DataFrame(marker_only_cols)
         floor = profile_matrix.quantile(floor_q, axis=1).clip(lower=0)
         for marker in marker_only_cols:
@@ -720,6 +715,94 @@ def build_reference_matrix(
     if not np.isfinite(matrix_used.values).all():
         raise ValueError("Generated reference matrix contains non-numeric, NaN, or infinite values.")
     return matrix_used, list(matrix_cols.keys())
+
+
+def _init_reference_columns(obs: pd.DataFrame, reference_map: dict[str, str]) -> None:
+    """Mark file roles and add blank per-cell call columns (filled per reference file).
+
+    Roles: reference (single stain), unstained (unstained/live control, by
+    filename word), sample (everything else). Unstained files are kept out of
+    "sample" so evaluation's sample scope never describes an unstained control.
+    """
+    obs["spectral_file_role"] = "sample"
+    obs["reference_marker"] = ""
+    obs["spectral_control"] = "sample"
+    unstained = obs["source_path"].astype(str).map(is_excluded_reference_name).astype(bool)
+    obs.loc[unstained, "spectral_file_role"] = "unstained"
+    obs.loc[unstained, "spectral_control"] = "unstained"
+    obs["spectral_call"] = ""
+    obs["spectral_score_call"] = ""
+    obs["spectral_cluster_call"] = ""
+    for source_path, marker in reference_map.items():
+        key = obs["source_path"].astype(str) == source_path
+        obs.loc[key, "spectral_file_role"] = "reference"
+        obs.loc[key, "reference_marker"] = marker
+
+
+def _write_reference_calls(
+    obs: pd.DataFrame,
+    idx: pd.Index,
+    marker: str,
+    pos_key: pd.Series,
+    neg_key: pd.Series,
+    score_labels: pd.Series,
+    cluster_labels: pd.Series,
+) -> None:
+    """Record one reference file's per-cell calls as plottable text labels.
+
+    spectral_call          positive / negative / ambiguous under the strategy's
+                           gate (for consensus, ambiguous = score and cluster disagree)
+    spectral_score_call    weighted-score vote alone
+    spectral_cluster_call  clustering vote alone
+    spectral_control       "<marker> <spectral_call>", one column to group plots by
+                           ("sample" for non-reference rows)
+    """
+    aligned_pos = pos_key.reindex(idx).fillna(False).astype(bool)
+    aligned_neg = neg_key.reindex(idx).fillna(False).astype(bool)
+    calls = pd.Series("ambiguous", index=idx, dtype=object)
+    calls[aligned_neg.values] = "negative"
+    calls[aligned_pos.values] = "positive"
+
+    def _vote(labels: pd.Series) -> pd.Series:
+        return labels.reindex(idx).astype(int).map({1: "positive", 0: "negative"})
+
+    obs.loc[idx, "spectral_call"] = calls
+    obs.loc[idx, "spectral_score_call"] = _vote(score_labels)
+    obs.loc[idx, "spectral_cluster_call"] = _vote(cluster_labels)
+    obs.loc[idx, "spectral_control"] = str(marker) + " " + calls
+
+
+def annotate_reference_calls(
+    obs: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    input_paths: Sequence[str | Path],
+    *,
+    reference_tokens: Sequence[str] | None = None,
+    tuning_params: dict | None = None,
+) -> int:
+    """Annotate reference-file cells with consensus calls; return files annotated.
+
+    For paths that unmix without calling positives (external_matrix, including
+    autotune deployment), so the controls carry the same obs columns as a
+    reference-strategy run. Consensus is the gate autotune builds its spectra
+    with. No matching reference files leaves obs unchanged.
+    """
+    reference_map = resolve_reference_map(obs, input_paths, include_tokens=_clean_reference_tokens(reference_tokens))
+    if len(reference_map) == 0:
+        return 0
+    call_df = legacy_log_transform(raw_df, tuning_params=tuning_params)
+    _init_reference_columns(obs, reference_map)
+    annotated = 0
+    for source_path, marker in reference_map.items():
+        idx = obs.index[obs["source_path"].astype(str) == source_path]
+        if len(idx) == 0:
+            continue
+        calls = call_reference_positives(call_df.loc[idx, :], "consensus_score_and_cluster", tuning_params=tuning_params)
+        _write_reference_calls(
+            obs, idx, marker, calls["pos_key"], calls["neg_key"], calls["score_labels"], calls["cluster_labels"],
+        )
+        annotated += 1
+    return annotated
 
 
 def run_reference_component_unmixing(
@@ -767,18 +850,7 @@ def run_reference_component_unmixing(
             "Unstained/background files are never treated as marker references."
         )
 
-    obs["spectral_file_role"] = "sample"
-    obs["reference_marker"] = ""
-    # Per-cell positive/negative calls, filled in for reference-file rows below.
-    # Blank for sample rows: a positive/negative call only exists for the
-    # single-stain files the marker spectra are learned from.
-    obs["spectral_call"] = ""
-    obs["spectral_score_positive"] = ""
-    obs["spectral_cluster_positive"] = ""
-    for source_path, marker in reference_map.items():
-        key = obs["source_path"].astype(str) == source_path
-        obs.loc[key, "spectral_file_role"] = "reference"
-        obs.loc[key, "reference_marker"] = marker
+    _init_reference_columns(obs, reference_map)
 
     saved_cache_path = ""
     if mixed_cache_path is not None and str(mixed_cache_path).strip() != "":
@@ -806,19 +878,7 @@ def run_reference_component_unmixing(
         pos_weight = calls["pos_weight"]
         neg_weight = calls["neg_weight"]
 
-        # Retain the per-cell calls. They were previously discarded as soon as
-        # the component was built, leaving only aggregate counts in the audit
-        # table, which made a bad positive/negative split impossible to inspect
-        # after the run. "ambiguous" means the strategy matched neither gate --
-        # for consensus that is a cell where the score and the cluster disagree.
-        aligned_pos = pos_key.reindex(idx).fillna(False).astype(bool)
-        aligned_neg = neg_key.reindex(idx).fillna(False).astype(bool)
-        calls = pd.Series("ambiguous", index=idx, dtype=object)
-        calls[aligned_neg.values] = "negative"
-        calls[aligned_pos.values] = "positive"
-        obs.loc[idx, "spectral_call"] = calls
-        obs.loc[idx, "spectral_score_positive"] = score_labels.reindex(idx).astype(int)
-        obs.loc[idx, "spectral_cluster_positive"] = cluster_labels.reindex(idx).astype(int)
+        _write_reference_calls(obs, idx, marker, pos_key, neg_key, score_labels, cluster_labels)
 
         if (_param_bool(tuning_params, "background_component_enabled") or
                 _param_bool(tuning_params, "shared_negative_subtraction_enabled")) and int(neg_key.sum()) > 0:
@@ -874,6 +934,17 @@ def run_reference_component_unmixing(
             "or check that the reference filenames contain the intended marker names."
         )
 
+    # Background pool: unstained control cells when the run has them, otherwise
+    # the reference files' negative cells. The autotune sweep uses the same rule.
+    unstained_idx = obs.index[obs["spectral_file_role"] == "unstained"]
+    background_source = "reference_negatives" if background_frames else "none"
+    if len(unstained_idx) > 0 and (
+        _param_bool(tuning_params, "background_component_enabled")
+        or _param_bool(tuning_params, "shared_negative_subtraction_enabled")
+    ):
+        background_frames = [unmix_df.loc[unstained_idx, :]]
+        background_source = "unstained"
+
     matrix_used, matrix_col_names = build_reference_matrix(
         components,
         background_frames,
@@ -911,6 +982,7 @@ def run_reference_component_unmixing(
         detector_columns=detector_columns,
         scatter_columns=scatter_columns or [],
         reference_markers=matrix_col_names,
+        background_source=background_source,
         output_markers=marker_cols,
         generated_matrix_columns=list(matrix_used.columns),
         event_limit_per_file=event_limit_per_file,
@@ -935,9 +1007,13 @@ def run_external_matrix_unmixing(
     random_seed: int = 0,
     mixed_cache_path: str | Path | None = None,
     tuning_params: dict | None = None,
+    reference_tokens: Sequence[str] | None = None,
     progress_fn=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     """Unmix with a supplied detector-by-marker matrix.
+
+    Reference files matching reference_tokens, when present, get the same
+    per-cell call columns as a reference-strategy run (annotate_reference_calls).
 
     Events are solved after unmixing_transform(), so the matrix must have been
     built at the same unmixing_power: 1.0 (linear) for vendor/compensation
@@ -961,6 +1037,8 @@ def run_external_matrix_unmixing(
         saved_cache_path = str(
             save_mixed_detector_cache(mixed_cache_path, raw_df, obs, dfxy, detector_columns, scatter_columns or [])
         )
+    _notify_progress(progress_fn, "Spectral import | annotating reference-control calls")
+    annotate_reference_calls(obs, raw_df, input_paths, reference_tokens=reference_tokens, tuning_params=tuning_params)
     matrix = load_spectral_matrix(matrix_path, orientation=matrix_orientation)
     overlap = [col for col in raw_df.columns if col in matrix.index]
     missing_from_matrix = [col for col in raw_df.columns if col not in matrix.index]
@@ -1433,7 +1511,13 @@ def build_spectral_eval_metrics(
     crosstalk_scope = _sample_scope(crosstalk)
 
     marker_component = _marker_quality_component(quality_scope, tuning_params=tuning_params)
-    biology_component, biology_details = _biology_probe_component(pair_scope)
+    # Biology probes score expected co-expression in multi-stained SAMPLES. On
+    # single-stain controls every pair should be exclusive, so the probes would
+    # reward spillover; they stay off unless explicitly enabled (untested).
+    if _param_bool(tuning_params, "biology_probes_enabled"):
+        biology_component, biology_details = _biology_probe_component(pair_scope)
+    else:
+        biology_component, biology_details = np.nan, {"expected_enriched": [], "expected_separated": []}
     crosstalk_penalty = _crosstalk_penalty(crosstalk_scope, tuning_params=tuning_params)
     flag_penalty = _warning_penalty(quality_scope, warnings or [])
     artifact_penalty = float(crosstalk_penalty + flag_penalty)
@@ -2551,13 +2635,19 @@ def _biology_probe_component(df: pd.DataFrame) -> tuple[float, dict]:
     }
 
 
+def _name_has_word(name: str, word: str) -> bool:
+    """Whole-word, case-insensitive: "B220 eFluor 450" has B220; "CD38" lacks CD3."""
+    return str(word).lower() in re.split(r"[^0-9a-z]+", str(name).lower())
+
+
 def _pair_probe_stats(df: pd.DataFrame, marker_a: str, marker_b: str) -> dict:
     if df is None or df.empty:
         return {}
-    work = df[
-        ((df["marker_A"].astype(str) == marker_a) & (df["marker_B"].astype(str) == marker_b))
-        | ((df["marker_A"].astype(str) == marker_b) & (df["marker_B"].astype(str) == marker_a))
-    ]
+    a_has = df["marker_A"].astype(str).map(lambda name: _name_has_word(name, marker_a))
+    a_has_b = df["marker_A"].astype(str).map(lambda name: _name_has_word(name, marker_b))
+    b_has = df["marker_B"].astype(str).map(lambda name: _name_has_word(name, marker_b))
+    b_has_a = df["marker_B"].astype(str).map(lambda name: _name_has_word(name, marker_a))
+    work = df[(a_has & b_has) | (a_has_b & b_has_a)]
     if work.empty:
         return {}
     return {

@@ -386,47 +386,61 @@ def test_reference_marker_by_path_resolves_a_real_control_folder(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_autotune_score_combo_returns_score_and_detail():
-    detectors = ["D1", "D2", "D3"]
-    profiles = {
-        "CD45": pd.Series([10.0, 1.0, 0.5], index=detectors),
-        "CD3": pd.Series([0.5, 9.0, 1.0], index=detectors),
-    }
-    cells = pd.DataFrame(
-        [[10.0, 1.0, 0.5], [0.5, 9.0, 1.0]], index=["c0", "c1"], columns=detectors
-    )
-    ref_groups = {"CD45": cells.iloc[[0]], "CD3": cells.iloc[[1]]}
+_SCORE_DETECTORS = ["D1", "D2", "D3"]
+_CD45 = pd.Series([10.0, 1.0, 0.5], index=_SCORE_DETECTORS)
+_CD3 = pd.Series([0.5, 9.0, 1.0], index=_SCORE_DETECTORS)
+# floor off, no background subtraction: the matrix is exactly the two profiles
+_RAW_COMBO = {"floor_quantile": -1.0, "background_quantile": 0.5,
+              "background_subtraction_strength": 0.0, "unmixing_power": 1.0}
 
+
+def _cells(*rows):
+    return pd.DataFrame([list(r) for r in rows], columns=_SCORE_DETECTORS)
+
+
+def _score_space(negatives=None, unstained=None):
+    return {
+        "profiles": {"CD45": _CD45, "CD3": _CD3},
+        "background": [],
+        "positives": {"CD45": _cells(_CD45), "CD3": _cells(_CD3)},
+        "negatives": negatives or {},
+        "unstained": unstained if unstained is not None else _cells()[:0],
+    }
+
+
+def test_autotune_score_penalizes_negative_own_signal_weakly_and_leaks_fully():
     core = _core_or_skip()
-    score, detail = sfi._autotune_score_combo(
-        core, profiles, [], ref_groups, detectors, 0.0, 0.5, 0.0
+    clean, clean_detail = sfi._autotune_score_combo(core, _score_space(), _SCORE_DETECTORS, _RAW_COMBO)
+    assert clean_detail["rejected"] == ""
+    assert clean_detail["positive_off_fraction"] == pytest.approx(0.0, abs=1e-9)
+    assert clean == pytest.approx(0.0, abs=1e-9)
+
+    # A negative in the CD45 file carrying 0.3x CD45 is not "correct": it costs
+    # 0.1 x 0.3. A negative carrying 0.3x CD3, or an unstained cell carrying
+    # 0.2x CD3, costs in full.
+    space = _score_space(
+        negatives={"CD45": _cells(0.3 * _CD45, 0.3 * _CD3)},
+        unstained=_cells(0.2 * _CD3),
     )
-    assert isinstance(score, float)
-    assert score < float("inf")
-    assert detail["rejected"] == ""
-    assert detail["n_cells_scored"] == 2
-    assert detail["n_markers_in_matrix"] == 2
-    assert detail["off_target_per_cell"] >= 0.0
-    assert detail["on_target_per_cell"] >= sfi._AUTOTUNE_ON_TARGET_FLOOR
-    assert 0.0 <= detail["off_target_fraction"] <= 1.0
+    score, detail = sfi._autotune_score_combo(core, space, _SCORE_DETECTORS, _RAW_COMBO)
+    assert detail["on_target_per_positive"] == pytest.approx(1.0)
+    assert detail["negative_own_leak"] == pytest.approx(0.15)   # 0.3 own mass / 2 negatives
+    assert detail["negative_off_leak"] == pytest.approx(0.15)
+    assert detail["unstained_leak"] == pytest.approx(0.2)
+    assert score == pytest.approx(0.15 + 0.2 + sfi._AUTOTUNE_NEG_OWN_WEIGHT * 0.15)
 
 
 def test_autotune_score_combo_rejects_a_flattened_matrix():
-    detectors = ["D1", "D2"]
-    # identical profiles + floor_quantile=1.0 subtracts the whole signal away
-    profiles = {
-        "CD45": pd.Series([1.0, 1.0], index=detectors),
-        "CD3": pd.Series([1.0, 1.0], index=detectors),
-    }
-    cells = pd.DataFrame([[1.0, 1.0]], index=["c0"], columns=detectors)
-
     core = _core_or_skip()
-    score, detail = sfi._autotune_score_combo(
-        core, profiles, [], {"CD45": cells}, detectors, 1.0, 0.5, 0.0
-    )
+    detectors = ["D1", "D2"]
+    flat = pd.Series([1.0, 1.0], index=detectors)
+    space = {"profiles": {"CD45": flat, "CD3": flat}, "background": [],
+             "positives": {"CD45": pd.DataFrame([[1.0, 1.0]], columns=detectors)},
+             "negatives": {}, "unstained": pd.DataFrame(columns=detectors)}
+    # identical profiles + floor_quantile=1.0 subtracts the whole signal away
+    score, detail = sfi._autotune_score_combo(core, space, detectors, {**_RAW_COMBO, "floor_quantile": 1.0})
     assert score == float("inf")
     assert detail["rejected"] == "empty_matrix"
-    assert detail["n_cells_scored"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +449,9 @@ def test_autotune_score_combo_rejects_a_flattened_matrix():
 # ---------------------------------------------------------------------------
 
 SWEEP_GRID = {
-    "floor_quantile": [0.0, 0.10],
+    "floor_quantile": [-1.0, 0.0],
     "background_quantile": [0.50, 0.90],
-    "global_background_strength": [0.0, 1.0],
+    "background_subtraction_strength": [0.0, 1.0],
     "unmixing_power": [0.5, 1.0],
 }
 EXPECTED_MARKERS = {"A6 CD45 PerCP", "A6 CD3 PerCP", "A6 B220 PerCP"}
@@ -495,18 +509,16 @@ def test_autotune_sweep_runs_end_to_end_and_writes_debug(tmp_path, monkeypatch):
     assert matrix.shape[0] == len(detectors)
     assert np.isfinite(matrix.values).all()
 
-    # coarse 2^4 plus two 3^4 refinement passes
-    assert params["autotune_combos_evaluated"] == 16 + 81 + 81
     sweep_log = Path(params["autotune_sweep_log_path"])
     assert sweep_log.is_file()
     frame = pd.read_csv(sweep_log)
     assert len(frame) == params["autotune_combos_evaluated"]
     assert set(frame["stage"]) == {"coarse", "fine", "finest"}
     for column in (
-        "floor_quantile", "background_quantile", "global_background_strength",
-        "unmixing_power", "score", "is_best", "off_target_per_cell", "on_target_per_cell",
-        "off_target_fraction", "n_cells_scored",
-        "dead_detectors", "rejected",
+        "floor_quantile", "background_quantile", "background_subtraction_strength",
+        "unmixing_power", "score", "is_best", "positive_off_fraction", "negative_off_leak",
+        "unstained_leak", "negative_own_leak", "on_target_per_positive",
+        "n_positive", "n_negative", "n_unstained", "dead_detectors", "rejected",
     ):
         assert column in frame.columns, f"sweep log is missing {column}"
     assert int(frame["is_best"].sum()) >= 1
@@ -589,11 +601,15 @@ def test_run_import_records_per_cell_positive_negative_calls(tmp_path):
         reference_tokens=("spectral controls",),
     )
 
-    for column in ("spectral_call", "spectral_score_positive", "spectral_cluster_positive"):
+    for column in ("spectral_call", "spectral_score_call", "spectral_cluster_call", "spectral_control"):
         assert column in obs.columns, f"obs is missing {column}"
 
     reference = obs[obs["spectral_file_role"] == "reference"]
     sample = obs[obs["spectral_file_role"] == "sample"]
+    unstained = obs[obs["spectral_file_role"] == "unstained"]
+    assert set(sample["source_file"]) == {"A6 sample.csv"}
+    assert set(unstained["source_file"]) == {"A6 Unstained (Cells)_Spectral Controls.csv"}
+    assert (unstained["spectral_control"] == "unstained").all()
 
     assert (reference["spectral_call"] != "").all(), "every reference cell must be classified"
     assert set(reference["spectral_call"].unique()) <= {"positive", "negative", "ambiguous"}
@@ -607,8 +623,11 @@ def test_run_import_records_per_cell_positive_negative_calls(tmp_path):
         "A6 B220 PerCP": 12,
     }
     # the two sub-methods are retained separately so disagreement is visible
-    assert set(reference["spectral_score_positive"].unique()) <= {0, 1}
-    assert set(reference["spectral_cluster_positive"].unique()) <= {0, 1}
+    assert set(reference["spectral_score_call"].unique()) <= {"positive", "negative"}
+    assert set(reference["spectral_cluster_call"].unique()) <= {"positive", "negative"}
+    # one plottable grouping column: "<marker> <call>" for controls, "sample" otherwise
+    assert (sample["spectral_control"] == "sample").all()
+    assert (reference["spectral_control"] == reference["reference_marker"] + " " + reference["spectral_call"]).all()
 
     assert set(df.columns) == EXPECTED_MARKERS
 
@@ -755,11 +774,15 @@ def test_unmixing_transform_defaults_to_legacy_log_and_powers_keep_sign():
         core.unmixing_transform(frame, tuning_params={"unmixing_power": -1.0})
 
 
-def test_power_refinement_never_interpolates_toward_log():
-    coarse = [0.0, 0.25, 0.5, 0.75, 1.0]
-    assert sfi._autotune_refine_power(coarse, 0.0) == [0.0]
-    assert sfi._autotune_refine_power(coarse, 0.25) == [0.25, 0.375, 0.5]
-    assert sfi._autotune_refine_power(coarse, 0.75) == [0.5, 0.75, 1.0]
+def test_refinement_never_interpolates_toward_log_or_floor_off():
+    power = [0.0, 0.75, 1.0, 1.25, 1.5]
+    assert sfi._autotune_refine_axis("unmixing_power", power, 0.0) == [0.0]
+    assert sfi._autotune_refine_axis("unmixing_power", power, 0.75) == [0.75, 0.875]  # log is not a neighbour
+    floor = [-1.0, 0.0, 0.025, 0.05, 0.1]
+    assert sfi._autotune_refine_axis("floor_quantile", floor, -1.0) == [-1.0]
+    assert sfi._autotune_refine_axis("floor_quantile", floor, 0.0) == [0.0, 0.0125]  # off is not a neighbour
+    # best is always kept, even between unevenly spaced neighbours
+    assert sfi._autotune_refine_axis("background_quantile", [0.5, 0.75, 0.9], 0.75) == [0.625, 0.75, 0.825]
 
 
 def test_autotune_matrix_is_deployed_at_its_winning_power(tmp_path, monkeypatch):
@@ -796,6 +819,16 @@ def test_autotune_matrix_is_deployed_at_its_winning_power(tmp_path, monkeypatch)
     assert np.allclose(deployed(power), scored)
     assert not np.allclose(deployed(power + 0.3), scored)
     assert not np.allclose(deployed(0.0), scored)  # the default log space
+
+    # The defaults goal: consensus with the winner's overrides builds the same matrix.
+    _df, _obs, _xy, meta = core.run_import(
+        input_paths=paths, strategy="consensus_score_and_cluster", detector_columns=detectors,
+        scatter_columns=[], reference_tokens=("spectral controls",),
+        tuning_params=params["consensus_overrides"],
+    )
+    rebuilt = meta[core.AUDIT_MATRIX_KEY]
+    assert np.allclose(rebuilt.loc[matrix.index, matrix.columns].values, matrix.values)
+    assert meta[core.AUDIT_SETTINGS_KEY]["background_source"] == "unstained"
 
 
 # ---------------------------------------------------------------------------
@@ -863,20 +896,70 @@ def test_interactive_autotune_run_replays_its_saved_matrix(tmp_path, monkeypatch
         print_fn=lambda *a: None,
     )
     power = meta1["autotune"]["autotune_unmixing_power"]
-    assert meta1["tuning_overrides"] == {"unmixing_power": power}
+    assert meta1["tuning_overrides"] == {}
     assert meta1["tuning_params_used"]["unmixing_power"] == power
+    assert meta1["autotune_deploy"] == "reuse"
     lastrun = (out / sfi.LASTRUN_FILENAME).read_text(encoding="utf-8")
-    assert "autotune_matrix_path" in lastrun
+    assert "consensus_overrides" in lastrun
 
     def no_sweep(*args, **kwargs):
-        raise AssertionError("replay must reuse the saved autotune matrix")
+        raise AssertionError("replay must not re-run the sweep")
 
     monkeypatch.setattr(sfi, "_run_autotune_sweep", no_sweep)
+    replay = {**common, "replay previous run config": "y"}
     df2, _obs, _xy, meta2 = sfi.run_interactive(
         project_defaults={"spectral_stem": "ds_test_002", "spectral_ignore_remembered_stem": True},
-        log_input=_scripted_input({**common, "replay previous run config": "y"}),
+        log_input=_scripted_input({**replay, "rebuild or reuse": "u"}),
         print_fn=lambda *a: None,
     )
     assert meta2["stem"] == "ds_test_002"
+    assert meta2["autotune_deploy"] == "reuse"
     assert meta2["autotune_matrix_path"] == meta1["autotune_matrix_path"]
     assert np.allclose(df2.sort_index().values, df1.sort_index().values)
+
+    # rebuilding from the same controls with the tuned settings gives the same result
+    df3, _obs, _xy, meta3 = sfi.run_interactive(
+        log_input=_scripted_input({**replay, "rebuild or reuse": "r", "output stem": "rebuilt"}),
+        print_fn=lambda *a: None,
+    )
+    assert meta3["autotune_deploy"] == "rebuild"
+    assert meta3["strategy"] == "consensus_score_and_cluster"
+    assert np.allclose(df3.sort_index().loc[:, df1.columns].values, df1.sort_index().values)
+
+
+def test_external_matrix_run_annotates_controls_like_a_reference_run(tmp_path, monkeypatch):
+    # autotune deploys through external_matrix; its controls need the same calls
+    core = _core_or_skip()
+    paths, detectors = _write_synthetic_events(tmp_path)
+    monkeypatch.setattr(sfi, "_AUTOTUNE_COARSE_GRID", SWEEP_GRID)
+    matrix_path, params = sfi._run_autotune_sweep(
+        core, paths, detectors, [], None, str(tmp_path), "calls",
+        progress_fn=None, print_fn=lambda *a: None,
+        reference_tokens=("spectral controls",),
+    )
+    kwargs = dict(input_paths=paths, detector_columns=detectors, scatter_columns=[],
+                  reference_tokens=("spectral controls",))
+    _df, ext_obs, _xy, _meta = core.run_import(
+        strategy="external_matrix", matrix_path=matrix_path,
+        tuning_params={"unmixing_power": params["autotune_unmixing_power"]}, **kwargs,
+    )
+    _df, ref_obs, _xy, _meta = core.run_import(strategy="consensus_score_and_cluster", **kwargs)
+    columns = ["spectral_file_role", "reference_marker", "spectral_control",
+               "spectral_call", "spectral_score_call", "spectral_cluster_call"]
+    pd.testing.assert_frame_equal(ext_obs.loc[ref_obs.index, columns], ref_obs.loc[:, columns])
+    assert (ext_obs["spectral_control"] == "A6 CD45 PerCP positive").sum() == 12
+
+
+def test_biology_probes_match_marker_names_by_whole_word():
+    core = _core_or_skip()
+    pairs = pd.DataFrame({
+        "marker_A": ["B220 eFluor 450", "CD38 PE"],
+        "marker_B": ["A6 MHCII PerCP", "B220 eFluor 450"],
+        "coexpression_enrichment": [3.0, 9.0],
+        "double_pos_frac": [0.1, 0.1],
+        "expected_double_pos_frac": [0.03, 0.01],
+        "spearman_corr": [0.5, 0.5],
+        "mutual_exclusion_score": [0.0, 0.0],
+    })
+    assert core._pair_probe_stats(pairs, "B220", "MHCII")["coexpression_enrichment"] == 3.0
+    assert core._pair_probe_stats(pairs, "CD3", "B220") == {}  # CD38 is not CD3
