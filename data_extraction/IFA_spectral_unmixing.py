@@ -609,7 +609,7 @@ def call_reference_positives(
     neg_weight are None except under soft_weighted_reference.
 
     Shared with the autotune sweep in data_extraction/spectral_flow_ifa.py,
-    which calls it with consensus_score_and_cluster.
+    which calls it with weighted_score.
     """
     tuning_params = resolve_tuning_parameters(tuning_params)
     strategy = str(strategy or "consensus_score_and_cluster").strip().lower()
@@ -665,11 +665,14 @@ def build_reference_matrix(
 ) -> tuple[pd.DataFrame, list[str]]:
     """Assemble the detector-by-marker spectral matrix from reference components.
 
-    Steps, all driven by tuning_params: average each marker's components; apply
-    either shared background subtraction (background_subtraction_strength x the
-    background_quantile profile of the background pool) or a pooled background
-    column; remove the per-detector shared floor (floor_quantile; < 0 = off);
-    reindex onto detector_columns; then cleanup_similar_components().
+    Steps, all driven by tuning_params: average each marker's components;
+    optionally subtract the shared background (background_subtraction_strength
+    x the background_quantile profile of the background pool) from every
+    marker; optionally add that profile as a solver column (each cell then gets
+    its own background amount, an autofluorescence intercept); remove the
+    per-detector shared floor from marker columns (floor_quantile; < 0 = off);
+    reindex onto detector_columns; then cleanup_similar_components(). The
+    subtraction and the column are independent.
 
     Returns (matrix_used, matrix_column_names). matrix_column_names preserves the
     pre-cleanup column order and includes BACKGROUND_COMPONENT_NAME when a
@@ -690,7 +693,7 @@ def build_reference_matrix(
         strength = _param_float(tuning_params, "background_subtraction_strength")
         for marker in matrix_cols:
             matrix_cols[marker] = (matrix_cols[marker] - strength * shared_neg).clip(lower=0)
-    elif _param_bool(tuning_params, "background_component_enabled") and len(frames) > 0:
+    if _param_bool(tuning_params, "background_component_enabled") and len(frames) > 0:
         bg_all = pd.concat(frames, axis=0)
         matrix_cols[BACKGROUND_COMPONENT_NAME] = bg_all.quantile(bg_quantile, axis=0).clip(lower=0)
 
@@ -780,12 +783,13 @@ def annotate_reference_calls(
     reference_tokens: Sequence[str] | None = None,
     tuning_params: dict | None = None,
 ) -> int:
-    """Annotate reference-file cells with consensus calls; return files annotated.
+    """Annotate reference-file cells with weighted-score calls; return files annotated.
 
     For paths that unmix without calling positives (external_matrix, including
     autotune deployment), so the controls carry the same obs columns as a
-    reference-strategy run. Consensus is the gate autotune builds its spectra
-    with. No matching reference files leaves obs unchanged.
+    reference-strategy run. The weighted score is the gate autotune builds its
+    spectra with; the clustering vote is still recorded in spectral_cluster_call.
+    No matching reference files leaves obs unchanged.
     """
     reference_map = resolve_reference_map(obs, input_paths, include_tokens=_clean_reference_tokens(reference_tokens))
     if len(reference_map) == 0:
@@ -797,7 +801,7 @@ def annotate_reference_calls(
         idx = obs.index[obs["source_path"].astype(str) == source_path]
         if len(idx) == 0:
             continue
-        calls = call_reference_positives(call_df.loc[idx, :], "consensus_score_and_cluster", tuning_params=tuning_params)
+        calls = call_reference_positives(call_df.loc[idx, :], "weighted_score", tuning_params=tuning_params)
         _write_reference_calls(
             obs, idx, marker, calls["pos_key"], calls["neg_key"], calls["score_labels"], calls["cluster_labels"],
         )
@@ -1059,7 +1063,9 @@ def run_external_matrix_unmixing(
         unmixing_transform(raw_df, tuning_params=tuning_params).loc[:, overlap],
         matrix_used, tuning_params=tuning_params, progress_fn=progress_fn,
     )
-    df = pd.DataFrame(coefs, index=raw_df.index, columns=matrix_used.columns)
+    # A background column (e.g. an autotune matrix) is solved with but is not a marker.
+    coef_df = pd.DataFrame(coefs, index=raw_df.index, columns=matrix_used.columns)
+    df = coef_df.loc[:, [col for col in coef_df.columns if col != BACKGROUND_COMPONENT_NAME]].copy()
 
     for source_file, idx in obs.groupby("source_file").groups.items():
         locs = raw_df.index.get_indexer(idx)
