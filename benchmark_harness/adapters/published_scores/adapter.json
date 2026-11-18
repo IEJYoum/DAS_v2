@@ -1,0 +1,5 @@
+{
+  "env": "base",
+  "task_family": "marker_positivity",
+  "description": "Scores another group already published per cell (e.g. Nimbus scores in the Pan-M gold table); no inference."
+}

@@ -1,0 +1,5 @@
+# Linux locations (override harness_paths.txt key by key).
+data_root=/mnt/rdscoussens/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_DATA/eval_only
+runs_root=/mnt/rdscoussens/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_PROJECT/benchmarks/runs
+results_root=/mnt/rdscoussens/Multiplex_IHC_studies/Isaac_Youm/CLASSIFIER_PROJECT/benchmarks/results
+methods_root=/home/lab/youm/cell_classification_repos
