@@ -1,4 +1,4 @@
-"""python -m harness run|score   (run from cell_classification_repos/_harness)
+"""python -m harness run|score   (run from DAS_v2/benchmark_harness)
 
   run   --label NAME --adapter ADAPTER --bundle BUNDLE [--config JSON]
   score --runs RUN_DIR [RUN_DIR ...] --out DIR
