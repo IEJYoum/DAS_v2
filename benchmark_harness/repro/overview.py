@@ -40,30 +40,24 @@ def pooled_f1(by_group, method, exclude=()):
 def rows():
     out = []
 
-    def add(result, metric, ours, ref_lo, ref_hi, ref_label, sd=np.nan, alt=np.nan, alt_label=""):
-        out.append(dict(result=result, metric=metric, ours=ours, ours_sd=sd, ours_alt=alt, alt_label=alt_label,
+    def add(result, metric, ours, ref_lo, ref_hi, ref_label, sd=np.nan, note=""):
+        out.append(dict(result=result, metric=metric, ours=ours, ours_sd=sd, note=note,
                         ref_lo=ref_lo, ref_hi=ref_hi, ref_label=ref_label))
     pb = RESULTS / "phenobic_extval" / "by_group.csv"
     if pb.is_file():
         add("PhenoBIC\nbreast TMAs, external validation", "pooled F1", pooled_f1(pb, "phenobic"), .88, .88, "paper")
-    nb = RESULTS / "panm_gold_nimbus_rerun" / "by_group.csv"
+    nb = RESULTS / "panm_gold_nimbus_q999" / "by_group.csv"
     if nb.is_file():
         ref = pooled_f1(nb, "nimbus_published", ["mibi_breast"])
-        add("Nimbus\nPan-M gold, 4 subsets", "pooled F1", pooled_f1(nb, "nimbus_rerun", ["mibi_breast"]), ref, ref,
+        add("Nimbus\nPan-M gold, 4 subsets", "pooled F1", pooled_f1(nb, "nimbus_q999", ["mibi_breast"]), ref, ref,
             "authors' published predictions")
     sv = REPRO / "celesta" / "paper" / "scoring_variants.csv"
     if sv.is_file():
         v = pd.read_csv(sv)
         pick = lambda credit: float(v[(v.credit == credit) & (v.cells == "all") & (v.classes == "fine")  # noqa: E731
                                       & (v.cores == "A+B") & (v.average == "pooled")].major_f1.iloc[0])
-        add("CELESTA\nSchurch CRC, 140 regions", "major-type F1", pick("strict"), .6, .7, "paper range",
-            alt=pick("lineage"), alt_label="lineage credit (parent call counts)")
-    ce = REPRO / "celesta" / "exact" / "summary.txt"
-    if ce.is_file():
-        m = re.search(r"identical final cell type for \d+ \(([\d.]+)%\)", ce.read_text(encoding="utf-8"))
-        if m:
-            add("CELESTA software check\nbundled region vs saved output", "identical calls", float(m.group(1)) / 100,
-                1.0, 1.0, "package's saved output")
+        add("CELESTA\nSchurch CRC, 140 regions", "major-type F1, lineage level", pick("lineage"), .6, .7,
+            "paper range", note=f"exact-subtype {pick('strict'):.3f}")
     sb = REPRO / "stellar" / "b004_lor" / "metrics.csv"
     if sb.is_file():
         d = pd.read_csv(sb)
@@ -91,16 +85,12 @@ def main():
             ax.fill_betweenx([yi - .22, yi + .22], r.ref_lo, r.ref_hi, color=BAND, zorder=1)
         else:
             ax.plot([r.ref_lo] * 2, [yi - .22, yi + .22], color=MUTED, lw=2.5, zorder=2)
-        if not np.isnan(r.ours_sd):
-            ax.errorbar(r.ours, yi, xerr=r.ours_sd, fmt="none", ecolor=OURS, elinewidth=1.2, capsize=3, zorder=3)
         ax.scatter(r.ours, yi, s=60, color=OURS, edgecolors="white", linewidths=.8, zorder=4)
-        text = f"ours {r.ours:.3f}" + (f" ± {r.ours_sd:.3f}" if not np.isnan(r.ours_sd) else "")
-        if not np.isnan(r.ours_alt):
-            ax.scatter(r.ours_alt, yi, s=60, marker="D", color=ALT, edgecolors="white", linewidths=.8, zorder=4)
-            text += f" | {r.alt_label.split(' (')[0]} {r.ours_alt:.3f}"
+        text = f"ours {r.ours:.3f}" + (f" (sd {r.ours_sd:.2f})" if not np.isnan(r.ours_sd) else "")
+        if r.note:
+            text += f" | {r.note}"
         ref = f"{r.ref_lo:.3g}" if r.ref_hi == r.ref_lo else f"{r.ref_lo:.1f}-{r.ref_hi:.1f}"
-        right = max(r.ours + (0 if np.isnan(r.ours_sd) else r.ours_sd), r.ref_hi,
-                    0 if np.isnan(r.ours_alt) else r.ours_alt)
+        right = max(r.ours, r.ref_hi)
         ax.text(right + .015, yi, f"{text}\n{r.ref_label} {ref}", va="center", fontsize=7.5, color=INK)
     ax.set_yticks(y, [f"{r.result}\n[{r.metric}]" for r in d.itertuples()], fontsize=8)
     ax.set_xlim(.5, 1.38); ax.set_xticks(np.arange(.5, 1.01, .1))
@@ -111,9 +101,7 @@ def main():
     handles = [plt.Line2D([], [], color=OURS, marker="o", ls="", label="our rerun of the published code"),
                plt.Line2D([], [], color=MUTED, marker="|", ls="", markersize=11, mew=2.5, label="published value"),
                plt.Rectangle((0, 0), 1, 1, color=BAND, label="published range")]
-    if d.ours_alt.notna().any():
-        handles.insert(1, plt.Line2D([], [], color=ALT, marker="D", ls="", label="ours, lineage-credit scoring"))
-    ax.legend(handles=handles, frameon=False, fontsize=7.5, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=4)
+    ax.legend(handles=handles, frameon=False, fontsize=7.5, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=3)
     ax.set_title("Reproducing published methods on their own data", loc="left", fontsize=11, color=INK, pad=24)
     fig.text(.01, .01, FOOT, fontsize=7, color=MUTED, ha="left", va="bottom", wrap=True)
     fig.tight_layout(rect=(0, .04, 1, 1))
