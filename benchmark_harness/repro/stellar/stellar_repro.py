@@ -167,9 +167,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", choices=list(PAPER), required=True)
     ap.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
+    ap.add_argument("--edge-builder", choices=["upstream", "chunked"], default="upstream",
+                    help="chunked: edges_chunked.py, same edge list without the dense n x n matrix "
+                         "(proven identical in repro/stellar/edge_builder_check); tonsil_be only")
     args = ap.parse_args()
     sys.path.insert(0, str(METHODS / "stellar"))
     import torch
+    if args.edge_builder == "chunked":
+        import datasets
+        from edges_chunked import get_tonsilbe_edge_index_chunked
+        datasets.get_tonsilbe_edge_index = get_tonsilbe_edge_index_chunked
+        log("edge builder: chunked (memory-light; identical edges proven on B004 + BE)")
     out = OUT_ROOT / args.task
     out.mkdir(parents=True, exist_ok=True)
     os.chdir(out)  # upstream GraphDataset writes processed/ under cwd
@@ -196,7 +204,8 @@ def main():
     met.to_csv(out / "metrics.csv", index=False)
     num = met[["accuracy_strict", "accuracy_matched", "macro_f1_matched", "accuracy_on_reference_types"]]
     lines = [f"STELLAR reproduction, task {args.task}", f"paper: {PAPER[args.task]}",
-             f"host {platform.node()}, device {'cuda' if torch.cuda.is_available() else 'cpu'}", "",
+             f"host {platform.node()}, device {'cuda' if torch.cuda.is_available() else 'cpu'}, "
+             f"edge builder {args.edge_builder}", "",
              met.drop(columns=["novel_mapping"]).round(3).to_string(index=False), "",
              "mean over runs: " + ", ".join(f"{c} {num[c].mean():.3f} +- {num[c].std():.3f}" for c in num), "",
              "Novel heads -> target-only types (first run): " + json.dumps(rows[0]["novel_mapping"])]
@@ -216,7 +225,8 @@ def main():
         return subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     (out / "run.json").write_text(json.dumps({
         "method": "stellar", "stellar_commit": commit(METHODS / "stellar"), "harness_commit": commit(HARNESS),
-        "torch": torch.__version__, "task": args.task, "seeds": args.seeds, "host": platform.node(),
+        "torch": torch.__version__, "task": args.task, "seeds": args.seeds,
+        "edge_builder": args.edge_builder, "host": platform.node(),
         "started": started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2), encoding="utf-8")
     log(f"wrote {out}")
 
