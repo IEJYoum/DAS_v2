@@ -36,16 +36,24 @@ def token(value):
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value)).strip("_") or "unnamed"
 
 
-def bars(results, paper=None, paper_label="paper", title=None):
+def bars(results, paper=None, paper_label="paper", title=None, by="group"):
+    """by="group": one bar set per group + overall pooled + mean of groups.
+    by="marker": one figure per group (e.g. a Pan-M subset), one bar set per marker, plus that
+    group's pooled and mean-of-markers bars."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     results = Path(results)
     g = pd.read_csv(results / "by_group.csv")
+    if by == "marker":
+        units = [((m, b, grp), d[d.marker != "ALL"].assign(group=d.marker), d[d.marker == "ALL"].iloc[0])
+                 for (m, b, grp), d in g[g.group != "ALL"].groupby(["method", "bundle", "group"])]
+    else:
+        units = [((m, b, None), d[(d.marker == "ALL") & (d.group != "ALL")], d[d.group == "ALL"].iloc[0])
+                 for (m, b), d in g.groupby(["method", "bundle"])]
     written = []
-    for (method, bid), d in g.groupby(["method", "bundle"]):
-        per = d[(d.marker == "ALL") & (d.group != "ALL")].reset_index(drop=True)
-        overall = d[d.group == "ALL"].iloc[0]
+    for (method, bid, grp), per, overall in units:
+        per = per.sort_values("group").reset_index(drop=True)
         rows = [(r.group.replace("_", "\n", 1), r) for r in per.itertuples()]
         mean = {m: per[m].mean() for m in METRIC_COLORS}
         x = np.arange(len(rows) + 2, dtype=float)
@@ -56,25 +64,30 @@ def bars(results, paper=None, paper_label="paper", title=None):
             vals = [getattr(r, m) for _, r in rows] + [overall[m], mean[m]]
             ax.bar(x + (k - 1) * w, vals, w * 0.92, color=METRIC_COLORS[m], label=m if m != "f1" else "F1")
         for xi, (_, r) in zip(x, rows):
-            ax.text(xi + w, r.f1 + 0.015, f"{r.f1:.2f}", ha="center", va="bottom", fontsize=7, color="#0b0b0b")
+            if pd.notna(r.f1):
+                ax.text(xi + w, r.f1 + 0.015, f"{r.f1:.2f}", ha="center", va="bottom", fontsize=7, color="#0b0b0b")
         for xi, v in ((x[-2], overall.f1), (x[-1], mean["f1"])):
             ax.text(xi + w, v + 0.015, f"{v:.3f}", ha="center", va="bottom", fontsize=8, fontweight="bold")
         if paper is not None:
             ax.axhline(paper, color="#52514e", ls="--", lw=1, label=f"{paper_label}: {paper:.2f}", zorder=0)
-        labels = [f"{lab}\nn+={int(r.positives)}" for lab, r in rows] + ["Overall\n(pooled)", "Mean of\nmarker sets"]
-        ax.set_xticks(x, labels, fontsize=7.5)
+        tail = ["Overall\n(pooled)", "Mean of\nmarkers" if by == "marker" else "Mean of\nmarker sets"]
+        rot = 45 if len(rows) > 14 else 0
+        ax.set_xticks(x, [f"{lab}\nn+={int(r.positives)}" for lab, r in rows] + tail, fontsize=7.5, rotation=rot,
+                      ha="right" if rot else "center")
         ax.set_xlim(x[0] - 0.5, x[-1] + 0.6)
         ax.set_ylim(0, 1.08); ax.set_ylabel("score (positive class)")
         ax.yaxis.grid(True, color="#e4e3df"); ax.set_axisbelow(True)
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
         ax.legend(ncol=4, fontsize=8, frameon=False, loc="upper left", bbox_to_anchor=(0, 1.1))
-        ax.set_title(title or f"{method} on {bid}: per marker set and overall", fontsize=10, loc="left", pad=22)
+        where = f"{bid} / {grp}" if grp else bid
+        head = f"{title}: {grp}" if (title and grp) else (title or f"{method} on {where}: per {by} and overall")
+        ax.set_title(head, fontsize=10, loc="left", pad=22)
         fig.tight_layout()
-        path = results / f"bars_{token(method)}_{token(bid)}.png"
-        fig.savefig(path, dpi=200); plt.close(fig)
-        written.append(path)
-        print("wrote", path)
+        name = f"bars_by_marker_{token(method)}_{token(grp)}.png" if grp else f"bars_{token(method)}_{token(bid)}.png"
+        fig.savefig(results / name, dpi=200); plt.close(fig)
+        written.append(results / name)
+        print("wrote", results / name)
     return written
 
 

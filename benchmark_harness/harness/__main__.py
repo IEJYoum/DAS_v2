@@ -26,6 +26,7 @@ def main():
     b.add_argument("--paper", type=float)
     b.add_argument("--paper-label", default="paper")
     b.add_argument("--title")
+    b.add_argument("--by", choices=["group", "marker"], default="group")
     x = sub.add_parser("boxes")
     x.add_argument("--results", required=True)
     x.add_argument("--metric", default="f1")
@@ -44,7 +45,7 @@ def main():
         score.score(args.runs, args.out)
     elif args.command == "bars":
         from harness import report
-        report.bars(args.results, args.paper, args.paper_label, args.title)
+        report.bars(args.results, args.paper, args.paper_label, args.title, args.by)
     elif args.command == "boxes":
         from harness import report
         report.boxes(args.results, args.metric, args.title, args.unit)
