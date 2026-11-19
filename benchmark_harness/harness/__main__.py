@@ -30,6 +30,7 @@ def main():
     x.add_argument("--results", required=True)
     x.add_argument("--metric", default="f1")
     x.add_argument("--title")
+    x.add_argument("--unit", default="scenes", help="what one dot is, e.g. cores, FoVs")
     v = sub.add_parser("render")
     v.add_argument("--run", required=True)
     v.add_argument("--out", required=True)
@@ -45,7 +46,7 @@ def main():
         report.bars(args.results, args.paper, args.paper_label, args.title)
     elif args.command == "boxes":
         from harness import report
-        report.boxes(args.results, args.metric, args.title)
+        report.boxes(args.results, args.metric, args.title, args.unit)
     else:
         from harness import report
         report.render(args.run, args.out, args.results, args.per_group)

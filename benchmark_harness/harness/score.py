@@ -87,6 +87,8 @@ def score(run_folders, out):
                 pts = by_scene[(by_scene.method == m) & (by_scene.bundle == b) & (by_scene.group == g)].f1.dropna()
                 ax.scatter(np.full(len(pts), x), pts, s=12, color=colors[m], alpha=.7, edgecolors="white", linewidths=.4)
                 pooled = gb[(gb.method == m) & (gb.group == g) & (gb.marker == "ALL")].f1
+                if pooled.empty:  # method has no scored cells in this group
+                    continue
                 ax.scatter([x], pooled, marker="D", s=40, color=colors[m], edgecolors=INK, linewidths=.8, zorder=3)
         ax.set_xticks(range(len(groups)), [g.replace("_", "\n", 1) for g in groups], color=INK, fontsize=8)
         ax.set_ylim(0, 1.02); ax.set_ylabel("F1 (positive class)", color=INK)

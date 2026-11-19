@@ -232,7 +232,7 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#62
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
-def boxes(results, metric="f1", title=None):
+def boxes(results, metric="f1", title=None, unit="scenes"):
     """DAS benchmark_plots style: per group, box + dots = per-scene score, diamond = pooled (all cells).
 
     Groups are ordered by platform (from the bundle's scenes.csv when it has a platform column),
@@ -272,7 +272,7 @@ def boxes(results, metric="f1", title=None):
                 if len(hit) and hit.notna().all():
                     ax.scatter([x], hit, marker="D", s=36, color=INK, zorder=4)
         n = sb.groupby("group").scene_id.nunique()
-        ax.set_xticks(range(len(groups)), [f"{g.replace('_', chr(10), 1)}\nn={n[g]} cores" for g in groups],
+        ax.set_xticks(range(len(groups)), [f"{g.replace('_', chr(10), 1)}\nn={n[g]} {unit}" for g in groups],
                       fontsize=7.5, color=INK)
         for d in range(1, len(groups)):
             if plat.get(groups[d], "") != plat.get(groups[d - 1], ""):
@@ -280,8 +280,10 @@ def boxes(results, metric="f1", title=None):
         for d, g in enumerate(groups):
             if d == 0 or plat.get(g, "") != plat.get(groups[d - 1], ""):
                 ax.text(d - .45, 1.0, str(plat.get(g, "")), fontsize=8, color=MUTED, va="bottom")
-        ax.set_ylim(0, 1.06); ax.set_ylabel(f"{metric.upper() if metric == 'f1' else metric} (positive class), per core")
-        ax.set_title(title or f"{bid}: per-core {metric} by marker set", color=INK, fontsize=10, loc="left", pad=24)
+        ax.set_ylim(0, 1.06); ax.set_ylabel(f"{metric.upper() if metric == 'f1' else metric} (positive class), per {unit.rstrip('s')}")
+        import textwrap
+        ax.set_title(textwrap.fill(title or f"{bid}: per-{unit.rstrip('s')} {metric} by group", 95),
+                     color=INK, fontsize=10, loc="left", pad=24)
         ax.grid(axis="y", color=GRID, linewidth=.8); ax.set_axisbelow(True)
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
