@@ -226,3 +226,72 @@ def render(run, out, results=None, per_group=2):
         f"Files per scene: 1 zoom (truth | prediction | correctness, 512 px crop at 2x), 2 stain only, "
         f"3 truth, 4 prediction, 5 correctness (native pixels).\n{LEGEND}\n{CORRECT_LEGEND}\n", encoding="utf-8")
     print("wrote", out)
+
+
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
+INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
+
+
+def boxes(results, metric="f1", title=None):
+    """DAS benchmark_plots style: per group, box + dots = per-scene score, diamond = pooled (all cells).
+
+    Groups are ordered by platform (from the bundle's scenes.csv when it has a platform column),
+    with a dotted divider between platforms. One colour per method, fixed order.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    results = Path(results)
+    scene = pd.read_csv(results / "by_scene.csv")
+    group = pd.read_csv(results / "by_group.csv")
+    written = []
+    for bid, sb in scene.groupby("bundle"):
+        _, scenes, _, _ = bundle.load(bid)
+        plat = (scenes.groupby("group").platform.first() if "platform" in scenes else pd.Series(dtype=str))
+        first = {}  # platforms ordered by their first group name, groups by name within platform
+        for g in sorted(sb.group.unique()):
+            first.setdefault(str(plat.get(g, "")), g)
+        groups = sorted(sb.group.unique(), key=lambda g: (first[str(plat.get(g, ""))], g))
+        methods = list(dict.fromkeys(sb.method))
+        colors = {m: SERIES[i % len(SERIES)] for i, m in enumerate(methods)}
+        width = .8 / len(methods)
+        fig, ax = plt.subplots(figsize=(max(7, 0.85 * len(groups) + 2), 4.6))
+        for t, m in enumerate(methods):
+            for d, g in enumerate(groups):
+                x = d + (t - (len(methods) - 1) / 2) * width
+                v = sb.loc[(sb.method == m) & (sb.group == g), metric].dropna()
+                if len(v):
+                    ax.boxplot([v], positions=[x], widths=width * .8, patch_artist=True, showfliers=False,
+                               boxprops=dict(facecolor=colors[m], edgecolor=colors[m], alpha=.35, linewidth=1),
+                               medianprops=dict(color=colors[m], linewidth=2),
+                               whiskerprops=dict(color=colors[m]), capprops=dict(color=colors[m]))
+                    ax.scatter(x + np.random.default_rng(t * 31 + d).uniform(-width * .25, width * .25, len(v)), v,
+                               s=12, color=colors[m], edgecolors="white", linewidths=.5, zorder=3)
+                hit = group.loc[(group.method == m) & (group.bundle == bid) & (group.group == g)
+                                & (group.marker == "ALL"), metric]
+                if len(hit) and hit.notna().all():
+                    ax.scatter([x], hit, marker="D", s=36, color=INK, zorder=4)
+        n = sb.groupby("group").scene_id.nunique()
+        ax.set_xticks(range(len(groups)), [f"{g.replace('_', chr(10), 1)}\nn={n[g]} cores" for g in groups],
+                      fontsize=7.5, color=INK)
+        for d in range(1, len(groups)):
+            if plat.get(groups[d], "") != plat.get(groups[d - 1], ""):
+                ax.axvline(d - .5, color=MUTED, linewidth=.8, linestyle=(0, (2, 3)))
+        for d, g in enumerate(groups):
+            if d == 0 or plat.get(g, "") != plat.get(groups[d - 1], ""):
+                ax.text(d - .45, 1.0, str(plat.get(g, "")), fontsize=8, color=MUTED, va="bottom")
+        ax.set_ylim(0, 1.06); ax.set_ylabel(f"{metric.upper() if metric == 'f1' else metric} (positive class), per core")
+        ax.set_title(title or f"{bid}: per-core {metric} by marker set", color=INK, fontsize=10, loc="left", pad=24)
+        ax.grid(axis="y", color=GRID, linewidth=.8); ax.set_axisbelow(True)
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        handles = [plt.Line2D([], [], color=colors[m], marker="s", linestyle="", markersize=9, label=m) for m in methods]
+        handles.append(plt.Line2D([], [], color=INK, marker="D", linestyle="", markersize=6, label="pooled (all cells)"))
+        ax.legend(handles=handles, ncol=len(handles), frameon=False, fontsize=8, loc="upper left",
+                  bbox_to_anchor=(0, 1.11))
+        fig.tight_layout()
+        path = results / f"boxes_{metric}_{token(bid)}.png"
+        fig.savefig(path, dpi=200); plt.close(fig)
+        written.append(path)
+        print("wrote", path)
+    return written
