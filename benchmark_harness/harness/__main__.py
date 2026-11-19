@@ -21,11 +21,27 @@ def main():
     s = sub.add_parser("score")
     s.add_argument("--runs", nargs="+", required=True)
     s.add_argument("--out", required=True)
+    b = sub.add_parser("bars")
+    b.add_argument("--results", required=True)
+    b.add_argument("--paper", type=float)
+    b.add_argument("--paper-label", default="paper")
+    b.add_argument("--title")
+    v = sub.add_parser("render")
+    v.add_argument("--run", required=True)
+    v.add_argument("--out", required=True)
+    v.add_argument("--results")
+    v.add_argument("--per-group", type=int, default=2)
     args = parser.parse_args()
     if args.command == "run":
         runner.run(args.label, args.adapter, args.bundle, json.loads(args.config))
-    else:
+    elif args.command == "score":
         score.score(args.runs, args.out)
+    elif args.command == "bars":
+        from harness import report
+        report.bars(args.results, args.paper, args.paper_label, args.title)
+    else:
+        from harness import report
+        report.render(args.run, args.out, args.results, args.per_group)
 
 
 if __name__ == "__main__":
