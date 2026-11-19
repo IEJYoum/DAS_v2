@@ -221,7 +221,7 @@ def main():
         except OSError:
             return ""
     (out / "run.json").write_text(json.dumps({
-        "method": "astir", "astir_version": astir.__version__, "torch": torch.__version__,
+        "method": "astir", "astir_version": __import__("importlib.metadata").metadata.version("astir"), "torch": torch.__version__,
         "astir_commit": commit(METHODS / "astir"), "manuscript_commit": commit(MANUSCRIPT),
         "harness_commit": commit(HARNESS), "cohort": args.cohort, "args": vars(args), "host": platform.node(),
         "started": started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S"), "fit_seconds": round(fit_s, 1),
