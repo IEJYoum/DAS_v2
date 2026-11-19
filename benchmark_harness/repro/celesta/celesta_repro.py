@@ -137,14 +137,15 @@ def main():
         exp = pd.read_csv(EXPECTED)
         if len(ours) != len(exp):
             sys.exit(f"cell count differs: ours {len(ours)} expected {len(exp)}")
-        same = (ours["Final cell type"].values == exp["Final cell type"].values)
+        # CELESTA leaves a few cells with no final type (NaN in the package's expected output too)
+        same = (ours["Final cell type"].fillna("NA").values == exp["Final cell type"].fillna("NA").values)
         lines += ["CELESTA exact check: bundled reg009_A vs the package's saved expected output",
                   f"cells {len(ours)}; identical final cell type for {same.sum()} ({same.mean()*100:.2f}%)", "",
                   "ours (rows) vs expected (columns):",
                   pd.crosstab(ours["Final cell type"], exp["Final cell type"]).to_string(), ""]
         meta = pd.read_csv(out / "reg009_A_input_meta.csv")
         res = pd.DataFrame({"X": ours.X, "Y": ours.Y, "region": "reg009_A",
-                            "pred": ours["Final cell type"].map(TO_SCHURCH), "truth": meta["ClusterName"].values})
+                            "pred": ours["Final cell type"].fillna("Unknown").map(TO_SCHURCH), "truth": meta["ClusterName"].values})
         res = pd.concat([res, ours[[c for c in ours.columns if " - " in c]]], axis=1)
     else:
         if not args.skip_run:
@@ -158,7 +159,7 @@ def main():
             if len(meta) != len(d):
                 sys.exit(f"{region}: {len(d)} CELESTA rows vs {len(meta)} input rows")
             res.append(pd.DataFrame({"X": d.X, "Y": d.Y, "region": region,
-                                     "pred": d["Final cell type"].map(TO_SCHURCH), "truth": meta["ClusterName"].values})
+                                     "pred": d["Final cell type"].fillna("Unknown").map(TO_SCHURCH), "truth": meta["ClusterName"].values})
                        .join(d[[c for c in d.columns if " - " in c]]))
         res = pd.concat(res, ignore_index=True)
         lines += [f"CELESTA paper check: {res.region.nunique()} Schurch regions, {len(res)} cells",
@@ -185,6 +186,28 @@ def main():
               f"exact-label agreement {ri.agreement.mean():.3f}", "",
               "pooled per type:", pooled.round(3).to_string(index=False), "",
               "Mapping CELESTA -> Schurch: " + json.dumps({k: v for k, v in TO_SCHURCH.items() if k != v})]
+    # Second table: only cells whose Schurch label has a CELESTA counterpart (drops stroma, dirt,
+    # undefined, adipocytes, nerves, the "a / b" mixed classes and subtypes not in the prior matrix)
+    keep = res.truth.isin(types)
+    sub = res[keep]
+    dropped = res.truth[~keep].value_counts()
+    pooled_m = per_type(sub.truth.values, sub.pred.values, types)
+    pooled_m["class"] = pooled["class"].values
+    pooled_m.to_csv(out / "metrics_pooled_mapped_only.csv", index=False)
+    ri_m = sub.groupby("region").apply(lambda g: pd.Series({"rand": rand_score(g.truth, g.pred),
+                                                            "ari": adjusted_rand_score(g.truth, g.pred),
+                                                            "agreement": float((g.truth == g.pred).mean())}))
+    ri_m.to_csv(out / "rand_by_region_mapped_only.csv")
+    lines += ["", f"=== Mapped-only scoring: {keep.sum()} of {len(res)} cells ({keep.mean()*100:.1f}%) have a "
+                  "Schurch label with a CELESTA counterpart ==="]
+    for cls in ("major", "rare"):
+        p = pooled_m[(pooled_m["class"] == cls) & (pooled_m.n_truth > 0)]
+        lines.append(f"{cls} types (n={len(p)}): mean precision {p.precision.mean():.3f}, recall {p.recall.mean():.3f}, "
+                     f"F1 {p.f1.mean():.3f}")
+    lines += [f"Rand index per region: mean {ri_m.rand.mean():.3f} (ARI {ri_m.ari.mean():.3f}); "
+              f"exact-label agreement {ri_m.agreement.mean():.3f}", "",
+              "pooled per type (mapped-only):", pooled_m.round(3).to_string(index=False), "",
+              "excluded Schurch labels (cells):", dropped.to_string()]
     (out / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     figures(out, res, by_region if args.step == "paper" else None, f"CELESTA {args.step}")
