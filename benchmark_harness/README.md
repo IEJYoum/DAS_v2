@@ -50,7 +50,7 @@ for s in mibi_decidua vectra_colon vectra_pancreas codex_colon; do
 done && python3 usage.py
 ```
 Then, from `DAS_v2/benchmark_harness`: `python exporters/panm_gold_images.py` and
-`python -m harness run --label nimbus_rerun --adapter nimbus --bundle panm_gold_v1 --config '{"magnification": 20, "quantile": 0.9999, "test_time_aug": true}'`.
+`python -m harness run --label nimbus_rerun --adapter nimbus --bundle panm_gold_v1 --config '{"magnification": 20, "quantile": 0.999, "test_time_aug": true}'`.
 
 ## Code sync
 Lives in DAS_v2 (`git pull`). History before the move is from `cell_classification_repos/_harness`.
