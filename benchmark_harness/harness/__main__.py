@@ -36,6 +36,7 @@ def main():
     v.add_argument("--out", required=True)
     v.add_argument("--results")
     v.add_argument("--per-group", type=int, default=2)
+    v.add_argument("--markers-per-scene", type=int, default=0, help="0 = all; else the N with most positives")
     args = parser.parse_args()
     if args.command == "run":
         runner.run(args.label, args.adapter, args.bundle, json.loads(args.config))
@@ -49,7 +50,7 @@ def main():
         report.boxes(args.results, args.metric, args.title, args.unit)
     else:
         from harness import report
-        report.render(args.run, args.out, args.results, args.per_group)
+        report.render(args.run, args.out, args.results, args.per_group, args.markers_per_scene)
 
 
 if __name__ == "__main__":

@@ -177,7 +177,7 @@ def scene_images(out, stain, mask, truth, pred, scene, prefix, f1, method, span=
     return paths
 
 
-def render(run, out, results=None, per_group=2):
+def render(run, out, results=None, per_group=2, markers_per_scene=0):
     import tifffile
     run = Path(run)
     record = json.loads((run / "run.json").read_text(encoding="utf-8"))
@@ -200,7 +200,13 @@ def render(run, out, results=None, per_group=2):
         picks += [(group, r.scene_id, r.f1, top if i == 0 else "lowest") for i, r in enumerate(chosen)]
     index, n = [], 0
     for group, sid, f1, why in picks:
-        for marker, lab in labels[labels.scene_id == sid].groupby("marker"):
+        scene_labels = labels[labels.scene_id == sid]
+        markers = sorted(scene_labels.marker.unique())
+        if markers_per_scene and len(markers) > markers_per_scene:  # most truth-positive cells first
+            markers = list(scene_labels.groupby("marker").truth.sum().sort_values(ascending=False)
+                           .index[:markers_per_scene])
+        for marker in markers:
+            lab = scene_labels[scene_labels.marker == marker]
             img = images[(images.scene_id == sid) & (images.marker == marker)]
             if img.empty:
                 continue
@@ -220,9 +226,11 @@ def render(run, out, results=None, per_group=2):
                           "labelled_cells": len(lab), "files": ";".join(p.name for p in paths)})
             print(f"[render] {n:02d} {sid} {marker} ({why}, F1 {f1:.3f})", flush=True)
     pd.DataFrame(index).to_csv(out / "index.csv", index=False)
+    which = "all" if not markers_per_scene else f"the {markers_per_scene} with most truth-positive cells"
     (out / "README.txt").write_text(
         f"Visual debug for run {run.name} ({record['label']} on {record['bundle']}).\n"
-        f"Per marker set: the median-F1 scene and the lowest-F1 scene. index.csv lists every image.\n"
+        f"Markers per scene: {which}.\n"
+        f"Per group: the median-F1 scene ('higher' if only 2) and the lowest-F1 scene. index.csv lists every image.\n"
         f"Files per scene: 1 zoom (truth | prediction | correctness, 512 px crop at 2x), 2 stain only, "
         f"3 truth, 4 prediction, 5 correctness (native pixels).\n{LEGEND}\n{CORRECT_LEGEND}\n", encoding="utf-8")
     print("wrote", out)
