@@ -4,7 +4,9 @@ bars    from a `score` results folder (by_group.csv): precision / recall / F1 pe
         plus overall pooled and mean-of-sets bars, optional dashed line at the paper's value.
 render  DAS-standard overlays for chosen scenes of one run (conventions copied from
         DAS_v2/support/cell_reporting.py so the harness stays import-free of DAS):
-          1_<scene>__zoom__...png      truth | prediction | correctness, 512 px crop shown 2x
+        File names lead with the image-type number, then the scene index, so a name sort
+        groups each kind together (DAS convention):
+          1_<NN>_<group>_<pick>__<scene>__zoom__...png  truth | prediction | correctness, 512 px crop at 2x
           2_<scene>__composite_native  stain only
           3_<scene>__truth__native     truth outlines on dimmed stain
           4_<scene>__prediction_native prediction outlines on dimmed stain
@@ -159,17 +161,17 @@ def scene_images(out, stain, mask, truth, pred, scene, prefix, f1, method, span=
     panels = [overlay(zstain, zmask, up(truth), POS_NEG), overlay(zstain, zmask, up(pred), POS_NEG),
               overlay(np.zeros(zmask.shape, np.float32), zmask, up(correct), CORRECT)]
     head = f"{scene} | F1 {f1:.3f}"
-    paths = [titled(out / f"{prefix}1_{name}__zoom__y{y}_x{x}.png", np.concatenate(panels, 1),
+    paths = [titled(out / f"1_{prefix}{name}__zoom__y{y}_x{x}.png", np.concatenate(panels, 1),
                     f"{head} | LEFT TO RIGHT: TRUTH | PREDICTION ({method}) | CORRECTNESS",
                     f"{LEGEND} | {CORRECT_LEGEND}",
                     f"Crop x={x}, y={y} shown {k}x, picked for many labelled cells and class diversity."),
-             titled(out / f"{prefix}2_{name}__composite_native.png", overlay(stain, mask, np.full(mask.shape, -1), POS_NEG),
+             titled(out / f"2_{prefix}{name}__composite_native.png", overlay(stain, mask, np.full(mask.shape, -1), POS_NEG),
                     f"STAIN ONLY | {head}", "No outlines"),
-             titled(out / f"{prefix}3_{name}__truth_native.png", overlay(dim, mask, truth, POS_NEG),
+             titled(out / f"3_{prefix}{name}__truth_native.png", overlay(dim, mask, truth, POS_NEG),
                     f"TRUTH / REFERENCE: published labels | {head}", f"{LEGEND} | stain dimmed to {DIM:g}"),
-             titled(out / f"{prefix}4_{name}__prediction_native.png", overlay(dim, mask, pred, POS_NEG),
+             titled(out / f"4_{prefix}{name}__prediction_native.png", overlay(dim, mask, pred, POS_NEG),
                     f"PREDICTION: {method} | {head}", f"{LEGEND} | stain dimmed to {DIM:g}"),
-             titled(out / f"{prefix}5_{name}__correctness_native.png",
+             titled(out / f"5_{prefix}{name}__correctness_native.png",
                     overlay(np.zeros(mask.shape, np.float32), mask, correct, CORRECT),
                     f"CORRECTNESS: {method} vs published labels | {head}", CORRECT_LEGEND)]
     return paths
@@ -211,7 +213,7 @@ def render(run, out, results=None, per_group=2):
             pr = preds[(preds.scene_id == sid) & (preds.marker == marker)]
             truth = lookup(mask, lab.cell_id.values, lab.truth.values)
             pred = lookup(mask, pr.cell_id.values, pr.predicted.values)
-            prefix = f"{n:02d}_{token(group)}_{why}__"
+            prefix = f"{n:02d}_{token(group)}_{why}__"  # after the type number, as in DAS
             paths = scene_images(out, stain.astype(np.float32), mask, truth, pred, f"{sid} {marker}", prefix,
                                  f1, record["label"])
             index.append({"n": n, "group": group, "scene_id": sid, "marker": marker, "pick": why, "f1": round(f1, 4),
