@@ -1,0 +1,136 @@
+Tree model overhaul plan v0 (2026-11-20)
+==========================================================================
+Goal: replace the single 4-class CNN with a catalogue of small per-branch models that are
+chained into a class tree at forward time. The panel decides how deep each branch goes:
+  user maps panel markers -> superstains; the system sees which superstains exist and which
+  models are in the catalogue, and deterministically builds the deepest tree it can.
+No backwards compatibility. The current IMMUNE/EPI/UNCLASSIFIED/ARTIFACT model is archived
+and used only as a warm start for retraining (most likely for the level-1 model).
+
+--------------------------------------------------------------------------
+1. CONCEPTS
+--------------------------------------------------------------------------
+Superstain   A named input plane: pixel-wise max of the panel markers the user assigns to it
+             (today's build_superstains, generalized). Names come from one shared vocabulary
+             (NUC, IMMUNE, EPI, T, CD4, CD8, MYELOID, ENDOTHELIAL, ...), because models are
+             keyed by superstain names, not marker names. One marker may feed several
+             superstains (CD4 -> T and CD4 -> CD4). Leaving a marker out (bad stain) or not
+             defining a superstain (known-bad model) is how the user steers the tree.
+
+Model        One trained CNN for one branch. Catalogue entry records:
+               id, applies_to (the class path whose cells it splits; "*" for level 0),
+               inputs (ordered superstain names, e.g. [NUC, T, IMMUNE]),
+               classes (its output labels, e.g. [CD4, CD8] or [T, OTHER]),
+               checkpoint, training provenance (recipe, data, commit), metrics, status.
+             Whether a model has an OTHER class is a training decision, not an architecture
+             one: a CD4-vs-CD8 model trained on cells that are all CD4 or CD8 has no OTHER.
+
+Class path   A cell's label is the path of calls, e.g. CELL/IMMUNE/T/CD8. A model's
+             applies_to is a path, not a bare name, because OTHER can have children
+             (root OTHER -> ENDOTHELIAL / ACTIVE_FIB / OTHER).
+
+Panel config Per project (agent-friendly JSON, single source of truth), e.g.
+               {"superstains": {"NUC": ["DAPI"], "IMMUNE": ["CD45", "FoxP3"],
+                                "T": ["CD4", "CD8"], "CD4": ["CD4"], "CD8": ["CD8"]}}
+             Markers named here but absent from the images are an error (no silent drop).
+
+--------------------------------------------------------------------------
+2. RESOLUTION (deterministic)
+--------------------------------------------------------------------------
+available = superstains with at least one marker present in the scene.
+A model is applicable when all of its inputs are available.
+Build the tree from the top:
+  level 0: the artifact model (applies_to "*"): ARTIFACT vs CELL.
+  for each class path P produced so far: the applicable model with applies_to == P
+    becomes P's child; recurse on its output classes.
+  a path with no applicable model is a leaf.
+Choosing between applicable models with the same applies_to:
+  - if one model's inputs are a strict superset of every other's, it wins
+    (e.g. IMMUNE/EPI/OTHER over IMMUNE/OTHER when EPI is available, as in the example
+    "immune superstain but no epithelial stain -> immune-vs-other model");
+  - otherwise it is a catalogue error that names the conflicting models; the user
+    disables one in the catalogue (status: inactive). No scoring or "best match".
+Output of resolution, before any inference ("dry run"):
+  markers -> superstains -> chosen model per branch -> reachable leaf classes,
+  plus unused markers / undefined superstains / models skipped and why.
+  Text for agents + a tree diagram PNG for humans.
+
+Worked example (panel DAPI, CD45, CD3, CD8):
+  superstains NUC=[DAPI], IMMUNE=[CD45], T=[CD3, CD8], CD8=[CD8]
+  * -> artifact model          (NUC)                   ARTIFACT | CELL
+  CELL -> immune-vs-other      (NUC, IMMUNE)           IMMUNE | OTHER   (no EPI plane)
+  CELL/IMMUNE -> T-vs-other    (NUC, T, IMMUNE)        T | OTHER
+  CELL/IMMUNE/T -> needs CD4 and CD8 planes; no CD4 -> leaf at T.
+
+--------------------------------------------------------------------------
+3. FORWARD PASS
+--------------------------------------------------------------------------
+- Build all needed superstains once per scene (same scaling as today).
+- Run each chosen model on the whole scene (fully convolutional, so tissue context is kept and
+  there is no crop logic); aggregate to cells as today; keep a model's call only for cells
+  whose parent call routed them to it.
+- Hard gating with a configurable confidence floor per model: a cell below the floor at a
+  node keeps the parent's label (stops early). Recorded, not silent.
+- Cost: one pass per chosen model over the scene. Fine for depth 3-4; if it ever matters,
+  skip tiles containing no routed cells.
+- Output columns in the DAS _obs: level_0..level_k, leaf, path, per-level max probability,
+  model id per level, stop reason (leaf / below floor / no model). Old single "class" column
+  goes away.
+
+--------------------------------------------------------------------------
+4. TRAINING
+--------------------------------------------------------------------------
+- One recipe run per model. The recipe names applies_to, inputs, classes, and a label map.
+- Label maps: per dataset, source label -> class path (e.g. Pan-M "CD8+ T cell" ->
+  CELL/IMMUNE/LYMPHOID/T/CD8). A cell trains every model whose applies_to is a prefix of its
+  path and whose classes include the next step; cells outside applies_to get weight 0
+  (paint_targets already supports weighting). A cell labelled only "IMMUNE" trains level 1 only.
+- Inputs at training time come from the same superstain builder, so a model trained with
+  T=[CD3, CD8] works on a panel with T=[CD4, CD8]. Marker dropout inside a superstain
+  (existing marker_drop) makes that robust; that is the panel-agnostic part.
+- On completion the run registers itself in the catalogue (status: candidate); promotion to
+  active is a manual step after review of its report.
+
+--------------------------------------------------------------------------
+5. EVALUATION AND DEBUG (every stage emits text + images)
+--------------------------------------------------------------------------
+- Per model, conditional: scored on cells whose TRUE path is under applies_to (isolates the
+  model).
+- End to end, cascaded: scored on final leaf vs truth at each level (shows error
+  propagation); a parent error counts as wrong at every deeper level.
+- Debug images: today's numbered DAS set, one set per level (truth / prediction / correctness
+  outlines for that level's classes), plus the resolution tree PNG.
+- The benchmark harness consumes the leaf/path columns unchanged.
+
+--------------------------------------------------------------------------
+6. STORAGE
+--------------------------------------------------------------------------
+- Catalogue: CLASSIFIER_PROJECT/models/catalogue.json + checkpoints/<model_id>/ on the share.
+- Superstain vocabulary: CLASSIFIER/superstains.json (names + one-line meaning) in git.
+- Panel configs: per project folder (JSON). Label maps: CLASSIFIER_DATA alongside LABELS.csv.
+- Archive: current model + its config under CLASSIFIER_PROJECT/models/archive/legacy_4class/.
+
+--------------------------------------------------------------------------
+7. PHASES
+--------------------------------------------------------------------------
+P0  Catalogue + panel config + superstain vocabulary + resolver + dry-run report. Unit tests
+    with fake catalogues (superset rule, conflicts, missing markers, OTHER with children).
+P1  Cascade inference + output columns + per-level debug, using stub models.
+P2  Train level 1 (IMMUNE / EPI / OTHER, no ARTIFACT), warm start from the archived model.
+P3  Train IMMUNE -> MYELOID / LYMPHOID / OTHER on Pan-M CODEX (published labels prove the
+    mechanics; in-house curation later). First real two-level forward pass + both scorings.
+P4  Level 0 artifact model (needs ARTIFACT labels; in-house).
+P5  Deeper branches as data allows: LYMPHOID -> T / B / NK / plasma, T -> CD4 / CD8
+    (Pan-M CODEX has CD4 and CD8 T cells, so CD4 vs CD8 is reachable as level 4 under
+    CELL/IMMUNE/LYMPHOID/T), CELL/OTHER -> ENDOTHELIAL / ACTIVE_FIB / OTHER.
+
+--------------------------------------------------------------------------
+8. OPEN QUESTIONS
+--------------------------------------------------------------------------
+Q1  Superset rule for same-branch models (section 2): OK, or should every alternative be
+    disabled explicitly?
+Q2  Level 0 inputs: NUC only, or NUC + every available superstain? (Artifacts often show in
+    marker channels; a fixed input set keeps the model applicable on every panel.)
+Q3  Do LYMPHOID / MYELOID stay as their own level, or does IMMUNE split straight into
+    T / B / macrophage / ...? Affects which label maps and models we build first.
+Q4  Confidence floor default (stop early vs always descend).

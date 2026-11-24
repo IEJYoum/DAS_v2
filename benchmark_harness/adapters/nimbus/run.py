@@ -7,7 +7,8 @@ FoVs -> Nimbus.predict_fovs -> per-cell mean score per channel. Writes predictio
 Config (all optional):
   groups            list of bundle groups to run (default: all with images)
   magnification     {group: int} or int, dataset magnification (default 20; model is 10x)
-  quantile          normalisation quantile (paper: 0.9999; upstream default 0.999)
+  quantile          normalisation quantile (default 0.999 = upstream default, templates and tests;
+                    an earlier run used 0.9999, which scaled inputs down and cut recall)
   test_time_aug     bool (paper: true), batch_size, input_shape, threshold (0.5)
 """
 import argparse
@@ -55,7 +56,7 @@ def main():
         work.mkdir(parents=True, exist_ok=True)
         dataset = MultiplexDataset(fov_paths, segmentation_naming_convention=lambda fp: mask_of[Path(fp).name],
                                    include_channels=stems, suffix=suffix, magnification=mag, output_dir=str(work))
-        dataset.prepare_normalization_dict(quantile=c.get("quantile", 0.9999), n_subset=len(fov_paths), overwrite=True)
+        dataset.prepare_normalization_dict(quantile=c.get("quantile", 0.999), n_subset=len(fov_paths), overwrite=True)
         app = Nimbus(dataset=dataset, output_dir=str(work), save_predictions=False,
                      batch_size=c.get("batch_size", 4), test_time_aug=c.get("test_time_aug", True),
                      input_shape=c.get("input_shape", [1024, 1024]), device=c.get("device", "auto"))
