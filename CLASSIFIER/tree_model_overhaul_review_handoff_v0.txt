@@ -1,0 +1,420 @@
+Tree model overhaul: critical review and authoring handoff
+Reviewed 2026-11-24 against tree_model_overhaul_plan_v0.txt (2026-11-20)
+Updated 2026-11-24 with the user's explicit negative-label routing decision.
+==========================================================================
+
+Purpose
+-------
+Revise the design before implementing it. This review inspected the plan,
+current CLASSIFIER code, DAS I/O/recipe contracts and benchmark_harness.
+No models were trained, no external dataset contents were audited, and no
+production code was changed for this review. Source references below are
+repo-relative; function names identify the relevant integration points.
+
+Verdict
+-------
+The direction is good: independent branch checkpoints, semantic input groups,
+reference-based training eligibility, full image context, hard routing,
+partial annotation depth, and separate conditional/cascade evaluation fit the
+existing machinery. A new backbone or shared-encoder architecture is not
+required to establish this workflow.
+
+The plan is not implementation-ready. The user has now resolved the direction
+for residual populations: replace ambiguous OTHER labels with explicit scoped
+negative labels, and invoke children only for compatible parent populations.
+The remaining major gaps are encoding that routing contract, unsafe
+closed-world children, an unavailable mandatory root
+artifact gate, insufficient checkpoint/preprocessing contracts, and an assumed
+hierarchical benchmark interface that does not currently exist. Resolve these
+before freezing the P0 resolver schema.
+
+1. USER-RESOLVED DESIGN: explicit negative populations determine child routing
+---------------------------------------------------------------------------
+The user clarified the intended practical behavior after this review:
+  - An immune-focused panel may use CELL -> IMMUNE / NOT_IMMUNE.
+  - A panel with epithelial discrimination may use
+    CELL -> IMMUNE / EPI / NOT_IMMUNE_AND_NOT_EPI.
+  - A fibroblast/endothelial model trained on neither-immune-nor-epithelial
+    cells applies to NOT_IMMUNE_AND_NOT_EPI, not merely NOT_IMMUNE.
+  - The immune-only panel will ordinarily have nothing to do downstream with
+    NOT_IMMUNE. With no compatible child model, that population is simply a
+    valid leaf. Do not force an additional classification or call it an error.
+
+This is an accepted design direction, not an unresolved objection to allowing
+binary and three-class alternatives. Replace OTHER with negative population
+labels expressing which classes were ruled out. A literal universal OTHER
+path must not be the routing identity.
+
+Required implementation contract:
+  - Version stable positive class IDs and scoped negative-population IDs
+    separately from display names and superstain roles. Store their meaning
+    structurally, for example within=CELL, excluded=[IMMUNE,EPI], rather than
+    parsing the English label or relying on the spelling of an OTHER path.
+    Canonicalize exclusion sets so ordering does not create different labels.
+  - A node declares its required parent population, including exclusions. A
+    child is invoked only when the parent's output/accumulated decisions
+    establish that population. NOT_IMMUNE alone does not establish NOT_EPI.
+    Thus the fibroblast model above is not invoked by the immune-only root.
+  - Absent epithelial input is unknown epithelial status, not a negative
+    epithelial classification. An excluded/bad marker or confidence abstention
+    also supplies no negative population fact. Only an explicit supported model
+    decision establishes the corresponding negative label.
+  - Negation is relative to the node's parent population: under T, NOT_CD4 means
+    T AND NOT_CD4, not all non-CD4 cells in the original scene. Further residual
+    outputs retain their inherited scope and the additional exclusions.
+  - Use the same population identities for training eligibility, catalogue
+    resolution, inference routing, annotation export and evaluation. Preserve
+    the execution path as provenance, but do not use generic OTHER spellings
+    as a substitute for these semantics.
+  - Start with canonical declared population matches; do not require a general
+    Boolean theorem prover. If broader implication/subset matching is added,
+    specify and test it explicitly rather than guessing compatibility.
+
+Also make all worked examples use the same hierarchy. The forward example has
+CELL/IMMUNE/T, whereas the training example and P3/P5 use
+CELL/IMMUNE/LYMPHOID/T. Exact applies_to matching makes these incompatible.
+Compare execution paths by stable ID segments, not naive string startswith.
+Annotate the explicit negative population at a stopped leaf; unknown labels,
+abstention and unscored cells remain separate states, never negated classes.
+
+2. BLOCKER: a restricted two-class training set does not justify broad routing
+---------------------------------------------------------------------------
+Section 1 says a CD4-vs-CD8 model needs no residual output if its training examples
+are CD4/CD8. That is only sufficient if its deployment population is also
+restricted to those two supported classes. applies_to=T, by itself, does not
+establish that restriction. The model would force any other routed T population
+into one of its two outputs. A confidence floor cannot guarantee rejection of
+unsupported inputs; a softmax can make a confident wrong call.
+
+For each node, define its intended deployment population, supported output
+coverage, and policy for known-but-unmodelled descendants. Require either:
+  - a justified upstream restriction to the supported population;
+  - an appropriate scoped negative/residual output represented in training; or
+  - an explicitly evaluated rejection/partial-coverage policy.
+Record excluded truth classes and their counts. Never improve reported metrics
+by silently excluding routed populations that the node cannot represent.
+
+3. BLOCKER: mandatory artifact root contradicts the implementation phases
+------------------------------------------------------------------------
+Resolution currently starts unconditionally with an artifact model, but P2/P3
+are intended to demonstrate real cascades before that model is trained in P4.
+Specify how those runs start when the artifact model is missing or inactive.
+
+Recommendation: make artifact QC an explicit optional stage initially. A run
+without it can still start classification on the source mask-cell population,
+but must record artifact_qc=not_run rather than implying those cells passed QC.
+Define the initial eligible population and path convention independently of
+whether an artifact model ran. At the first gate, an abstaining cell has no
+classified parent to fall back to; define that output explicitly too.
+
+For Q2, a conventional CNN cannot accept 'NUC + every available superstain' as
+an arbitrary changing channel set. Use a fixed ordered signature per artifact
+checkpoint, optionally with explicit panel-compatible alternatives. A NUC-only
+model may be broadly applicable, but cannot be assumed to cover artifacts whose
+definition depends on marker-channel staining. Quantify false artifact rejection:
+a rejected cell otherwise disappears from every downstream lineage result.
+Known artifact reference labels also need an explicit policy during P2/P3,
+normally exclusion from lineage loss rather than inclusion in a lineage's
+negative/residual class without justification.
+
+4. BLOCKER: checkpoint compatibility and warm-start transfer need real contracts
+------------------------------------------------------------------------------
+A catalogue entry listing inputs/classes is not enough to reconstruct and use
+one of these models safely. Include schema/model-format version, architecture
+parameters, ordered input roles, ordered output concept IDs, taxonomy/task
+version, target micrometres/pixel, preprocessing rules, and checkpoint hash.
+Record the training panels' actual marker compositions and quality overrides.
+Cross-check the catalogue entry against the checkpoint instead of trusting two
+independently editable descriptions.
+
+Current constraints to address:
+  CLASSIFIER/model.py:PixelUNet/build_model accepts input_channels/class_count.
+  CLASSIFIER/project_controls.py hardcodes GROUPS and CLASSES.
+  CLASSIFIER/run.py:main requires NUC/IMMUNE/EPI input order.
+  CLASSIFIER/run_project.py:main requires the original four output classes.
+  CLASSIFIER/train.py:initialize_model requires exact parent model config,
+    class order, semantic input order and target physical resolution.
+  CLASSIFIER/report.py:composite unpacks exactly three planes; class_rgb uses
+    the fixed palette. Renaming the model config alone will not generalize it.
+
+P2 changes four outputs to three, so it cannot use today's exact warm start.
+Add a separate, audited transfer operation: copy compatible feature tensors;
+copy/reorder input channels or output rows only when semantic correspondence
+and tensor shapes justify it; explicitly initialize the remainder. Removing
+ARTIFACT is not just a checkpoint filename change. strict=False is not a
+transfer policy and does not fix mismatched tensor dimensions.
+
+'No backwards compatibility' is a deliberate scope change from the earlier
+future-experiments plan's preservation goal. Clarify that decision. Do not
+require the new runtime to support every old workflow, but retain immutable
+old weights/configuration and the reader needed to migrate them. Prefer a
+frozen legacy baseline for controlled comparisons rather than deleting the
+only reproducible reference while changing labels, inputs and orchestration.
+
+5. BLOCKER: hierarchical supervision must precede irreversible coarse mapping
+---------------------------------------------------------------------------
+The current LabelTable.read in CLASSIFIER/source_inputs.py calls
+support/label_conventions.py:resolve_unet_labels. That resolver deliberately
+collapses myeloid/T/macrophage labels to IMMUNE and endothelial/fibroblast labels
+to UNCLASSIFIED. Its override targets are also limited to the old schema.
+Feeding its result into a new path mapper loses the subtype information first.
+
+Separate identity-preserving source-table loading from task-aware label
+resolution. Reuse existing triplet/CSV readers, label selection precedence,
+alias normalization, agreement helper and audits; do not create a second family
+of dataset readers. Preserve raw labels and source annotation depth.
+
+Define projection to each node before painting targets. A known leaf provides
+ancestor targets; a label ending at an ancestor provides no next-step target.
+Missing, outside-parent, insufficient-depth and conflicting labels get separate
+audit reasons and no child loss. If enabled, trusted lineage labels can also
+supervise the CELL side of artifact QC; 'IMMUNE trains level 1 only' is too
+imprecise to specify the general rule.
+
+Define agreement at the available annotation depth. For example, a fine CD8
+annotation and a coarse IMMUNE annotation can support the immune ancestor
+without inventing a CD8 agreement label. Two conflicting fine labels must not
+become a confident fine label merely because both collapse to IMMUNE. Keep the
+existing explicit/preferred label precedence and artifact-override behavior
+where applicable, with task-level policy and provenance made explicit.
+
+paint_targets already provides -1/zero-weight ignored cells and inverse-area
+weights. It does not itself derive hierarchical eligibility. Filter/rebuild
+child training-window indices after projection: windows containing only
+outside-parent cells or incomplete eligible cells must not produce empty-loss
+batches. Recompute class weights from unique eligible TRAIN cells only. The
+current cell_weighted_loss intentionally raises on a zero-supervision batch.
+
+6. IMPORTANT: semantic marker substitution is a hypothesis, not a guarantee
+-------------------------------------------------------------------------
+Section 4 currently claims T=[CD3,CD8] will work as T=[CD4,CD8] because existing
+marker dropout makes it robust. We have not established that. Semantic labels
+do not ensure the proteins have equivalent expression coverage, staining
+patterns or normalization behavior. Dropout only removes available training
+signals; it does not teach arbitrary unseen replacements.
+
+Revise that statement to an empirical transfer goal. Validate alternate marker
+compositions on held-out panels and record which substitutions have evidence.
+Retain the agreed myeloid and lymphoid inputs for the first immune-major model;
+Q3 should not be reopened as an undecided user preference without a concrete
+reason to change the already agreed design.
+
+The 'same scaling as today' phrase also needs precision. Current data.py:
+  normalize_marker scales background-subtracted positive pixels by a per-ROI
+    percentile and clips to [0,1]; it is not display gamma normalization.
+  build_superstains silently uses whichever group members exist.
+  augment_scene samples marker subsets independently for each semantic group.
+All three matter for this overhaul.
+
+In particular:
+  - Apply exclusions before required-source validation and normalization of
+    model inputs. An explicitly excluded constant/bad stain must not abort
+    normalization or reappear in a max-composite.
+  - Keep manual exclusion reasons and scope; an available background-only
+    CSF1R image is not automatically a usable macrophage signal.
+  - When a marker feeds several planes, define whether dropout/exclusion is
+    shared across its uses. Independent current group dropout can produce
+    cross-plane combinations that the actual panel builder would never create.
+  - Build normalized planes once only for models with compatible preprocessing
+    and physical grids. Otherwise group/cache by the actual preprocessing
+    signature, or explicitly restrict one tree bundle to one shared policy.
+    Include source identity, exclusions, marker mapping, scaling and grid in
+    cache validity. Do not reuse task-specific target maps across nodes.
+
+7. IMPORTANT: resolver needs project-level control and a reproducible lock
+-----------------------------------------------------------------------
+The strict-superset rule is deterministic but not evidence that a model is
+better. Different supported output partitions are allowed under the user's
+negative-label design; their populations must remain explicit and distinct.
+More inputs alone do not justify an unvalidated panel composition.
+
+For Q1: permit explicit project/run model pins and exclusions first. If keeping
+the superset preference as a convenience, apply it among active models with
+compatible parent/task and preprocessing contracts and explicit output-population
+definitions. Do not require the binary and three-class roots to have identical
+partitions; route their distinct negative outputs correctly. Equal inputs with multiple
+versions still need a pin or conflict error; never use file order or 'latest'.
+
+Do not require globally deactivating a catalogue model to avoid it in one
+project. Add per-project model exclusions/branch stop controls and optional
+model_id overrides. Withholding an otherwise useful superstain to disable a
+bad model conflates stain quality with model quality and can disable unrelated
+branches that use that plane.
+
+Reconcile the availability rules. 'Every mapped missing marker is an error'
+and 'a group is available if at least one member is present' currently imply
+different missing-input policies. Distinguish excluded, undefined, optional
+and required sources; default to strict validation of the effective mapping.
+Decide whether all selected scenes must resolve one graph or each scene may
+resolve a different graph. Report per-scene variation before inference.
+
+Save a resolved run lock containing the complete chosen graph, taxonomy/task
+versions, model IDs and checkpoint hashes, ordered input roles, concrete source
+mapping/exclusions, preprocessing, thresholds and catalogue revision. A later
+catalogue promotion must not change replay of an already resolved experiment.
+Validate unique IDs/classes, malformed paths, unreachable nodes, conflicting
+models and invalid graph structure before launching a model.
+
+8. BLOCKER: evaluation and benchmark integration are additional work
+------------------------------------------------------------------
+The claim that the benchmark harness consumes leaf/path columns unchanged is
+not true of the inspected shared scorer:
+  benchmark_harness/harness/bundle.py validates binary truth 0/1 keyed by
+    (scene_id, cell_id, marker).
+  benchmark_harness/harness/score.py:load_run expects a predicted marker call
+    with those same keys; score computes binary positive-class metrics.
+  benchmark_harness/README.md documents task_family=marker_positivity.
+Some separate reproduction scripts perform cell-type/hierarchy comparisons;
+that is not an existing general hierarchical bundle/scorer contract.
+
+Add an explicit multiclass/hierarchical task family and adapter contract, or
+identify and test a real existing integration that this review has missed.
+Keep truth out of the inference adapter, as the current benchmark does. Score
+conditional nodes and the cascade from the same immutable predictions.
+
+Specify denominators and projection rules, not just 'truth at each level':
+  - a wrong parent contributes downstream errors where fine truth is known;
+  - an abstention or missing-input stop remains in coverage accounting;
+  - coarse-only truth evaluates known ancestors, not invented descendants;
+  - cells whose masks are absent remain unscored, not negative classes;
+  - unsupported classes are reported, not silently dropped from eligibility.
+Report per-node/per-class precision/recall, ancestor-level agreement, selective
+coverage and full-cascade performance. Use semantic tasks/concepts rather than
+assuming depth k means the same biological classification on every branch.
+
+For Q4, use an explicit unset/disabled floor until a per-model operating point
+has been selected on validation data. Do not pick a universal numeric softmax
+floor for binary and multiclass nodes. Report risk versus coverage. Per-node
+max softmax probabilities are conditional scores, not calibrated certainty or
+a final leaf confidence; store the full class vector as well as its maximum.
+
+9. BLOCKER FOR P3: name training-safe data, label assets and global splits
+-----------------------------------------------------------------------
+'Pan-M CODEX published labels' needs an exact source asset, label field, cell
+ID namespace, phenotype inventory and approved training partition. Published
+annotations are a supervision source, not proof of independent biological
+accuracy or of every proposed child class being supported.
+
+The inspected panm_gold exporter/bundles contain marker-positivity proofread
+labels and explicitly say evaluation-only. benchmark_harness/README.md places
+them under CLASSIFIER_DATA/eval_only and says never train on them. This does
+not prove that no other Pan-M training source exists; it means the plan must
+identify it and not accidentally use the existing gold benchmark for P3.
+
+Inventory per-class counts and fine/coarse label availability before promising
+the P3/P5 sequence. Version label maps and global ROI/patient/batch allocations.
+Every node and inherited warm-start model must disclose training/validation/
+test provenance. A child cannot train on the parent's held-out test ROIs and
+still support an untouched end-to-end cascade test. Include pretraining and
+prior operating-point selection in that provenance where known.
+
+10. IMPORTANT: retain bounded memory, source identity and DAS operability
+------------------------------------------------------------------------
+'Whole scene' must retain today's bounded-memory tiled forward pass, padding,
+overlap blending, original-mask cell aggregation and one-ROI-at-a-time storage.
+Reuse infer.predict_scene/aggregate_cells and streaming.py. A fully convolutional
+network does not imply that a whole slide fits in one tensor. Cost depends on
+the number and width of reachable models, not depth alone. Skip a node entirely
+when no cells route to it; tile skipping can remain an optimization after parity.
+
+Keep at most the necessary current-model probability maps in memory, aggregate
+to cell tables, and release them. Cache reusable marker planes rather than a
+separate paired image dataset per node. Use the same source mask and grid across
+nodes initially; model-specific resampling must map results back explicitly.
+Join by dataset/source scene plus mask ID, never row order or cell ID alone.
+
+level_0..level_k are useful transport columns, but insufficient as the primary
+human-facing annotation contract. Persist named task columns such as major
+class, immune major class and immune subclass. Branch depths differ and an
+optional quality gate must not renumber their meanings. Define padding/nulls,
+model-not-run versus confidence-abstained states, and export collision policy.
+Preserve source annotations and unrelated obs columns; write new runs/exports
+through the existing identity-preserving machinery.
+
+Required integration surfaces:
+  - controler.startup_cell_classifier, home.classifier in
+    support/recipe_actions_v0.py, and support/recipe_v0.py: one shared execution
+    path for GUI, agents and headless replay; dry-run collection has no effects.
+  - support/io_adapter.py and shared_utils.checkChange/flexMenu: existing routed
+    prompts, progress and cancellation. No second menu/recipe framework.
+  - support/project_config.py and support/path_compat.py: catalogue/panel paths
+    stored in project config and resolved in the existing project/OS context.
+    A panel JSON can hold semantic mappings without replacing project config.
+  - support/ingest_sources.py, image_sources.py, image_conventions.py: existing
+    file discovery, grid reads, marker naming and segmentation pairing.
+    image_conventions already has PanelMarkerRecord.remove,
+    read_panel_marker_records and build_panel_feature_plan. Reconcile these
+    panel/source exclusions with classifier-specific semantic overrides; do
+    not add another workbook reader or filename grammar.
+  - support/cell_reporting.py: common metrics, palettes, native/crop/preview
+    boundary rendering. Generalize node legends instead of copying renderers.
+  - support/filesystem_utils.py and CLASSIFIER/outputs.py: unique run folders,
+    network-aware atomic publication and explicit running/failed/complete states.
+
+Catalogue registration/promotion needs a concrete standalone and GUI/recipe
+operation. Register only completed, verified immutable checkpoints; make
+candidate/active states distinct. Atomic JSON replacement alone does not
+prevent concurrent read-modify-write jobs losing each other's registrations:
+serialize updates, use conflict detection, or publish per-model manifests and
+derive the index. Record promotion changes and pin runs to snapshots.
+
+Recommended revised implementation order
+---------------------------------------
+P0a  Encode the agreed scoped negative-population/task contracts and compatible
+     child routing; settle unsupported-class coverage, optional QC bootstrap,
+     panel exclusion scopes and split policy.
+P0b  Implement schema validation, catalogue resolution/overrides and saved locks;
+     make dry run available through the ordinary recipe and GUI path.
+P1   Generalize task-aware labels/inputs/outputs and demonstrate a two-node
+     synthetic cascade with real tiny checkpoints, training loss and scorer.
+     Stub models alone do not expose current hardcoded class/input assumptions.
+P2   Implement explicit legacy transfer; compare the new broad-lineage model
+     with the frozen legacy baseline on a fixed, training-safe allocation.
+P3   Train the agreed myeloid/lymphoid immune child on identified training data;
+     run conditional and end-to-end evaluation using the new scorer contract.
+P4   Add the optional artifact stage once its labels, inputs and operating point
+     are supported; quantify downstream losses from false artifact rejection.
+P5   Add deeper branches only when deployment coverage, signals and labels
+     support them. Shared encoders/other engines and functional-state models
+     are not prerequisites; functional states remain out of this work's scope.
+
+Acceptance cases to add to the plan
+----------------------------------
+  1. The binary root's NOT_IMMUNE is a valid leaf when no compatible child exists;
+     it does not invoke a fibroblast model requiring NOT_IMMUNE_AND_NOT_EPI.
+     The three-class root's explicit NOT_IMMUNE_AND_NOT_EPI does invoke that model
+     when its required inputs exist. Missing EPI input and abstention must not
+     manufacture a NOT_EPI decision. Equivalent exclusion sets canonicalize to
+     the same population; nested negative labels retain their parent scope.
+  2. A T-other truth case cannot silently become CD4/CD8 or vanish from reporting.
+  3. P2/P3 run without a trained artifact gate and record that QC was not run.
+  4. A coarse IMMUNE label trains known ancestors but no invented subtype.
+  5. Outside-parent/partial-tile labels produce zero child gradient; valid cells
+     retain whole image context; empty-child batches are handled explicitly.
+  6. Missing mapped sources fail; excluded bad CSF1R is never normalized or used;
+     removing a required group's last member produces a named stop/error.
+  7. Same-name inputs with incompatible preprocessing/taxonomy/checkpoints fail.
+  8. Equal-signature competing versions require a pin; project exclusions do
+     not change another project's catalogue choices.
+  9. Catalogue edits after resolution cannot change a pinned run's execution.
+ 10. Legacy 4->3 output transfer records exactly which tensors/rows were reused.
+ 11. Child conditional results and cascade results expose a deliberate parent
+     misroute; abstentions stay in coverage; coarse truth is not overscored.
+ 12. Whole-ROI tile inference/aggregation matches a small untiled reference;
+     sparse IDs and absent-mask observations retain explicit coverage accounting.
+ 13. GUI record -> headless replay resolves the same graph, inputs and outputs;
+     cancellation/failed checkpoint publication never registers an active model.
+ 14. Concurrent registrations do not lose entries; failed registrations remain
+     distinguishable from completed candidates.
+ 15. Existing marker-positivity benchmark tasks still work after adding the
+     separate hierarchical task family.
+
+Requested next deliverable from authoring agent
+----------------------------------------------
+A revised plan encoding the user's explicit negative-label decision, one internally consistent
+worked tree, a small sample task/catalogue/panel/run-lock schema, a named
+training-safe dataset/split source, and explicit scorer/GUI integration work.
+Keep the initial implementation small: one root task and one immune child,
+optional artifact QC, separate checkpoints, manual project overrides and no
+new engine architecture. Do not start by implementing the entire catalogue
+and every biological branch before these contracts have executable tests.
