@@ -1,0 +1,280 @@
+Tree model overhaul plan v0.1 (2026-11-24; floor removed and CD4/CD8 residual added same day)
+==========================================================================
+Supersedes tree_model_overhaul_plan_v0.txt. Folds in the user's decisions of 2026-11-20/24
+and tree_model_overhaul_review_handoff_v0.txt (the "review"). Section numbers of the review
+are cited as [R1]..[R10].
+
+Goal
+----
+Replace the single 4-class CNN with a catalogue of small per-branch models. At forward time
+the system sees which superstains the panel provides and which models exist, and chains
+them into the most granular tree it can. Nothing in the architecture mandates a tree shape:
+different users may train IMMUNE -> MYELOID / LYMPHOID, or go from CELL straight to T-cell
+subtypes. The architecture only routes cells to the right model.
+
+Decided (user)
+--------------
+D1  Users map panel markers to superstains (and may leave bad stains out, or not define a
+    superstain whose model is known to be bad). The system resolves superstains -> models
+    deterministically. No "best match" scoring.
+D2  Residual classes are explicit scoped negatives, never a generic OTHER [R1]:
+    CELL -> IMMUNE / NOT_IMMUNE (immune-only panel), or
+    CELL -> IMMUNE / EPI / NOT_IMMUNE_NOT_EPI (panel with epithelial markers).
+    A child is invoked only for the population it was trained on: a fibroblast/endothelial
+    model for NOT_IMMUNE_NOT_EPI is never invoked by NOT_IMMUNE. A population with no
+    compatible child is a valid leaf, not an error.
+D3  Whether a model has a residual output is a training decision. A positive population is
+    the same population whichever model produced it: LYMPHOID from a panel with B-cell
+    stains and LYMPHOID from one without both route to whatever LYMPHOID child the
+    superstains allow (B vs T, or CD4 vs CD8).
+D4  Artifact QC comes later, as an optional binary gate in front of the tree. Models never
+    know about it; the architecture routes. Until then runs record artifact_qc = not_run [R3].
+D5  First immune child: IMMUNE -> MYELOID / LYMPHOID (B-cell stains are often missing).
+D6  Arbitrary depth.
+D7  No confidence floor. Every routed cell gets a label at every node it reaches, residual
+    classes included. Uncertainty is carried forward as data (per-node probability vectors
+    and the path product), for downstream users to threshold as they see fit.
+D10 Models that split a population should normally have a scoped residual output. Example:
+    CD4 / CD8 / NOT_CD4_NOT_CD8 trained on a panel that HAS B-cell stains, with the B
+    superstain deliberately not used as an input: the B labels supply real "neither" truth
+    for cells the model sees only through its CD4 and CD8 planes.
+D8  No backwards compatibility of the runtime. The legacy 4-class model and config are
+    archived read-only and kept as (a) a warm-start source and (b) a frozen baseline for
+    comparisons [R4].
+D9  Operating mode first: agent-curated. The user says "here's a dataset, train models,
+    forward pass them"; the agent proposes superstains, trains, writes the catalogue entries
+    and the panel config, runs the cascade, and logs every manual judgement it made so the
+    recurring ones can become rules (section 8). The resolver is still deterministic; the
+    agent writes its inputs and pins.
+
+--------------------------------------------------------------------------
+1. CONCEPTS
+--------------------------------------------------------------------------
+Population   What a cell has been established to be. Stable ID, stored structurally:
+               positive:  {"id": "LYMPHOID", "within": "IMMUNE"}
+               negative:  {"id": "NOT_IMMUNE_NOT_EPI", "within": "CELL", "excludes": ["EPI", "IMMUNE"]}
+             Exclusion sets are canonicalised (sorted) so order never makes a new population.
+             Negation is relative to the parent: under T, NOT_CD4 means T and not CD4 [R1].
+             Missing input and excluded markers never establish a negative.
+
+Concept map  Reference ancestry of positive populations, used for label projection and
+             coverage checks, NOT for routing (routing is exact-ID [R1]). Built from the
+             existing CLASSIFIER_DATA/LABELS.csv columns major / immune_major / immune_sub /
+             immune_leaf (already filled for panm_codex_colon: e.g. CD8+ T -> IMMUNE,
+             lymphoid, T, CD8). Versioned.
+
+Superstain   Named input plane = pixel-wise max of the effective markers mapped to it, after
+             exclusions [R6]. Names from one vocabulary (NUC, IMMUNE, EPI, MYELOID, LYMPHOID,
+             T, CD4, CD8, ...). A marker may feed several superstains; dropout/exclusion of a
+             marker is shared across all its uses so training never sees a combination the
+             panel builder could not make [R6].
+
+Model        One checkpoint for one branch. Catalogue entry (section 5) records the
+             population it applies to, its ordered inputs, ordered output populations, its
+             training population and coverage, preprocessing, architecture, hash, provenance.
+
+Task column  Each model writes one named DAS column (task), e.g. major, immune_major,
+             immune_sub, t_subset, matching the LABELS.csv columns where possible. Depth
+             numbers are not used as meaning, because branches differ in depth [R10].
+
+--------------------------------------------------------------------------
+2. ONE WORKED TREE (used in every example and test)
+--------------------------------------------------------------------------
+Panel: DAPI, CD45, PanCK, CD68, CD163, CD3, CD8, CD31.
+Project superstains:
+  NUC=[DAPI]  IMMUNE=[CD45]  EPI=[PanCK]  MYELOID=[CD68, CD163]  LYMPHOID=[CD3, CD8]
+  T=[CD3]  CD8=[CD8]
+Catalogue (hypothetical, all active):
+  root_ie3     applies_to CELL      inputs NUC, IMMUNE, EPI            -> IMMUNE | EPI | NOT_IMMUNE_NOT_EPI
+  root_i2      applies_to CELL      inputs NUC, IMMUNE                 -> IMMUNE | NOT_IMMUNE
+  imm_ml       applies_to IMMUNE    inputs NUC, IMMUNE, MYELOID, LYMPHOID -> MYELOID | LYMPHOID
+  lym_bt       applies_to LYMPHOID  inputs NUC, LYMPHOID, B, T         -> B | T
+  lym_48       applies_to LYMPHOID  inputs NUC, LYMPHOID, CD4, CD8     -> CD4_T | CD8_T | NOT_CD4_NOT_CD8
+  stro_ef      applies_to NOT_IMMUNE_NOT_EPI inputs NUC, ENDO, FIB     -> ENDOTHELIAL | ACTIVE_FIB | NOT_ENDO_NOT_FIB
+Resolution:
+  CELL      -> root_ie3 (superset of root_i2's inputs; both compatible)
+  IMMUNE    -> imm_ml
+  LYMPHOID  -> no model applicable (lym_bt needs B; lym_48 needs CD4) -> leaf
+  MYELOID   -> leaf (no model)
+  EPI       -> leaf
+  NOT_IMMUNE_NOT_EPI -> stro_ef needs ENDO and FIB; ENDO=[CD31] not defined in this project,
+               FIB missing -> leaf
+Same panel without PanCK: root_i2 is chosen; NOT_IMMUNE is a leaf and stro_ef is never
+considered (it applies to NOT_IMMUNE_NOT_EPI, which root_i2 cannot establish).
+If the panel had CD4 too: lym_48 applies to LYMPHOID; it was trained on lymphoid cells
+including B / NK / plasma (from a panel with B stains, B superstain not an input), which it
+labels NOT_CD4_NOT_CD8. A model trained without such a residual would be flagged by the
+coverage check (section 3.4).
+
+--------------------------------------------------------------------------
+3. RESOLUTION
+--------------------------------------------------------------------------
+Inputs: catalogue snapshot, project panel config (superstains, pins, exclusions,
+acknowledgements), scene marker inventory.
+1. Effective markers per superstain = mapped markers minus project exclusions. A mapped
+   marker missing from the images is an error; an excluded marker is never read or
+   normalised [R6, R7]. A superstain with no effective markers is unavailable (named).
+2. A model is applicable when every input superstain is available and its preprocessing
+   contract matches the run's (grid, um/px, scaling) [R6, R7].
+3. From CELL down: for each established population P, the candidates are applicable models
+   with applies_to == P, minus project exclusions. Choice:
+     project pin for P                      -> that model (error if not applicable)
+     else one candidate                     -> it
+     else one whose inputs are a strict superset of every other's -> it (convenience)
+     else                                   -> error naming the candidates (pin one)
+   Equal-input versions always need a pin; never file order or "latest" [R7].
+4. Coverage: a model whose training population is narrower than the population it is
+   attached to (e.g. lym_48 on LYMPHOID) is reported with the unrepresented descendants.
+   It runs only if the project acknowledges it ("allow_partial": ["lym_48"]); metrics then
+   report the forced calls on unrepresented truth separately, never drop them [R2].
+5. One graph per run: every scene must resolve to the same graph. Scenes that differ are
+   listed in the dry run and the run is split, not silently mixed.
+6. Dry run (no side effects): markers -> superstains -> chosen model per population ->
+   reachable leaves, plus unused markers, unavailable superstains, rejected models with
+   reasons, coverage warnings. Text for agents + tree PNG for humans.
+7. Run lock: the resolved graph with model IDs + checkpoint hashes, ordered inputs, concrete
+   marker mapping and exclusions, preprocessing, concept-map and catalogue versions.
+   Inference reads only the lock, so later catalogue promotions never change a replay [R7].
+
+--------------------------------------------------------------------------
+4. FORWARD PASS
+--------------------------------------------------------------------------
+- Optional artifact gate first (not built yet): when present, cells it rejects stop there;
+  when absent the run records artifact_qc = not_run for every cell.
+- Build each needed superstain once per scene with the run's preprocessing; reuse
+  infer.predict_scene (tiled, overlap-blended, bounded memory) and aggregate_cells with the
+  original mask [R10]. Skip a model entirely when no cell routes to it. One model's
+  probability maps in memory at a time; aggregate to the cell table, then release.
+- Routing: a cell goes to the child for exactly the population it was established in.
+  Hard argmax at each node; full probability vector stored.
+- No floor: every routed cell gets the argmax label. Stored per node: full probability
+  vector; per cell: path probability (product of the chosen class's probability along the
+  path) so users can filter or propagate uncertainty themselves.
+- Output columns per cell (joined by dataset/scene + mask ID, never row order [R10]):
+  one column per task (major, immune_major, ...), population (deepest established), path
+  (model IDs + populations), per-node probability vectors, stop reason
+  (leaf | no applicable model | not routed), artifact_qc.
+  Existing obs columns are preserved; collisions are an error unless overwrite is set.
+
+--------------------------------------------------------------------------
+5. SCHEMAS (sketch; JSON, validated on load)
+--------------------------------------------------------------------------
+Catalogue entry (one manifest per model; index derived, so concurrent registrations
+cannot lose each other [R10]):
+  {"schema": 1, "model_id": "imm_ml_v1", "status": "candidate|active|inactive",
+   "task": "immune_major", "applies_to": "IMMUNE",
+   "inputs": ["NUC", "IMMUNE", "MYELOID", "LYMPHOID"],
+   "outputs": [{"id": "MYELOID", "within": "IMMUNE"}, {"id": "LYMPHOID", "within": "IMMUNE"}],
+   "training_population": {"applies_to": "IMMUNE", "truth_concepts": ["MYELOID", "LYMPHOID"],
+                           "excluded_truth": {"IMMUNE (coarse only)": 0}},
+   "training_panels": [{"source": "panm_codex_colon", "superstains": {"MYELOID": ["CD68", ...]}}],
+   "preprocessing": {"target_um_per_px": 0.5, "scaling": "per-ROI percentile 99.5, clip"},
+   "architecture": {"model": "PixelUNet", "base_width": 16, "depth": 3},
+   "checkpoint": {"path": "...", "sha256": "..."},
+   "provenance": {"recipe": "...", "run": "...", "commit": "...", "split": "...", "warm_start": null},
+   "metrics": {"conditional": "...path to scores..."}}
+  On load the checkpoint is opened and its stored config cross-checked against the entry [R4].
+Panel config (per project, in the project folder; referenced from project config):
+  {"superstains": {"NUC": ["DAPI"], ...}, "exclude_markers": {"CSF1R": "background only"},
+   "pin": {"CELL": "root_ie3_v1"}, "exclude_models": [], "allow_partial": []}
+Run lock: as section 3.7.
+
+--------------------------------------------------------------------------
+6. TRAINING
+--------------------------------------------------------------------------
+- One recipe run per model; the recipe names task, applies_to, inputs, outputs, label
+  source, split.
+- Labels: load identity-preserving source labels (converted stores already keep
+  source_label), then project through the concept map per model [R5]. Today's
+  resolve_unet_labels collapses subtypes to IMMUNE/UNCLASSIFIED first; the tree path must
+  not go through it. A cell supervises a model when its truth lies under applies_to and is
+  known to the depth of the model's outputs; else zero weight with an audit reason
+  (outside parent | too coarse | conflicting | unknown). A coarse IMMUNE label supervises
+  the root only.
+- Training windows are rebuilt per model so no batch is all zero-weight; class weights are
+  recomputed from eligible TRAIN cells only [R5].
+- Superstain composition at training is a hypothesis about transfer, not a guarantee:
+  substitutions (T=[CD3,CD8] trained, T=[CD4,CD8] deployed) are validated on held-out
+  panels and recorded per model before being relied on [R6].
+- Warm start from the legacy model is an explicit audited transfer: copy encoder tensors,
+  copy input/output rows only where the meaning matches, initialise the rest, log which
+  tensors were reused [R4]. strict=False is not a transfer policy.
+- On completion a run registers itself as candidate (only after the checkpoint is
+  published and verified); promotion to active is manual, after its report.
+
+--------------------------------------------------------------------------
+7. EVALUATION AND DEBUG (text + images at every stage)
+--------------------------------------------------------------------------
+- Conditional per model: cells whose TRUE population is the model's applies_to.
+- Cascade: final calls vs truth at every known ancestor; a wrong parent counts as wrong
+  below it; "no applicable model" stops stay in the coverage denominator; coarse truth is scored
+  only at its own depth; unrepresented truth under a partial-coverage model is reported as
+  its own row [R8].
+- Same immutable predictions feed both.
+- Benchmark harness: add a celltype_hierarchy task family (bundle labels = deepest known
+  concept per cell; adapter output = per-cell population + path; scorer = conditional +
+  cascade). The existing marker_positivity family stays unchanged [R8].
+- Debug: the numbered DAS image set per task column (truth / prediction / correctness
+  outlines in that task's classes), the resolved tree PNG, per-node confusion matrices.
+
+--------------------------------------------------------------------------
+8. AGENT-CURATED MODE AND THE PATH TO RULES (D9)
+--------------------------------------------------------------------------
+For "check out this dataset, train some models, forward pass them" the agent:
+  1. inventories the dataset: markers, label vocabulary and counts per concept, splits;
+  2. proposes the superstain mapping and which branches the labels can support, and asks
+     the user about anything ambiguous (labels are the user's call);
+  3. trains one model per branch via recipes, writes catalogue manifests (candidate);
+  4. writes the project panel config + pins, runs the dry run, locks, forward-passes;
+  5. scores (conditional + cascade) and renders debug;
+  6. appends to CLASSIFIER/tree_assembly_notes.txt every manual judgement it made
+     (mapping chosen, coverage acknowledged, pin chosen, label projection decision), tagged
+     "candidate rule" when it recurs. Those notes drive what becomes automatic.
+
+--------------------------------------------------------------------------
+9. DATA FOR THE FIRST MODELS
+--------------------------------------------------------------------------
+- Pan-M CODEX colon training store: CLASSIFIER_DATA/converted/panm_codex_colon (donors
+  B009, B011; 16 FoVs; source_label kept; LABELS.csv gives immune_major myeloid/lymphoid:
+  lymphoid = B 6,908, CD4 T 29,016, CD8 T 47,774, CD7+ 1,210 (lymphoid, T/NK unresolved),
+  NK 1,899, plasma 24,742; myeloid = DC 9,200, macrophage 33,343, neutrophil 5,844).
+  Split: reuse the pilot allocation (pilot_panm_codex_colon_train_test; B011B FoVs are its
+  test split and also hold the Pan-M gold FoVs). Verify the allocation before P3.
+- Never train on CLASSIFIER_DATA/eval_only (Pan-M gold, PhenoBIC ext-val) [R9].
+- In-house stores for the root (IMMUNE / EPI / NOT_IMMUNE_NOT_EPI): existing E-run data;
+  their subtype labels need curation later.
+
+--------------------------------------------------------------------------
+10. PHASES (small first; executable tests before breadth)
+--------------------------------------------------------------------------
+P0  Population/concept schema, catalogue manifests, panel config, resolver (pins,
+    exclusions, superset convenience, coverage check), run lock, dry run through the normal
+    recipe/GUI path. Tests: acceptance cases 1, 6-9 below. Archive the legacy model.
+P1  Generalise train/infer/report for arbitrary ordered inputs and outputs (remove the
+    hard-coded NUC/IMMUNE/EPI and 4-class assumptions in run.py, run_project.py,
+    project_controls.py, report.py, train.py [R4]); task-aware label projection; synthetic
+    two-node cascade with tiny real checkpoints; hierarchical scorer. Cases 2-5, 10-12.
+P2  Root model IMMUNE / EPI / NOT_IMMUNE_NOT_EPI on in-house data (audited warm start),
+    compared with the frozen legacy baseline on a fixed allocation.
+P3  IMMUNE -> MYELOID / LYMPHOID on Pan-M CODEX; first real two-node forward pass on the
+    Pan-M test split and one in-house dataset; conditional + cascade scores; notes.
+P4  Agent-curated expansions as data allows (LYMPHOID -> B / T or CD4 / CD8,
+    NOT_IMMUNE_NOT_EPI -> ENDOTHELIAL / ACTIVE_FIB / residual); notes -> first rules.
+P5  Optional artifact gate (needs labels; quantify cells lost downstream to false rejects).
+
+Acceptance cases (from [R], kept): 1 scoped negatives route correctly and missing EPI
+never makes NOT_EPI; 2 T-other truth never silently becomes CD4/CD8 or vanishes;
+3 runs without the artifact gate record not_run; 4 coarse IMMUNE trains no subtype;
+5 outside-parent cells give zero child gradient, no empty batches; 6 missing mapped marker
+fails, excluded marker never read, last-member removal is a named stop; 7 incompatible
+preprocessing/checkpoint fails; 8 equal-signature versions need a pin, project exclusions
+stay local; 9 catalogue edits never change a locked run; 10 legacy transfer logs reused
+tensors; 11 conditional vs cascade expose a deliberate misroute; 12 tiled inference matches
+an untiled reference; 13 GUI record -> headless replay gives the same graph; 14 concurrent
+registrations don't lose entries; 15 marker_positivity benchmark still works.
+
+--------------------------------------------------------------------------
+11. OPEN (with defaults)
+--------------------------------------------------------------------------
+O1  Partial-coverage models need an explicit project acknowledgement to run (default yes).
+O2  One graph per run; differing scenes split the run (default yes).
